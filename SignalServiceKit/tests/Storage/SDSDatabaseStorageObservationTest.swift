@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -10,14 +10,14 @@ class MockObserver {
     var updateCount: UInt = 0
     var externalUpdateCount: UInt = 0
     var resetCount: UInt = 0
-    var lastChange: SDSDatabaseStorageChange?
+    var lastChange: DatabaseChanges?
 
     private var expectation: XCTestExpectation?
 
     init() {
         AssertIsOnMainThread()
 
-        SDSDatabaseStorage.shared.add(databaseStorageObserver: self)
+        SDSDatabaseStorage.shared.appendDatabaseChangeDelegate(self)
     }
 
     func set(expectation: XCTestExpectation) {
@@ -36,26 +36,23 @@ class MockObserver {
 
 // MARK: -
 
-extension MockObserver: SDSDatabaseStorageObserver {
+extension MockObserver: DatabaseChangeDelegate {
 
-    func databaseStorageDidUpdate(change: SDSDatabaseStorageChange) {
+    func databaseChangesWillUpdate() {
+        AssertIsOnMainThread()
+    }
+
+    func databaseChangesDidUpdate(databaseChanges: DatabaseChanges) {
         AssertIsOnMainThread()
 
-        // YDB sometimes posts empty updates when no write has
-        // occurred.  The tests are simpler and more meaningful
-        // if we ignore these.
-        guard !change.isEmptyYDBChange else {
-            return
-        }
-
         updateCount += 1
-        lastChange = change
+        lastChange = databaseChanges
 
         expectation?.fulfill()
         expectation = nil
     }
 
-    func databaseStorageDidUpdateExternally() {
+    func databaseChangesDidUpdateExternally() {
         AssertIsOnMainThread()
 
         Logger.verbose("")
@@ -66,7 +63,7 @@ extension MockObserver: SDSDatabaseStorageObserver {
         expectation = nil
     }
 
-    func databaseStorageDidReset() {
+    func databaseChangesDidReset() {
         AssertIsOnMainThread()
 
         Logger.verbose("")
@@ -82,17 +79,11 @@ extension MockObserver: SDSDatabaseStorageObserver {
 
 class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
 
-    // MARK: - Dependencies
-
-    var storageCoordinator: StorageCoordinator {
-        return SSKEnvironment.shared.storageCoordinator
-    }
-
     // MARK: - GRDB
 
     func testGRDBSyncWrite() {
 
-        try! databaseStorage.grdbStorage.setupUIDatabase()
+        try! databaseStorage.grdbStorage.setupDatabaseChangeObserver()
 
         // Make sure there's already at least one thread.
         var someThread: TSThread?
@@ -144,12 +135,7 @@ class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
             XCTAssertTrue(lastChange.didUpdate(keyValueStore: keyValueStore))
             // Note: For GRDB, didUpdate(keyValueStore:) currently returns true
             //       if any key value stores was updated.
-            if self.storageCoordinator.state == .YDB ||
-                self.storageCoordinator.state == .ydbTests {
-                XCTAssertFalse(lastChange.didUpdate(keyValueStore: otherKeyValueStore))
-            } else {
-                XCTAssertTrue(lastChange.didUpdate(keyValueStore: otherKeyValueStore))
-            }
+            XCTAssertTrue(lastChange.didUpdate(keyValueStore: otherKeyValueStore))
         }
         mockObserver.clear()
 
@@ -208,8 +194,12 @@ class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
             XCTAssertTrue(lastChange.didUpdateInteractionsOrThreads)
             XCTAssertFalse(lastChange.didUpdateModel(collection: OWSDevice.collection()))
             XCTAssertFalse(lastChange.didUpdateModel(collection: "invalid collection name"))
-            XCTAssertFalse(lastChange.didUpdate(keyValueStore: keyValueStore))
-            XCTAssertFalse(lastChange.didUpdate(keyValueStore: otherKeyValueStore))
+
+            // Note: For GRDB, didUpdate(keyValueStore:) currently returns true
+            //       if any key value stores was updated.
+            XCTAssertTrue(lastChange.didUpdate(keyValueStore: keyValueStore))
+            XCTAssertTrue(lastChange.didUpdate(keyValueStore: otherKeyValueStore))
+
             XCTAssertTrue(lastChange.didUpdate(interaction: lastMessage!))
             XCTAssertFalse(lastChange.didUpdate(interaction: unsavedMessage!))
         }
@@ -218,7 +208,7 @@ class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
         mockObserver.set(expectation: self.expectation(description: "Database Storage Observer"))
 
         self.write { transaction in
-            self.databaseStorage.touch(thread: someThread!, transaction: transaction)
+            self.databaseStorage.touch(thread: someThread!, shouldReindex: true, transaction: transaction)
             Logger.verbose("Touch complete")
         }
 
@@ -244,7 +234,7 @@ class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
         mockObserver.set(expectation: self.expectation(description: "Database Storage Observer"))
 
         self.write { transaction in
-            self.databaseStorage.touch(interaction: lastMessage!, transaction: transaction)
+            self.databaseStorage.touch(interaction: lastMessage!, shouldReindex: true, transaction: transaction)
             Logger.verbose("Touch complete")
         }
 
@@ -256,7 +246,7 @@ class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
         XCTAssertNotNil(mockObserver.lastChange)
         if let lastChange = mockObserver.lastChange {
             XCTAssertTrue(lastChange.didUpdateInteractions)
-            XCTAssertFalse(lastChange.didUpdateThreads)
+            XCTAssertTrue(lastChange.didUpdateThreads)
             XCTAssertTrue(lastChange.didUpdateInteractionsOrThreads)
             XCTAssertFalse(lastChange.didUpdateModel(collection: OWSDevice.collection()))
             XCTAssertFalse(lastChange.didUpdateModel(collection: "invalid collection name"))
@@ -270,7 +260,7 @@ class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
 
     func testGRDBAsyncWrite() {
 
-        try! databaseStorage.grdbStorage.setupUIDatabase()
+        try! databaseStorage.grdbStorage.setupDatabaseChangeObserver()
 
         // Make sure there's already at least one thread.
         var someThread: TSThread?
@@ -322,12 +312,7 @@ class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
             XCTAssertTrue(lastChange.didUpdate(keyValueStore: keyValueStore))
             // Note: For GRDB, didUpdate(keyValueStore:) currently returns true
             //       if any key value stores was updated.
-            if self.storageCoordinator.state == .YDB ||
-                self.storageCoordinator.state == .ydbTests {
-                XCTAssertFalse(lastChange.didUpdate(keyValueStore: otherKeyValueStore))
-            } else {
-                XCTAssertTrue(lastChange.didUpdate(keyValueStore: otherKeyValueStore))
-            }
+            XCTAssertTrue(lastChange.didUpdate(keyValueStore: otherKeyValueStore))
         }
         mockObserver.clear()
 
@@ -386,8 +371,12 @@ class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
             XCTAssertTrue(lastChange.didUpdateInteractionsOrThreads)
             XCTAssertFalse(lastChange.didUpdateModel(collection: OWSDevice.collection()))
             XCTAssertFalse(lastChange.didUpdateModel(collection: "invalid collection name"))
-            XCTAssertFalse(lastChange.didUpdate(keyValueStore: keyValueStore))
-            XCTAssertFalse(lastChange.didUpdate(keyValueStore: otherKeyValueStore))
+
+            // Note: For GRDB, didUpdate(keyValueStore:) currently returns true
+            //       if any key value stores was updated.
+            XCTAssertTrue(lastChange.didUpdate(keyValueStore: keyValueStore))
+            XCTAssertTrue(lastChange.didUpdate(keyValueStore: otherKeyValueStore))
+
             XCTAssertTrue(lastChange.didUpdate(interaction: lastMessage!))
             XCTAssertFalse(lastChange.didUpdate(interaction: unsavedMessage!))
         }
@@ -396,7 +385,7 @@ class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
         mockObserver.set(expectation: self.expectation(description: "Database Storage Observer"))
 
         self.asyncWrite { transaction in
-            self.databaseStorage.touch(thread: someThread!, transaction: transaction)
+            self.databaseStorage.touch(thread: someThread!, shouldReindex: true, transaction: transaction)
             Logger.verbose("Touch complete")
         }
 
@@ -422,7 +411,7 @@ class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
         mockObserver.set(expectation: self.expectation(description: "Database Storage Observer"))
 
         self.asyncWrite { transaction in
-            self.databaseStorage.touch(interaction: lastMessage!, transaction: transaction)
+            self.databaseStorage.touch(interaction: lastMessage!, shouldReindex: true, transaction: transaction)
             Logger.verbose("Touch complete")
         }
 
@@ -434,7 +423,7 @@ class SDSDatabaseStorageObservationTest: SSKBaseTestSwift {
         XCTAssertNotNil(mockObserver.lastChange)
         if let lastChange = mockObserver.lastChange {
             XCTAssertTrue(lastChange.didUpdateInteractions)
-            XCTAssertFalse(lastChange.didUpdateThreads)
+            XCTAssertTrue(lastChange.didUpdateThreads)
             XCTAssertTrue(lastChange.didUpdateInteractionsOrThreads)
             XCTAssertFalse(lastChange.didUpdateModel(collection: OWSDevice.collection()))
             XCTAssertFalse(lastChange.didUpdateModel(collection: "invalid collection name"))

@@ -1,12 +1,32 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import <AxolotlKit/SignedPreKeyStore.h>
+#import <Foundation/Foundation.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface SSKSignedPreKeyStore : NSObject <SignedPreKeyStore>
+@class SDSAnyReadTransaction;
+@class SDSAnyWriteTransaction;
+@class SignedPreKeyRecord;
+
+@interface SSKSignedPreKeyStore : NSObject
+
+#pragma mark - SignedPreKeyStore transactions
+
+- (nullable SignedPreKeyRecord *)loadSignedPreKey:(int)signedPreKeyId transaction:(SDSAnyReadTransaction *)transaction;
+
+- (NSArray<SignedPreKeyRecord *> *)loadSignedPreKeysWithTransaction:(SDSAnyReadTransaction *)transaction;
+
+- (void)storeSignedPreKey:(int)signedPreKeyId
+       signedPreKeyRecord:(SignedPreKeyRecord *)signedPreKeyRecord
+              transaction:(SDSAnyWriteTransaction *)transaction;
+
+- (BOOL)containsSignedPreKey:(int)signedPreKeyId transaction:(SDSAnyReadTransaction *)transaction;
+
+- (void)removeSignedPreKey:(int)signedPreKeyId transaction:(SDSAnyWriteTransaction *)transaction;
+
+#pragma mark -
 
 - (SignedPreKeyRecord *)generateRandomSignedRecord;
 
@@ -28,6 +48,10 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark - Debugging
 
 - (void)logSignedPreKeyReport;
+
+#if TESTABLE_BUILD
+- (void)removeAll:(SDSAnyWriteTransaction *)transaction;
+#endif
 
 @end
 

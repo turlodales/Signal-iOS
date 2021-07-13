@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "UIView+OWS.h"
@@ -109,7 +109,17 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
     return [self autoAlignAxis:ALAxisHorizontal toSameAxisOfView:self.superview];
 }
 
-- (void)autoPinWidthToWidthOfView:(UIView *)view
+- (void)autoPinEdgesToEdgesOfView:(UIView *)view
+{
+    OWSAssertDebug(view);
+
+    [self autoPinEdge:ALEdgeLeft toEdge:ALEdgeLeft ofView:view];
+    [self autoPinEdge:ALEdgeRight toEdge:ALEdgeRight ofView:view];
+    [self autoPinEdge:ALEdgeTop toEdge:ALEdgeTop ofView:view];
+    [self autoPinEdge:ALEdgeBottom toEdge:ALEdgeBottom ofView:view];
+}
+
+- (void)autoPinHorizontalEdgesToEdgesOfView:(UIView *)view
 {
     OWSAssertDebug(view);
 
@@ -117,7 +127,7 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
     [self autoPinEdge:ALEdgeRight toEdge:ALEdgeRight ofView:view];
 }
 
-- (void)autoPinHeightToHeightOfView:(UIView *)view
+- (void)autoPinVerticalEdgesToEdgesOfView:(UIView *)view
 {
     OWSAssertDebug(view);
 
@@ -400,9 +410,14 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
     return constraint;
 }
 
-- (NSTextAlignment)textAlignmentUnnatural
++ (NSTextAlignment)textAlignmentUnnatural
 {
     return (CurrentAppContext().isRTL ? NSTextAlignmentLeft : NSTextAlignmentRight);
+}
+
+- (NSTextAlignment)textAlignmentUnnatural
+{
+    return UIView.textAlignmentUnnatural;
 }
 
 - (void)setHLayoutMargins:(CGFloat)value
@@ -423,35 +438,6 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
         [self autoPinEdge:ALEdgeLeading toEdge:ALEdgeLeading ofView:view],
         [self autoPinEdge:ALEdgeTrailing toEdge:ALEdgeTrailing ofView:view],
     ];
-}
-
-#pragma mark - Containers
-
-+ (UIView *)containerView
-{
-    UIView *view = [UIView new];
-    // Leading and trailing anchors honor layout margins.
-    // When using a UIView as a "div" to structure layout, we don't want it to have margins.
-    view.layoutMargins = UIEdgeInsetsZero;
-    return view;
-}
-
-+ (UIView *)verticalStackWithSubviews:(NSArray<UIView *> *)subviews spacing:(int)spacing
-{
-    UIView *container = [UIView containerView];
-    UIView *_Nullable lastSubview = nil;
-    for (UIView *subview in subviews) {
-        [container addSubview:subview];
-        [subview autoPinWidthToSuperview];
-        if (lastSubview) {
-            [subview autoPinEdge:ALEdgeTop toEdge:ALEdgeBottom ofView:lastSubview withOffset:spacing];
-        } else {
-            [subview autoPinEdgeToSuperviewEdge:ALEdgeTop];
-        }
-        lastSubview = subview;
-    }
-    [lastSubview autoPinEdgeToSuperviewEdge:ALEdgeBottom];
-    return container;
 }
 
 #pragma mark - Debugging
@@ -508,17 +494,27 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
         OWSLogVerbose(@"%@ ----", label);
     });
 
-    UIResponder *responder = self;
+    [self traverseViewHierarchyUpwardWithVisitor:^(UIView *subview) { [subview logFrameLaterWithLabel:@"\t"]; }];
+}
+
+- (void)traverseViewHierarchyUpwardWithVisitor:(UIViewVisitorBlock)visitor
+{
+    OWSAssertIsOnMainThread();
+    OWSAssertDebug(visitor);
+
+    visitor(self);
+
+    UIResponder *_Nullable responder = self;
     while (responder) {
         if ([responder isKindOfClass:[UIView class]]) {
             UIView *view = (UIView *)responder;
-            [view logFrameLaterWithLabel:@"\t"];
+            visitor(view);
         }
         responder = responder.nextResponder;
     }
 }
 
-- (void)traverseViewHierarchyWithVisitor:(UIViewVisitorBlock)visitor
+- (void)traverseViewHierarchyDownwardWithVisitor:(UIViewVisitorBlock)visitor
 {
     OWSAssertIsOnMainThread();
     OWSAssertDebug(visitor);
@@ -526,7 +522,7 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
     visitor(self);
 
     for (UIView *subview in self.subviews) {
-        [subview traverseViewHierarchyWithVisitor:visitor];
+        [subview traverseViewHierarchyDownwardWithVisitor:visitor];
     }
 }
 
@@ -555,6 +551,20 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value)
 #pragma mark -
 
 @implementation UIStackView (OWS)
+
+- (void)addHairlineWithColor:(UIColor *)color
+{
+    [self insertHairlineWithColor:color atIndex:self.arrangedSubviews.count];
+}
+
+- (void)insertHairlineWithColor:(UIColor *)color atIndex:(NSInteger)index
+{
+    UIView *hairlineView = [[UIView alloc] init];
+    hairlineView.backgroundColor = color;
+    [hairlineView autoSetDimension:ALDimensionHeight toSize:1];
+
+    [self insertArrangedSubview:hairlineView atIndex:index];
+}
 
 - (UIView *)addBackgroundViewWithBackgroundColor:(UIColor *)backgroundColor
 {

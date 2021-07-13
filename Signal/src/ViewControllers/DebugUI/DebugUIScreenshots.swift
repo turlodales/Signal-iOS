@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -7,26 +7,6 @@ import Foundation
 #if DEBUG
 
 public extension DebugUIScreenshots {
-
-    // MARK: - Dependencies
-
-    static var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    static var profileManager: OWSProfileManager {
-        return OWSProfileManager.shared()
-    }
-
-    static var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    static var tsAccountManager: TSAccountManager {
-        return .sharedInstance()
-    }
-
-    // MARK: -
 
     @objc
     class func deleteAllThreads() {
@@ -113,7 +93,7 @@ public extension DebugUIScreenshots {
                                               transaction: transaction)
             let address5 = self.ensureAccount(phoneNumber: "+13213214305",
                                               uuidString: "123e4567-e89b-12d3-a456-426655440005",
-                                              //givenName: "Ali Smith",
+                                              // givenName: "Ali Smith",
                                               givenName: NSLocalizedString("SCREENSHOT_NAME_CONTACT_FIVE",
                                                                            comment: "This is a contact's name. Please keep the nick name Ali and change the last name to a popular lastname in your language. This will have male profile photo."),
                                               familyName: "",
@@ -535,9 +515,9 @@ public extension DebugUIScreenshots {
             }
 
             // Group other file types -- in focus
-            //Shows how to send and receive attached images.
+            // Shows how to send and receive attached images.
             if true {
-                //Shows how to send and receive attached images.
+                // Shows how to send and receive attached images.
                 // This file lives on disk in Signal/test/Assets.
                 // In the project it is in Signal/Signal/test/Assets.
                 // You'll need to temporarily add it to the Signal target
@@ -711,6 +691,7 @@ public extension DebugUIScreenshots {
                 //                    RPRecentCallTypeOutgoingMissed,
                 //                };
                 let callRecord = TSCall(callType: .incomingMissed,
+                                        offerType: .audio,
                                         thread: thread,
                                         sentAtTimestamp: Date.ows_millisecondTimestamp())
                 callRecord.anyInsert(transaction: transaction)
@@ -885,13 +866,16 @@ public extension DebugUIScreenshots {
             owsFailDebug("Couldn't find sticker info in pack.")
             return nil
         }
-        guard let filePath = StickerManager.filepathForInstalledSticker(stickerInfo: stickerInfo) else {
-            owsFailDebug("Couldn't find sticker file path.")
+        guard let stickerMetadata = StickerManager.installedStickerMetadataWithSneakyTransaction(stickerInfo: stickerInfo) else {
+            owsFailDebug("Couldn't find sticker metadata.")
             return nil
         }
         do {
-            let stickerData = try Data(contentsOf: URL(fileURLWithPath: filePath))
-            let stickerDraft = MessageStickerDraft(info: stickerInfo, stickerData: stickerData)
+            let stickerData = try Data(contentsOf: stickerMetadata.stickerDataUrl)
+            let stickerDraft = MessageStickerDraft(info: stickerInfo,
+                                                   stickerData: stickerData,
+                                                   stickerType: stickerMetadata.stickerType,
+                                                   emoji: stickerMetadata.firstEmoji)
             let messageSticker = try MessageSticker.buildValidatedMessageSticker(fromDraft: stickerDraft,
                                                                                  transaction: transaction)
             return messageSticker
@@ -911,7 +895,7 @@ public extension DebugUIScreenshots {
 //        self.profileManager.setProfileGivenName(givenName,
 //                                                familyName: familyName,
 //                                                for: address,
-//                                                wasLocallyInitiated: false,
+//                                                userProfileWriter: .debugging,
 //                                                transaction: transaction)
 //
 //        let contact = self.buildContact(address: address, fullName: givenName, transaction: transaction)
@@ -942,7 +926,7 @@ public extension DebugUIScreenshots {
         self.profileManager.setProfileGivenName(givenName,
                                                 familyName: familyName,
                                                 for: address,
-                                                wasLocallyInitiated: false,
+                                                userProfileWriter: .debugging,
                                                 transaction: transaction)
 
         if let avatarBundleFilename = avatarBundleFilename {
@@ -952,17 +936,16 @@ public extension DebugUIScreenshots {
             let avatarFileName = UUID().uuidString + ".jpg"
             try! avatarData.write(to: URL(fileURLWithPath: OWSUserProfile.profileAvatarFilepath(withFilename: avatarFileName)), options: .atomic)
             let profile = OWSUserProfile.getOrBuild(for: address, transaction: transaction)
-            profile.update(withAvatarFileName: avatarFileName, transaction: transaction)
+            profile.update(avatarFileName: avatarFileName,
+                           userProfileWriter: .debugging,
+                           transaction: transaction)
         }
         let contact = self.buildContact(address: address, fullName: givenName, transaction: transaction)
-        if let existingAccount = contactsManager.fetchSignalAccount(for: address, transaction: transaction) {
-            // Do nothing.
-            existingAccount.contact = contact
-            existingAccount.anyOverwritingUpdate(transaction: transaction)
+        if let existingAccount = contactsManagerImpl.fetchSignalAccount(for: address, transaction: transaction) {
+            existingAccount.updateWithContact(contact, transaction: transaction)
         } else {
             let newAccount = SignalAccount(contact: contact,
                                            contactAvatarHash: nil,
-                                           contactAvatarJpegData: nil,
                                            multipleAccountLabelText: "",
                                            recipientPhoneNumber: phoneNumber,
                                            recipientUUID: uuidString)
@@ -983,11 +966,18 @@ public extension DebugUIScreenshots {
             avatarData = nil
         }
 
-        OWSProfileManager.updateLocalProfilePromise(
-            profileGivenName: givenName,
-            profileFamilyName: familyName,
-            profileAvatarData: avatarData
-        )
+        firstly(on: .global()) {
+            OWSProfileManager.updateLocalProfilePromise(
+                profileGivenName: givenName,
+                profileFamilyName: familyName,
+                profileBio: nil,
+                profileBioEmoji: nil,
+                profileAvatarData: avatarData,
+                userProfileWriter: .debugging
+            ).asVoid()
+        }.catch(on: .global()) { error in
+            owsFailDebug("Error: \(error)")
+        }
     }
 
     private class func buildContact(address: SignalServiceAddress, fullName: String, transaction: SDSAnyWriteTransaction) -> Contact {
@@ -1009,12 +999,12 @@ public extension DebugUIScreenshots {
                        cnContactId: nil,
                        firstName: nil,
                        lastName: nil,
+                       nickname: nil,
                        fullName: fullName,
                        userTextPhoneNumbers: userTextPhoneNumbers,
                        phoneNumberNameMap: phoneNumberNameMap,
                        parsedPhoneNumbers: parsedPhoneNumbers,
-                       emails: [],
-                       imageDataToHash: nil)
+                       emails: [])
     }
 
     private class func buildOutgoingMessage(thread: TSThread,

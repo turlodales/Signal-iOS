@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -34,15 +34,18 @@ protocol RecipientPickerDelegate: AnyObject {
                          showInvalidRecipientAlert recipient: PickedRecipient)
 
     func recipientPicker(_ recipientPickerViewController: RecipientPickerViewController,
-                         accessoryMessageForRecipient recipient: PickedRecipient) -> String?
+                         accessoryMessageForRecipient recipient: PickedRecipient,
+                         transaction: SDSAnyReadTransaction) -> String?
 
     @objc
     optional func recipientPicker(_ recipientPickerViewController: RecipientPickerViewController,
-                                  accessoryViewForRecipient recipient: PickedRecipient) -> UIView?
+                                  accessoryViewForRecipient recipient: PickedRecipient,
+                                  transaction: SDSAnyReadTransaction) -> ContactCellAccessoryView?
 
     @objc
     optional func recipientPicker(_ recipientPickerViewController: RecipientPickerViewController,
-                                  attributedSubtitleForRecipient recipient: PickedRecipient) -> NSAttributedString?
+                                  attributedSubtitleForRecipient recipient: PickedRecipient,
+                                  transaction: SDSAnyReadTransaction) -> NSAttributedString?
 
     func recipientPickerTableViewWillBeginDragging(_ recipientPickerViewController: RecipientPickerViewController)
 
@@ -99,6 +102,12 @@ public class PickedRecipient: NSObject {
 extension RecipientPickerViewController {
 
     func tryToSelectRecipient(_ recipient: PickedRecipient) {
+        if let address = recipient.address,
+            address.isLocalAddress,
+            shouldHideLocalRecipient {
+            return
+        }
+
         guard let delegate = delegate else { return }
         guard showUseAsyncSelection else {
             AssertIsOnMainThread()
@@ -134,7 +143,7 @@ extension RecipientPickerViewController {
                 AssertIsOnMainThread()
                 owsFailDebug("Error: \(error)")
                 modalActivityIndicator.dismiss {
-                    delegate.recipientPicker(self, showInvalidRecipientAlert: recipient)
+                    OWSActionSheets.showErrorAlert(message: error.localizedDescription)
                 }
             }
         }
@@ -162,37 +171,54 @@ extension RecipientPickerViewController {
     }
 
     func item(forRecipient recipient: PickedRecipient) -> OWSTableItem {
+
         switch recipient.identifier {
         case .address(let address):
             return OWSTableItem(
                 customCellBlock: { [weak self] in
-                    let cell = ContactTableViewCell()
-                    guard let self = self else { return cell }
-
-                    if let delegate = self.delegate {
-                        if delegate.recipientPicker(self, canSelectRecipient: recipient) != .canBeSelected {
-                            cell.selectionStyle = .none
-                        }
-
-                        if let accessoryView = delegate.recipientPicker?(self, accessoryViewForRecipient: recipient) {
-                            cell.ows_setAccessoryView(accessoryView)
-                        } else {
-                            let accessoryMessage = delegate.recipientPicker(self, accessoryMessageForRecipient: recipient)
-                            cell.setAccessoryMessage(accessoryMessage)
-                        }
-
-                        if let attributedSubtitle = delegate.recipientPicker?(self, attributedSubtitleForRecipient: recipient) {
-                            cell.setAttributedSubtitle(attributedSubtitle)
-                        }
+                    guard let self = self else { return UITableViewCell() }
+                    let tableView = self.tableView
+                    guard let cell = tableView.dequeueReusableCell(withIdentifier: ContactTableViewCell.reuseIdentifier) as? ContactTableViewCell else {
+                        owsFailDebug("cell was unexpectedly nil")
+                        return UITableViewCell()
                     }
 
-                    cell.configure(withRecipientAddress: address)
+                    if let delegate = self.delegate,
+                       delegate.recipientPicker(self, canSelectRecipient: recipient) != .canBeSelected {
+                        cell.selectionStyle = .none
+                    }
+
+                    Self.databaseStorage.read { transaction in
+                        let configuration = ContactCellConfiguration.build(address: address,
+                                                                           localUserDisplayMode: .noteToSelf,
+                                                                           transaction: transaction)
+
+                        if let delegate = self.delegate {
+                            if let accessoryView = delegate.recipientPicker?(self,
+                                                                             accessoryViewForRecipient: recipient,
+                                                                             transaction: transaction) {
+                                configuration.accessoryView = accessoryView
+                            } else {
+                                let accessoryMessage = delegate.recipientPicker(self,
+                                                                                accessoryMessageForRecipient: recipient,
+                                                                                transaction: transaction)
+                                configuration.accessoryMessage = accessoryMessage
+                            }
+
+                            if let attributedSubtitle = delegate.recipientPicker?(self,
+                                                                                  attributedSubtitleForRecipient: recipient,
+                                                                                  transaction: transaction) {
+                                configuration.attributedSubtitle = attributedSubtitle
+                            }
+                        }
+
+                        cell.configure(configuration: configuration, transaction: transaction)
+                    }
 
                     self.delegate?.recipientPicker(self, willRenderRecipient: recipient)
 
                     return cell
                 },
-                customRowHeight: UITableView.automaticDimension,
                 actionBlock: { [weak self] in
                     self?.tryToSelectRecipient(recipient)
                 }
@@ -208,14 +234,17 @@ extension RecipientPickerViewController {
                             cell.selectionStyle = .none
                         }
 
-                        cell.accessoryMessage = delegate.recipientPicker(self, accessoryMessageForRecipient: recipient)
+                        cell.accessoryMessage = Self.databaseStorage.read { transaction in
+                            delegate.recipientPicker(self,
+                                                     accessoryMessageForRecipient: recipient,
+                                                     transaction: transaction)
+                        }
                     }
 
                     cell.configure(thread: groupThread)
 
                     return cell
                 },
-                customRowHeight: UITableView.automaticDimension,
                 actionBlock: { [weak self] in
                     self?.tryToSelectRecipient(recipient)
                 }

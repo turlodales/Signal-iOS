@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -10,24 +10,6 @@ class ConversationConfigurationSyncOperation: OWSOperation {
 
     enum ColorSyncOperationError: Error {
         case assertionError(description: String)
-    }
-
-    // MARK: - Dependencies
-
-    private var messageSenderJobQueue: MessageSenderJobQueue {
-        return SSKEnvironment.shared.messageSenderJobQueue
-    }
-
-    private var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    private var syncManager: SyncManagerProtocol {
-        return SSKEnvironment.shared.syncManager
-    }
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
     }
 
     // MARK: -
@@ -51,13 +33,12 @@ class ConversationConfigurationSyncOperation: OWSOperation {
     }
 
     private func reportAssertionError(description: String) {
-        let error: NSError = ColorSyncOperationError.assertionError(description: description) as NSError
-        error.isRetryable = false
+        let error = ColorSyncOperationError.assertionError(description: description).asRetryableError
         self.reportError(error)
     }
 
     private func sync(contactThread: TSContactThread) {
-        guard let signalAccount: SignalAccount = self.contactsManager.fetchSignalAccount(for: contactThread.contactAddress) else {
+        guard let signalAccount: SignalAccount = self.contactsManagerImpl.fetchSignalAccount(for: contactThread.contactAddress) else {
             reportAssertionError(description: "unable to find signalAccount")
             return
         }

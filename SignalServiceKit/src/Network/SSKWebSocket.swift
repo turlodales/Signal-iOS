@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -80,7 +80,7 @@ public protocol SSKWebSocket {
 }
 
 @objc
-public protocol SSKWebSocketDelegate: class {
+public protocol SSKWebSocketDelegate: AnyObject {
     func websocketDidConnect(socket: SSKWebSocket)
 
     func websocketDidDisconnect(socket: SSKWebSocket, error: Error?)
@@ -198,7 +198,7 @@ extension SSKWebSocketImpl: WebSocketDelegate {
 
     func websocketDidReceiveData(socket: WebSocketClient, data: Data) {
         do {
-            let message = try WebSocketProtoWebSocketMessage.parseData(data)
+            let message = try WebSocketProtoWebSocketMessage(serializedData: data)
             delegate?.websocket(self, didReceiveMessage: message)
         } catch {
             owsFailDebug("error: \(error)")

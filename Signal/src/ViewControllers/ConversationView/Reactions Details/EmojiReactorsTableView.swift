@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -7,9 +7,7 @@ import Foundation
 class EmojiReactorsTableView: UITableView {
     struct ReactorItem {
         let address: SignalServiceAddress
-        let conversationColorName: ConversationColorName
         let displayName: String
-        let profileName: String?
         let emoji: String
     }
 
@@ -17,17 +15,11 @@ class EmojiReactorsTableView: UITableView {
         didSet { reloadData() }
     }
 
-    var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    let finder: ReactionFinder
-    init(finder: ReactionFinder) {
-        self.finder = finder
+    init() {
         super.init(frame: .zero, style: .plain)
 
         dataSource = self
-        backgroundColor = Theme.reactionBackgroundColor
+        backgroundColor = Theme.actionSheetBackgroundColor
         separatorStyle = .none
 
         register(EmojiReactorCell.self, forCellReuseIdentifier: EmojiReactorCell.reuseIdentifier)
@@ -37,47 +29,14 @@ class EmojiReactorsTableView: UITableView {
         fatalError("init(coder:) has not been implemented")
     }
 
-    func configureForAll(transaction: SDSAnyReadTransaction) {
-        reactorItems = finder.allReactions(transaction: transaction.unwrapGrdbRead).compactMap { reaction in
-            let thread = TSContactThread.getWithContactAddress(reaction.reactor, transaction: transaction)
+    func configure(for reactions: [OWSReaction], transaction: SDSAnyReadTransaction) {
+        reactorItems = reactions.compactMap { reaction in
             let displayName = contactsManager.displayName(for: reaction.reactor, transaction: transaction)
-
-            let profileName: String?
-            if RemoteConfig.messageRequests || contactsManager.hasNameInSystemContacts(for: reaction.reactor) {
-                profileName = nil
-            } else {
-                profileName = contactsManager.formattedProfileName(for: reaction.reactor, transaction: transaction)
-            }
 
             return ReactorItem(
                 address: reaction.reactor,
-                conversationColorName: thread?.conversationColorName ?? .default,
                 displayName: displayName,
-                profileName: profileName,
                 emoji: reaction.emoji
-            )
-        }
-    }
-
-    func configure(for emoji: String?, transaction: SDSAnyReadTransaction) {
-        guard let emoji = emoji else { return configureForAll(transaction: transaction) }
-        reactorItems = finder.reactors(for: emoji, transaction: transaction.unwrapGrdbRead).compactMap { address in
-            let thread = TSContactThread.getWithContactAddress(address, transaction: transaction)
-            let displayName = contactsManager.displayName(for: address, transaction: transaction)
-
-            let profileName: String?
-            if RemoteConfig.messageRequests || contactsManager.hasNameInSystemContacts(for: address) {
-                profileName = nil
-            } else {
-                profileName = contactsManager.formattedProfileName(for: address, transaction: transaction)
-            }
-
-            return ReactorItem(
-                address: address,
-                conversationColorName: thread?.conversationColorName ?? .default,
-                displayName: displayName,
-                profileName: profileName,
-                emoji: emoji
             )
         }
     }
@@ -110,10 +69,9 @@ extension EmojiReactorsTableView: UITableViewDataSource {
 private class EmojiReactorCell: UITableViewCell {
     static let reuseIdentifier = "EmojiReactorCell"
 
-    let avatarView = AvatarImageView()
-    let avatarDiameter: CGFloat = 36
+    let avatarView = ConversationAvatarView(diameterPoints: 36,
+                                            localUserDisplayMode: .asUser)
     let nameLabel = UILabel()
-    let profileLabel = UILabel()
     let emojiLabel = UILabel()
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
@@ -127,25 +85,14 @@ private class EmojiReactorCell: UITableViewCell {
         contentView.addSubview(avatarView)
         avatarView.autoPinLeadingToSuperviewMargin()
         avatarView.autoPinHeightToSuperviewMargins()
-        avatarView.autoSetDimensions(to: CGSize(square: avatarDiameter))
 
-        let labelStackView = UIStackView()
-        labelStackView.axis = .vertical
-        contentView.addSubview(labelStackView)
-        labelStackView.autoPinLeading(toTrailingEdgeOf: avatarView, offset: 8)
-        labelStackView.autoPinHeightToSuperviewMargins()
-
-        nameLabel.font = UIFont.ows_dynamicTypeBodyClamped.ows_semibold()
-        nameLabel.textColor = Theme.primaryTextColor
-        labelStackView.addArrangedSubview(nameLabel)
-
-        profileLabel.font = .ows_dynamicTypeCaption1Clamped
-        profileLabel.textColor = Theme.secondaryTextAndIconColor
-        labelStackView.addArrangedSubview(profileLabel)
+        contentView.addSubview(nameLabel)
+        nameLabel.autoPinLeading(toTrailingEdgeOf: avatarView, offset: 8)
+        nameLabel.autoPinHeightToSuperviewMargins()
 
         emojiLabel.font = .boldSystemFont(ofSize: 24)
         contentView.addSubview(emojiLabel)
-        emojiLabel.autoPinLeading(toTrailingEdgeOf: labelStackView, offset: 8)
+        emojiLabel.autoPinLeading(toTrailingEdgeOf: nameLabel, offset: 8)
         emojiLabel.setContentHuggingHorizontalHigh()
         emojiLabel.autoPinHeightToSuperviewMargins()
         emojiLabel.autoPinTrailingToSuperviewMargin()
@@ -157,23 +104,16 @@ private class EmojiReactorCell: UITableViewCell {
 
     func configure(item: EmojiReactorsTableView.ReactorItem) {
 
-        let avatarBuilder = OWSContactAvatarBuilder(
-            address: item.address,
-            colorName: item.conversationColorName,
-            diameter: UInt(avatarDiameter)
-        )
+        nameLabel.textColor = Theme.primaryTextColor
 
         emojiLabel.text = item.emoji
 
         if item.address.isLocalAddress {
             nameLabel.text = NSLocalizedString("REACTIONS_DETAIL_YOU", comment: "Text describing the local user in the reaction details pane.")
-            avatarView.image = OWSProfileManager.shared().localProfileAvatarImage() ?? avatarBuilder.buildDefaultImage()
-            profileLabel.isHidden = true
         } else {
             nameLabel.text = item.displayName
-            avatarView.image = avatarBuilder.build()
-            profileLabel.text = item.profileName
-            profileLabel.isHidden = item.profileName == nil
         }
+
+        avatarView.configureWithSneakyTransaction(address: item.address)
     }
 }

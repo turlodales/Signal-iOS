@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -11,6 +11,8 @@ public enum ApprovalMode: UInt {
     case send
     // This is not the final step of approval; continuing will not send.
     case next
+    // This step is not yet ready to proceed.
+    case loading
 }
 
 // MARK: -
@@ -43,8 +45,15 @@ public class ApprovalFooterView: UIView {
         autoresizingMask = .flexibleHeight
         translatesAutoresizingMaskIntoConstraints = false
 
-        backgroundColor = Theme.keyboardBackgroundColor
         layoutMargins = UIEdgeInsets(top: 10, left: 16, bottom: 10, right: 16)
+
+        // We extend our background view below the keyboard to avoid any gaps.
+        let backgroundView = UIView()
+        backgroundView.backgroundColor = Theme.keyboardBackgroundColor
+        addSubview(backgroundView)
+        backgroundView.autoPinWidthToSuperview()
+        backgroundView.autoPinEdge(toSuperviewEdge: .top)
+        backgroundView.autoPinEdge(toSuperviewEdge: .bottom, withInset: -30)
 
         let topStrokeView = UIView()
         topStrokeView.backgroundColor = Theme.hairlineColor
@@ -119,11 +128,16 @@ public class ApprovalFooterView: UIView {
         return label
     }()
 
+    var proceedLoadingIndicator = UIActivityIndicatorView(style: .white)
     lazy var proceedButton: OWSButton = {
         let button = OWSButton.sendButton(imageName: proceedImageName) { [weak self] in
             guard let self = self else { return }
             self.delegate?.approvalFooterDelegateDidRequestProceed(self)
         }
+
+        button.addSubview(proceedLoadingIndicator)
+        proceedLoadingIndicator.autoCenterInSuperview()
+        proceedLoadingIndicator.isHidden = true
 
         return button
     }()
@@ -132,7 +146,15 @@ public class ApprovalFooterView: UIView {
         return approvalMode == .send ? "send-solid-24" : "arrow-right-24"
     }
 
-    private func updateContents() {
-        proceedButton.setImage(imageName: proceedImageName)
+    func updateContents() {
+        if approvalMode == .loading {
+            proceedButton.setImage(imageName: nil)
+            proceedLoadingIndicator.isHidden = false
+            proceedLoadingIndicator.startAnimating()
+        } else {
+            proceedButton.setImage(imageName: proceedImageName)
+            proceedLoadingIndicator.stopAnimating()
+            proceedLoadingIndicator.isHidden = true
+        }
     }
 }

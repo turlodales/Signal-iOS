@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -73,26 +73,6 @@ public class RequestMaker: NSObject {
         self.canFailoverUDAuth = canFailoverUDAuth
     }
 
-    // MARK: - Dependencies
-
-    private var socketManager: TSSocketManager {
-        return SSKEnvironment.shared.socketManager
-    }
-
-    private var networkManager: TSNetworkManager {
-        return SSKEnvironment.shared.networkManager
-    }
-
-    private var udManager: OWSUDManager {
-        return SSKEnvironment.shared.udManager
-    }
-
-    private var profileManager: ProfileManagerProtocol {
-        return SSKEnvironment.shared.profileManager
-    }
-
-    // MARK: -
-
     @objc
     public func makeRequestObjc() -> AnyPromise {
         let promise = makeRequest()
@@ -154,7 +134,7 @@ public class RequestMaker: NSObject {
                             // If a UD request fails due to service response (as opposed to network
                             // failure), mark address as _not_ in UD mode, then retry.
                             self.udManager.setUnidentifiedAccessMode(.disabled, address: self.address)
-                            self.profileManager.updateProfile(for: self.address)
+                            self.profileManager.fetchProfile(for: self.address)
                             self.udAuthFailureBlock()
 
                             if self.canFailoverUDAuth {
@@ -207,7 +187,7 @@ public class RequestMaker: NSObject {
                         // If a UD request fails due to service response (as opposed to network
                         // failure), mark recipient as _not_ in UD mode, then retry.
                         self.udManager.setUnidentifiedAccessMode(.disabled, address: self.address)
-                        self.profileManager.updateProfile(for: self.address)
+                        self.profileManager.fetchProfile(for: self.address)
                         self.udAuthFailureBlock()
 
                         if self.canFailoverUDAuth {
@@ -249,7 +229,7 @@ public class RequestMaker: NSObject {
             udManager.setUnidentifiedAccessMode(.enabled, address: address)
         }
         DispatchQueue.main.async {
-            self.profileManager.updateProfile(for: self.address)
+            self.profileManager.fetchProfile(for: self.address)
         }
     }
 }

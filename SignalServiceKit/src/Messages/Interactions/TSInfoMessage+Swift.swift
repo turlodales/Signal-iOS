@@ -1,23 +1,11 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 
 @objc
 public extension TSInfoMessage {
-
-    // MARK: - Dependencies
-
-    private var contactsManager: ContactsManagerProtocol {
-        return SSKEnvironment.shared.contactsManager
-    }
-
-    private var tsAccountManager: TSAccountManager {
-        return TSAccountManager.sharedInstance()
-    }
-
-    // MARK: -
 
     func groupUpdateDescription(transaction: SDSAnyReadTransaction) -> String {
         // for legacy group updates we persisted a pre-rendered string, rather than the details
@@ -32,9 +20,46 @@ public extension TSInfoMessage {
                                                                  transaction: transaction)
         }
 
-        return groupUpdateDescription(oldGroupModel: self.previousGroupModel,
+        return groupUpdateDescription(oldGroupModel: self.oldGroupModel,
                                       newGroupModel: newGroupModel,
                                       transaction: transaction)
+    }
+
+    func groupUpdateItems(transaction: SDSAnyReadTransaction) -> [GroupUpdateCopyItem]? {
+        // for legacy group updates we persisted a pre-rendered string, rather than the details
+        // to generate that string
+        guard customMessage == nil else { return nil }
+
+        guard let newGroupModel = self.newGroupModel else {
+            // Legacy info message before we began embedding user info.
+            return nil
+        }
+
+        return groupUpdateItems(oldGroupModel: self.oldGroupModel,
+                                newGroupModel: newGroupModel,
+                                transaction: transaction)
+    }
+
+    func profileChangeDescription(transaction: SDSAnyReadTransaction) -> String {
+        guard let profileChanges = profileChanges,
+            let updateDescription = profileChanges.descriptionForUpdate(transaction: transaction) else {
+                owsFailDebug("Unexpectedly missing update description for profile change")
+            return ""
+        }
+
+        return updateDescription
+    }
+
+    var profileChangeAddress: SignalServiceAddress? {
+        return profileChanges?.address
+    }
+
+    var profileChangesOldFullName: String? {
+        profileChanges?.oldFullName
+    }
+
+    var profileChangeNewNameComponents: PersonNameComponents? {
+        return profileChanges?.newNameComponents
     }
 }
 
@@ -61,13 +86,32 @@ extension TSInfoMessage {
         return groupUpdate.updateDescription
     }
 
+    private func groupUpdateItems(oldGroupModel: TSGroupModel?,
+                                  newGroupModel: TSGroupModel,
+                                  transaction: SDSAnyReadTransaction) -> [GroupUpdateCopyItem]? {
+
+        guard let localAddress = tsAccountManager.localAddress else {
+            owsFailDebug("missing local address")
+            return nil
+        }
+
+        let groupUpdate = GroupUpdateCopy(newGroupModel: newGroupModel,
+                                          oldGroupModel: oldGroupModel,
+                                          oldDisappearingMessageToken: oldDisappearingMessageToken,
+                                          newDisappearingMessageToken: newDisappearingMessageToken,
+                                          localAddress: localAddress,
+                                          groupUpdateSourceAddress: groupUpdateSourceAddress,
+                                          transaction: transaction)
+        return groupUpdate.itemList
+    }
+
     @objc
     public static func legacyDisappearingMessageUpdateDescription(token newToken: DisappearingMessageToken,
                                                                   wasAddedToExistingGroup: Bool,
                                                                   updaterName: String?) -> String {
 
         // This might be zero if DMs are not enabled.
-        let durationString = NSString.formatDurationSeconds(newToken.durationSeconds, useShortFormat: false)
+        let durationString = newToken.durationString
 
         if wasAddedToExistingGroup {
             assert(newToken.isEnabled)
@@ -88,7 +132,7 @@ extension TSInfoMessage {
             // Changed by localNumber on this device or via synced transcript
             if newToken.isEnabled {
                 let format = NSLocalizedString("YOU_UPDATED_DISAPPEARING_MESSAGES_CONFIGURATION",
-                                               comment: "Info Message when you disabled disappearing messages. Embeds a {{time amount}} before messages disappear. see the *_TIME_AMOUNT strings for context.")
+                                               comment: "Info Message when you update disappearing messages duration. Embeds a {{time amount}} before messages disappear. see the *_TIME_AMOUNT strings for context.")
                 return String(format: format, durationString)
             } else {
                 return NSLocalizedString("YOU_DISABLED_DISAPPEARING_MESSAGES_CONFIGURATION",
@@ -115,23 +159,29 @@ extension TSInfoMessage {
         return groupModel
     }
 
-    fileprivate var previousGroupModel: TSGroupModel? {
+    @objc
+    public var oldGroupModel: TSGroupModel? {
         return infoMessageValue(forKey: .oldGroupModel)
     }
 
-    fileprivate var newGroupModel: TSGroupModel? {
+    @objc
+    public var newGroupModel: TSGroupModel? {
         return infoMessageValue(forKey: .newGroupModel)
     }
 
-    fileprivate var oldDisappearingMessageToken: DisappearingMessageToken? {
+    public var oldDisappearingMessageToken: DisappearingMessageToken? {
         return infoMessageValue(forKey: .oldDisappearingMessageToken)
     }
 
-    fileprivate var newDisappearingMessageToken: DisappearingMessageToken? {
+    public var newDisappearingMessageToken: DisappearingMessageToken? {
         return infoMessageValue(forKey: .newDisappearingMessageToken)
     }
 
     fileprivate var groupUpdateSourceAddress: SignalServiceAddress? {
         return infoMessageValue(forKey: .groupUpdateSourceAddress)
+    }
+
+    fileprivate var profileChanges: ProfileChanges? {
+        return infoMessageValue(forKey: .profileChanges)
     }
 }

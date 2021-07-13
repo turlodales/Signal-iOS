@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -25,7 +25,15 @@ public class NewGroupMembersViewController: BaseGroupMemberViewController {
         title = NSLocalizedString("NEW_GROUP_SELECT_MEMBERS_VIEW_TITLE",
                                   comment: "The title for the 'select members for new group' view.")
 
-        let rightBarButtonItem = UIBarButtonItem(title: CommonStrings.nextButton,
+        updateBarButtons()
+    }
+
+    private func updateBarButtons() {
+        let hasMembers = !newGroupState.recipientSet.isEmpty
+        let buttonTitle = (hasMembers
+                            ? CommonStrings.nextButton
+                            : CommonStrings.skipButton)
+        let rightBarButtonItem = UIBarButtonItem(title: buttonTitle,
                                                  style: .plain,
                                                  target: self,
                                                  action: #selector(nextButtonPressed),
@@ -52,23 +60,25 @@ public class NewGroupMembersViewController: BaseGroupMemberViewController {
 extension NewGroupMembersViewController: GroupMemberViewDelegate {
 
     var groupMemberViewRecipientSet: OrderedSet<PickedRecipient> {
-        return newGroupState.recipientSet
+        newGroupState.recipientSet
     }
 
     var groupMemberViewHasUnsavedChanges: Bool {
-        return newGroupState.hasUnsavedChanges
+        newGroupState.hasUnsavedChanges
     }
 
     var shouldTryToEnableGroupsV2ForMembers: Bool {
-        return true
+        true
     }
 
     func groupMemberViewRemoveRecipient(_ recipient: PickedRecipient) {
         newGroupState.recipientSet.remove(recipient)
+        updateBarButtons()
     }
 
     func groupMemberViewAddRecipient(_ recipient: PickedRecipient) {
         newGroupState.recipientSet.append(recipient)
+        updateBarButtons()
     }
 
     func groupMemberViewCanAddRecipient(_ recipient: PickedRecipient) -> Bool {
@@ -76,39 +86,45 @@ extension NewGroupMembersViewController: GroupMemberViewDelegate {
         // since we'll failover to using a v1 group if any members don't
         // support v2 groups.  Eventually, we'll want to reject certain
         // users.
-        return true
+        true
     }
 
     func groupMemberViewShouldShowMemberCount() -> Bool {
-        return RemoteConfig.groupsV2CreateGroups
+        true
     }
 
     func groupMemberViewGroupMemberCountForDisplay() -> Int {
-        return groupMemberViewGroupMemberCount(withSelf: false)
+        groupMemberViewGroupMemberCount(withSelf: false)
     }
 
     func groupMemberViewGroupMemberCount(withSelf: Bool) -> Int {
         // We sometimes add one for the local user.
-        return newGroupState.recipientSet.count + (withSelf ? 1 : 0)
+        newGroupState.recipientSet.count + (withSelf ? 1 : 0)
     }
 
-    func groupMemberViewIsGroupFull() -> Bool {
-        guard RemoteConfig.groupsV2CreateGroups else {
-            return false
-        }
-        return groupMemberViewGroupMemberCount(withSelf: true) >= GroupManager.maxGroupMemberCount
+    func groupMemberViewIsGroupFull_HardLimit() -> Bool {
+        groupMemberViewGroupMemberCount(withSelf: true) >= GroupManager.groupsV2MaxGroupSizeHardLimit
     }
 
-    func groupMemberViewIsPreExistingMember(_ recipient: PickedRecipient) -> Bool {
-        return false
+    func groupMemberViewIsGroupFull_RecommendedLimit() -> Bool {
+        groupMemberViewGroupMemberCount(withSelf: true) >= GroupManager.groupsV2MaxGroupSizeRecommended
+    }
+
+    func groupMemberViewIsPreExistingMember(_ recipient: PickedRecipient,
+                                            transaction: SDSAnyReadTransaction) -> Bool {
+        false
     }
 
     func groupMemberViewIsGroupsV2Required() -> Bool {
         // No, we can fail over to creating v1 groups.
-        return false
+        false
     }
 
     func groupMemberViewDismiss() {
         dismiss(animated: true)
+    }
+
+    var isNewGroup: Bool {
+        true
     }
 }

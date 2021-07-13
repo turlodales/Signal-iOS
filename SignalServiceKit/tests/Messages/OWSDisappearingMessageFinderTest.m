@@ -1,18 +1,18 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "MockSSKEnvironment.h"
-#import "OWSDisappearingMessagesFinder.h"
 #import "SSKBaseTestObjC.h"
-#import "TSContactThread.h"
-#import "TSIncomingMessage.h"
-#import "TSOutgoingMessage.h"
-#import "TestAppContext.h"
 #import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalServiceKit/MockSSKEnvironment.h>
+#import <SignalServiceKit/OWSDisappearingMessagesFinder.h>
 #import <SignalServiceKit/SSKAccessors+SDS.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/StorageCoordinator.h>
+#import <SignalServiceKit/TSContactThread.h>
+#import <SignalServiceKit/TSIncomingMessage.h>
+#import <SignalServiceKit/TSOutgoingMessage.h>
+#import <SignalServiceKit/TestAppContext.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -36,20 +36,6 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark -
 
 @implementation OWSDisappearingMessageFinderTest
-
-#pragma mark - Dependencies
-
-- (SDSDatabaseStorage *)databaseStorage
-{
-    return SSKEnvironment.shared.databaseStorage;
-}
-
-- (StorageCoordinator *)storageCoordinator
-{
-    return SSKEnvironment.shared.storageCoordinator;
-}
-
-#pragma mark -
 
 - (void)setUp
 {
@@ -110,12 +96,12 @@ NS_ASSUME_NONNULL_BEGIN
         if (expireStartedAt > 0) {
             [message markAsReadAtTimestamp:expireStartedAt
                                     thread:thread
-                              circumstance:OWSReadCircumstanceReadOnLinkedDevice
+                              circumstance:OWSReceiptCircumstanceOnLinkedDevice
                                transaction:transaction];
         } else if (markAsRead) {
             [message markAsReadAtTimestamp:self.now - 1000
                                     thread:thread
-                              circumstance:OWSReadCircumstanceReadOnLinkedDevice
+                              circumstance:OWSReceiptCircumstanceOnLinkedDevice
                                transaction:transaction];
         }
     }];

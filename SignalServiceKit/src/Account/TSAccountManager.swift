@@ -1,27 +1,11 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import PromiseKit
 
 public extension TSAccountManager {
-
-    // MARK: - Dependencies
-
-    class var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    var profileManager: ProfileManagerProtocol {
-        return SSKEnvironment.shared.profileManager
-    }
-
-    private var syncManager: SyncManagerProtocol {
-        return SSKEnvironment.shared.syncManager
-    }
-
-    // MARK: -
 
     @objc
     private class func getLocalThread(transaction: SDSAnyReadTransaction) -> TSThread? {
@@ -63,12 +47,12 @@ public extension TSAccountManager {
 
     @objc
     var isRegisteredPrimaryDevice: Bool {
-        return isRegistered && self.storedDeviceId() == OWSDevicePrimaryDeviceId
+        isRegistered && isPrimaryDevice
     }
 
     @objc
     var isPrimaryDevice: Bool {
-        return storedDeviceId() == OWSDevicePrimaryDeviceId
+        storedDeviceId() == OWSDevicePrimaryDeviceId
     }
 
     @objc
@@ -83,7 +67,7 @@ public extension TSAccountManager {
     @objc
     func localAccountId(transaction: SDSAnyReadTransaction) -> AccountId? {
         guard let localAddress = localAddress else { return nil }
-        return OWSAccountIdFinder().accountId(forAddress: localAddress, transaction: transaction)
+        return OWSAccountIdFinder.accountId(forAddress: localAddress, transaction: transaction)
     }
 
     // MARK: - Account Attributes & Capabilities
@@ -93,13 +77,30 @@ public extension TSAccountManager {
     // Sets the flag to force an account attributes update,
     // then returns a promise for the current attempt.
     @objc
+    @available(swift, obsoleted: 1.0)
     func updateAccountAttributes() -> AnyPromise {
+        return AnyPromise(updateAccountAttributes())
+    }
+
+    func updateAccountAttributes() -> Promise<Void> {
         Self.databaseStorage.write { transaction in
             self.keyValueStore.setDate(Date(),
                                        key: Self.needsAccountAttributesUpdateKey,
                                        transaction: transaction)
         }
-        return AnyPromise(updateAccountAttributesIfNecessaryAttempt())
+        return updateAccountAttributesIfNecessaryAttempt()
+    }
+
+    // Sets the flag to force an account attributes update,
+    // then initiates an attempt.
+    @objc
+    func updateAccountAttributes(transaction: SDSAnyWriteTransaction) {
+        self.keyValueStore.setDate(Date(),
+                                   key: Self.needsAccountAttributesUpdateKey,
+                                   transaction: transaction)
+        transaction.addAsyncCompletionOffMain {
+            self.updateAccountAttributesIfNecessary()
+        }
     }
 
     @objc
@@ -130,17 +131,19 @@ public extension TSAccountManager {
     // * When reachability changes.
     private func updateAccountAttributesIfNecessaryAttempt() -> Promise<Void> {
         guard isRegisteredAndReady else {
+            Logger.info("Aborting; not registered and ready.")
             return Promise.value(())
         }
-        guard AppReadiness.isAppReady() else {
+        guard AppReadiness.isAppReady else {
+            Logger.info("Aborting; app is not ready.")
             return Promise.value(())
         }
 
         let deviceCapabilitiesKey = "deviceCapabilities"
         let appVersionKey = "appVersion"
 
-        let currentDeviceCapabilities: [String: NSNumber] = OWSRequestFactory.deviceCapabilities()
-        let currentAppVersion = AppVersion.sharedInstance().currentAppVersion
+        let currentDeviceCapabilities: [String: NSNumber] = OWSRequestFactory.deviceCapabilitiesForLocalDevice()
+        let currentAppVersion = AppVersion.shared().currentAppVersionLong
 
         var lastAttributeRequest: Date?
         let shouldUpdateAttributes = Self.databaseStorage.read { (transaction: SDSAnyReadTransaction) -> Bool in
@@ -156,18 +159,19 @@ public extension TSAccountManager {
             guard lastDeviceCapabilities == currentDeviceCapabilities else {
                 return true
             }
-            // Check if the app verion has changed.
+            // Check if the app version has changed.
             let lastAppVersion = self.keyValueStore.getString(appVersionKey, transaction: transaction)
             guard lastAppVersion == currentAppVersion else {
                 return true
             }
+            Logger.info("Skipping; lastAppVersion: \(String(describing: lastAppVersion)), currentAppVersion: \(currentAppVersion).")
             return false
         }
         guard shouldUpdateAttributes else {
             return Promise.value(())
         }
         Logger.info("Updating account attributes.")
-        let promise: Promise<Void> = firstly { () -> Promise<Void> in
+        let promise: Promise<Void> = firstly(on: .global()) { () -> Promise<Void> in
             let client = SignalServiceRestClient()
             return (self.isPrimaryDevice
                 ? client.updatePrimaryDeviceAccountAttributes()

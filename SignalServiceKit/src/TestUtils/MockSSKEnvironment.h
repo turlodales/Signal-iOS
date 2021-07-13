@@ -1,8 +1,8 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "SSKEnvironment.h"
+#import <SignalServiceKit/SSKEnvironment.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -12,32 +12,32 @@ NS_ASSUME_NONNULL_BEGIN
 @interface SSKEnvironment (MockSSKEnvironment)
 
 // Redeclare these properties as mutable so that tests can replace singletons.
-@property (nonatomic) id<ContactsManagerProtocol> contactsManager;
-@property (nonatomic) OWSMessageSender *messageSender;
-@property (nonatomic) id<ProfileManagerProtocol> profileManager;
-@property (nonatomic, nullable) OWSPrimaryStorage *primaryStorage;
-@property (nonatomic) ContactsUpdater *contactsUpdater;
-@property (nonatomic) TSNetworkManager *networkManager;
-@property (nonatomic) OWSMessageManager *messageManager;
-@property (nonatomic) OWSBlockingManager *blockingManager;
-@property (nonatomic) OWSIdentityManager *identityManager;
-@property (nonatomic) id<OWSUDManager> udManager;
-@property (nonatomic) OWSMessageDecrypter *messageDecrypter;
-@property (nonatomic) OWSBatchMessageProcessor *batchMessageProcessor;
-@property (nonatomic) OWSMessageReceiver *messageReceiver;
-@property (nonatomic) TSSocketManager *socketManager;
-@property (nonatomic) TSAccountManager *tsAccountManager;
-@property (nonatomic) OWS2FAManager *ows2FAManager;
-@property (nonatomic) OWSDisappearingMessagesJob *disappearingMessagesJob;
-@property (nonatomic) OWSReadReceiptManager *readReceiptManager;
-@property (nonatomic) OWSOutgoingReceiptManager *outgoingReceiptManager;
-@property (nonatomic) id<SyncManagerProtocol> syncManager;
-@property (nonatomic) id<SSKReachabilityManager> reachabilityManager;
-@property (nonatomic) id<OWSTypingIndicators> typingIndicators;
-@property (nonatomic) OWSAttachmentDownloads *attachmentDownloads;
-@property (nonatomic) StickerManager *stickerManager;
-@property (nonatomic) SDSDatabaseStorage *databaseStorage;
-@property (nonatomic) AccountServiceClient *accountServiceClient;
+@property (nonatomic) id<ContactsManagerProtocol> contactsManagerRef;
+@property (nonatomic) MessageSender *messageSenderRef;
+@property (nonatomic) id<ProfileManagerProtocol> profileManagerRef;
+@property (nonatomic) TSNetworkManager *networkManagerRef;
+@property (nonatomic) OWSMessageManager *messageManagerRef;
+@property (nonatomic) OWSBlockingManager *blockingManagerRef;
+@property (nonatomic) OWSIdentityManager *identityManagerRef;
+@property (nonatomic) id<OWSUDManager> udManagerRef;
+@property (nonatomic) OWSMessageDecrypter *messageDecrypterRef;
+@property (nonatomic) TSSocketManager *socketManagerRef;
+@property (nonatomic) TSAccountManager *tsAccountManagerRef;
+@property (nonatomic) OWS2FAManager *ows2FAManagerRef;
+@property (nonatomic) OWSDisappearingMessagesJob *disappearingMessagesJobRef;
+@property (nonatomic) OWSReceiptManager *receiptManagerRef;
+@property (nonatomic) OWSOutgoingReceiptManager *outgoingReceiptManagerRef;
+@property (nonatomic) id<SyncManagerProtocol> syncManagerRef;
+@property (nonatomic) id<SSKReachabilityManager> reachabilityManagerRef;
+@property (nonatomic) id<OWSTypingIndicators> typingIndicatorsRef;
+@property (nonatomic) OWSAttachmentDownloads *attachmentDownloadsRef;
+@property (nonatomic) SignalServiceAddressCache *signalServiceAddressCacheRef;
+@property (nonatomic) StickerManager *stickerManagerRef;
+@property (nonatomic) SDSDatabaseStorage *databaseStorageRef;
+@property (nonatomic) AccountServiceClient *accountServiceClientRef;
+@property (nonatomic) id<GroupsV2> groupsV2Ref;
+@property (nonatomic) id<Payments> paymentsRef;
+@property (nonatomic) id<PaymentsCurrencies> paymentsCurrenciesRef;
 
 @end
 

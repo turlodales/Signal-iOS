@@ -1,12 +1,12 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSInfoMessage.h"
-#import "ContactsManagerProtocol.h"
-#import "SSKEnvironment.h"
 #import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalServiceKit/ContactsManagerProtocol.h>
+#import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSInfoMessage.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -18,6 +18,7 @@ const InfoMessageUserInfoKey InfoMessageUserInfoKeyNewDisappearingMessageToken
     = @"InfoMessageUserInfoKeyNewDisappearingMessageToken";
 const InfoMessageUserInfoKey InfoMessageUserInfoKeyGroupUpdateSourceAddress
     = @"InfoMessageUserInfoKeyGroupUpdateSourceAddress";
+const InfoMessageUserInfoKey InfoMessageUserInfoKeyProfileChanges = @"InfoMessageUserInfoKeyProfileChanges";
 
 NSUInteger TSInfoMessageSchemaVersion = 2;
 
@@ -74,6 +75,10 @@ NSUInteger TSInfoMessageSchemaVersion = 2;
         self.read = YES;
     }
 
+    if (_messageType == TSInfoMessageTypeGroupQuit) {
+        self.read = YES;
+    }
+
     return self;
 }
 
@@ -127,6 +132,7 @@ NSUInteger TSInfoMessageSchemaVersion = 2;
                   uniqueThreadId:(NSString *)uniqueThreadId
                    attachmentIds:(NSArray<NSString *> *)attachmentIds
                             body:(nullable NSString *)body
+                      bodyRanges:(nullable MessageBodyRanges *)bodyRanges
                     contactShare:(nullable OWSContact *)contactShare
                  expireStartedAt:(uint64_t)expireStartedAt
                        expiresAt:(uint64_t)expiresAt
@@ -152,6 +158,7 @@ NSUInteger TSInfoMessageSchemaVersion = 2;
                     uniqueThreadId:uniqueThreadId
                      attachmentIds:attachmentIds
                               body:body
+                        bodyRanges:bodyRanges
                       contactShare:contactShare
                    expireStartedAt:expireStartedAt
                          expiresAt:expiresAt
@@ -180,15 +187,6 @@ NSUInteger TSInfoMessageSchemaVersion = 2;
 // clang-format on
 
 // --- CODE GENERATION MARKER
-
-#pragma mark - Dependencies
-
-- (id<ContactsManagerProtocol>)contactsManager
-{
-    return SSKEnvironment.shared.contactsManager;
-}
-
-#pragma mark -
 
 + (instancetype)userNotRegisteredMessageInThread:(TSThread *)thread address:(SignalServiceAddress *)address
 {
@@ -264,6 +262,8 @@ NSUInteger TSInfoMessageSchemaVersion = 2;
         }
         case TSInfoMessageSyncedThread:
             return @"";
+        case TSInfoMessageProfileUpdate:
+            return [self profileChangeDescriptionWithTransaction:transaction];
     }
 
     OWSFailDebug(@"Unknown info message type");
@@ -287,6 +287,7 @@ NSUInteger TSInfoMessageSchemaVersion = 2;
         case TSInfoMessageAddGroupToProfileWhitelistOffer:
         case TSInfoMessageUnknownProtocolVersion:
         case TSInfoMessageSyncedThread:
+        case TSInfoMessageProfileUpdate:
             return NO;
         case TSInfoMessageUserJoinedSignal:
             // In the conversation list, we want conversations with an unread "new user" notification to
@@ -302,7 +303,7 @@ NSUInteger TSInfoMessageSchemaVersion = 2;
 
 - (void)markAsReadAtTimestamp:(uint64_t)readTimestamp
                        thread:(TSThread *)thread
-                 circumstance:(OWSReadCircumstance)circumstance
+                 circumstance:(OWSReceiptCircumstance)circumstance
                   transaction:(SDSAnyWriteTransaction *)transaction
 {
     OWSAssertDebug(transaction);

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -8,31 +8,42 @@ import GRDB
 @objc
 public class GRDBSchemaMigrator: NSObject {
 
-    var grdbStorage: GRDBDatabaseStorageAdapter {
-        return SDSDatabaseStorage.shared.grdbStorage
-    }
-
+    // Returns true IFF incremental migrations were performed.
     @objc
-    public func runSchemaMigrations() {
+    public func runSchemaMigrations() -> Bool {
+        var didPerformIncrementalMigrations = false
+
         if hasCreatedInitialSchema {
-            try! incrementalMigrator.migrate(grdbStorage.pool)
+            Logger.info("Using incrementalMigrator.")
+            let appliedMigrations = self.appliedMigrations
+            try! incrementalMigrator.migrate(grdbStorageAdapter.pool)
+            didPerformIncrementalMigrations = appliedMigrations != self.appliedMigrations
         } else {
-            try! newUserMigrator.migrate(grdbStorage.pool)
+            Logger.info("Using newUserMigrator.")
+            try! newUserMigrator.migrate(grdbStorageAdapter.pool)
         }
+        Logger.info("Migrations complete.")
 
         SSKPreferences.markGRDBSchemaAsLatest()
+
+        return didPerformIncrementalMigrations
     }
 
     private var hasCreatedInitialSchema: Bool {
+        let appliedMigrations = self.appliedMigrations
+        Logger.info("appliedMigrations: \(appliedMigrations).")
+        return appliedMigrations.contains(MigrationId.createInitialSchema.rawValue)
+    }
+
+    private var appliedMigrations: Set<String> {
         // HACK: GRDB doesn't create the grdb_migrations table until running a migration.
         // So we can't cleanly check which migrations have run for new users until creating this
         // table ourselves.
-        try! grdbStorage.write { transaction in
+        try! grdbStorageAdapter.write { transaction in
             try! self.fixit_setupMigrations(transaction.database)
         }
 
-        let appliedMigrations = try! incrementalMigrator.appliedMigrations(in: grdbStorage.pool)
-        return appliedMigrations.contains(MigrationId.createInitialSchema.rawValue)
+        return try! incrementalMigrator.appliedMigrations(in: grdbStorageAdapter.pool)
     }
 
     private func fixit_setupMigrations(_ db: Database) throws {
@@ -71,6 +82,30 @@ public class GRDBSchemaMigrator: NSObject {
         case addIsMarkedUnreadToThreads
         case addIsMediaMessageToMessageSenderJobQueue
         case readdAttachmentIndex
+        case addLastVisibleRowIdToThreads
+        case addMarkedUnreadIndexToThread
+        case fixIncorrectIndexes
+        case resetThreadVisibility
+        case trackUserProfileFetches
+        case addMentions
+        case addMentionNotificationMode
+        case addOfferTypeToCalls
+        case addServerDeliveryTimestamp
+        case updateAnimatedStickers
+        case updateMarkedUnreadIndex
+        case addGroupCallMessage2
+        case addGroupCallEraIdIndex
+        case addProfileBio
+        case addWasIdentityVerified
+        case storeMutedUntilDateAsMillisecondTimestamp
+        case addPaymentModels15
+        case addPaymentModels40
+        case fixPaymentModels
+        case addGroupMember
+        case createPendingViewedReceipts
+        case addViewedToInteractions
+        case createThreadAssociatedData
+        case addServerGuidToInteractions
 
         // NOTE: Every time we add a migration id, consider
         // incrementing grdbSchemaVersionLatest.
@@ -97,10 +132,22 @@ public class GRDBSchemaMigrator: NSObject {
         case dataMigration_enableV2RegistrationLockIfNecessary
         case dataMigration_resetStorageServiceData
         case dataMigration_markAllInteractionsAsNotDeleted
+        case dataMigration_recordMessageRequestInteractionIdEpoch
+        case dataMigration_indexSignalRecipients
+        case dataMigration_kbsStateCleanup
+        case dataMigration_turnScreenSecurityOnForExistingUsers
+        case dataMigration_disableLinkPreviewForExistingUsers
+        case dataMigration_groupIdMapping
+        case dataMigration_disableSharingSuggestionsForExistingUsers
+        case dataMigration_removeOversizedGroupAvatars
+        case dataMigration_scheduleStorageServiceUpdateForMutedThreads
+        case dataMigration_populateGroupMember
+        case dataMigration_cullInvalidIdentityKeySendingErrors
+        case dataMigration_moveToThreadAssociatedData
     }
 
     public static let grdbSchemaVersionDefault: UInt = 0
-    public static let grdbSchemaVersionLatest: UInt = 7
+    public static let grdbSchemaVersionLatest: UInt = 26
 
     // An optimization for new users, we have the first migration import the latest schema
     // and mark any other migrations as "already run".
@@ -127,20 +174,31 @@ public class GRDBSchemaMigrator: NSObject {
         return migrator
     }()
 
+    class DatabaseMigratorWrapper {
+        var migrator = DatabaseMigrator()
+
+        func registerMigration(_ identifier: String, migrate: @escaping (Database) throws -> Void) {
+            migrator.registerMigration(identifier) {  (database: Database) throws in
+                Logger.info("Running migration: \(identifier)")
+                try migrate(database)
+            }
+        }
+    }
+
     // Used by existing users to incrementally update from their existing schema
     // to the latest.
     private lazy var incrementalMigrator: DatabaseMigrator = {
-        var migrator = DatabaseMigrator()
+        var migratorWrapper = DatabaseMigratorWrapper()
 
-        registerSchemaMigrations(migrator: &migrator)
+        registerSchemaMigrations(migrator: migratorWrapper)
 
         // Data Migrations must run *after* schema migrations
-        registerDataMigrations(migrator: &migrator)
+        registerDataMigrations(migrator: migratorWrapper)
 
-        return migrator
+        return migratorWrapper.migrator
     }()
 
-    private func registerSchemaMigrations(migrator: inout DatabaseMigrator) {
+    private func registerSchemaMigrations(migrator: DatabaseMigratorWrapper) {
 
         // The migration blocks should never throw. If we introduce a crashing
         // migration, we want the crash logs reflect where it occurred.
@@ -281,7 +339,10 @@ public class GRDBSchemaMigrator: NSObject {
         migrator.registerMigration(MigrationId.dedupeSignalRecipients.rawValue) { db in
             do {
                 try autoreleasepool {
-                    try dedupeSignalRecipients(transaction: GRDBWriteTransaction(database: db).asAnyWrite)
+                    let transaction = GRDBWriteTransaction(database: db)
+                    defer { transaction.finalizeTransaction() }
+
+                    try dedupeSignalRecipients(transaction: transaction.asAnyWrite)
                 }
 
                 try db.drop(index: "index_signal_recipients_on_recipientPhoneNumber")
@@ -577,9 +638,11 @@ public class GRDBSchemaMigrator: NSObject {
                 try db.drop(table: "model_TSRecipientReadReceipt")
                 try db.drop(table: "model_OWSLinkedDeviceReadReceipt")
 
-                let transaction = GRDBWriteTransaction(database: db).asAnyWrite
+                let transaction = GRDBWriteTransaction(database: db)
+                defer { transaction.finalizeTransaction() }
+
                 let viewOnceStore = SDSKeyValueStore(collection: "viewOnceMessages")
-                viewOnceStore.removeAll(transaction: transaction)
+                viewOnceStore.removeAll(transaction: transaction.asAnyWrite)
             } catch {
                 owsFail("Error: \(error)")
             }
@@ -613,28 +676,467 @@ public class GRDBSchemaMigrator: NSObject {
         }
 
         migrator.registerMigration(MigrationId.addIsMediaMessageToMessageSenderJobQueue.rawValue) { db in
-            try db.alter(table: "model_SSKJobRecord") { (table: TableAlteration) -> Void in
-                table.add(column: "isMediaMessage", .boolean)
+            do {
+                try db.alter(table: "model_SSKJobRecord") { (table: TableAlteration) -> Void in
+                    table.add(column: "isMediaMessage", .boolean)
+                }
+
+                try db.drop(index: "index_model_TSAttachment_on_uniqueId")
+
+                try db.create(
+                    index: "index_model_TSAttachment_on_uniqueId_and_contentType",
+                    on: "model_TSAttachment",
+                    columns: ["uniqueId", "contentType"]
+                )
+            } catch {
+                owsFail("Error: \(error)")
             }
-
-            try db.drop(index: "index_model_TSAttachment_on_uniqueId")
-
-            try db.create(
-                index: "index_model_TSAttachment_on_uniqueId_and_contentType",
-                on: "model_TSAttachment",
-                columns: ["uniqueId", "contentType"]
-            )
         }
 
         migrator.registerMigration(MigrationId.readdAttachmentIndex.rawValue) { db in
-            try db.create(
-                index: "index_model_TSAttachment_on_uniqueId",
-                on: "model_TSAttachment",
-                columns: ["uniqueId"]
-            )
-
             do {
+                try db.create(
+                    index: "index_model_TSAttachment_on_uniqueId",
+                    on: "model_TSAttachment",
+                    columns: ["uniqueId"]
+                )
+
                 try db.execute(sql: "UPDATE model_SSKJobRecord SET isMediaMessage = 0")
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addLastVisibleRowIdToThreads.rawValue) { db in
+            do {
+                try db.alter(table: "model_TSThread") { (table: TableAlteration) -> Void in
+                    table.add(column: "lastVisibleSortIdOnScreenPercentage", .double).notNull().defaults(to: 0)
+                    table.add(column: "lastVisibleSortId", .integer).notNull().defaults(to: 0)
+                }
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addMarkedUnreadIndexToThread.rawValue) { db in
+            do {
+                try db.create(
+                    index: "index_model_TSThread_on_isMarkedUnread",
+                    on: "model_TSThread",
+                    columns: ["isMarkedUnread"]
+                )
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.fixIncorrectIndexes.rawValue) { db in
+            do {
+                try db.drop(index: "index_model_TSInteraction_on_threadUniqueId_recordType_messageType")
+                try db.create(index: "index_model_TSInteraction_on_uniqueThreadId_recordType_messageType",
+                              on: "model_TSInteraction",
+                              columns: ["uniqueThreadId", "recordType", "messageType"])
+
+                try db.drop(index: "index_model_TSInteraction_on_threadUniqueId_and_attachmentIds")
+                try db.create(index: "index_model_TSInteraction_on_uniqueThreadId_and_attachmentIds",
+                              on: "model_TSInteraction",
+                              columns: ["uniqueThreadId", "attachmentIds"])
+
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.resetThreadVisibility.rawValue) { db in
+            do {
+                try db.execute(sql: "UPDATE model_TSThread SET lastVisibleSortIdOnScreenPercentage = 0, lastVisibleSortId = 0")
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.trackUserProfileFetches.rawValue) { db in
+            do {
+                try db.alter(table: "model_OWSUserProfile") { (table: TableAlteration) -> Void in
+                    table.add(column: "lastFetchDate", .double)
+                    table.add(column: "lastMessagingDate", .double)
+                }
+                try db.create(index: "index_model_OWSUserProfile_on_lastFetchDate_and_lastMessagingDate",
+                              on: "model_OWSUserProfile",
+                              columns: ["lastFetchDate", "lastMessagingDate"])
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addMentions.rawValue) { db in
+            do {
+                try db.create(table: "model_TSMention") { table in
+                    table.autoIncrementedPrimaryKey("id")
+                        .notNull()
+                    table.column("recordType", .integer)
+                        .notNull()
+                    table.column("uniqueId", .text)
+                        .notNull()
+                        .unique(onConflict: .fail)
+                    table.column("uniqueMessageId", .text)
+                        .notNull()
+                    table.column("uniqueThreadId", .text)
+                        .notNull()
+                    table.column("uuidString", .text)
+                        .notNull()
+                    table.column("creationTimestamp", .double)
+                        .notNull()
+                }
+                try db.create(index: "index_model_TSMention_on_uniqueId",
+                              on: "model_TSMention",
+                              columns: ["uniqueId"])
+                try db.create(index: "index_model_TSMention_on_uuidString_and_uniqueThreadId",
+                              on: "model_TSMention",
+                              columns: ["uuidString", "uniqueThreadId"])
+                try db.create(index: "index_model_TSMention_on_uniqueMessageId_and_uuidString",
+                              on: "model_TSMention",
+                              columns: ["uniqueMessageId", "uuidString"],
+                              unique: true)
+
+                try db.alter(table: "model_TSThread") { (table: TableAlteration) -> Void in
+                    table.add(column: "messageDraftBodyRanges", .blob)
+                }
+
+                try db.alter(table: "model_TSInteraction") { (table: TableAlteration) -> Void in
+                    table.add(column: "bodyRanges", .blob)
+                }
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addMentionNotificationMode.rawValue) { db in
+            do {
+                try db.alter(table: "model_TSThread") { (table: TableAlteration) -> Void in
+                    table.add(column: "mentionNotificationMode", .integer)
+                        .notNull()
+                        .defaults(to: 0)
+                }
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addOfferTypeToCalls.rawValue) { db in
+            do {
+                try db.alter(table: "model_TSInteraction") { (table: TableAlteration) -> Void in
+                    table.add(column: "offerType", .integer)
+                }
+
+                // Backfill all existing calls as "audio" calls.
+                try db.execute(sql: "UPDATE model_TSInteraction SET offerType = 0 WHERE recordType IS \(SDSRecordType.call.rawValue)")
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addServerDeliveryTimestamp.rawValue) { db in
+            do {
+                try db.alter(table: "model_IncomingGroupsV2MessageJob") { (table: TableAlteration) -> Void in
+                    table.add(column: "serverDeliveryTimestamp", .integer).notNull().defaults(to: 0)
+                }
+
+                try db.alter(table: "model_OWSMessageContentJob") { (table: TableAlteration) -> Void in
+                    table.add(column: "serverDeliveryTimestamp", .integer).notNull().defaults(to: 0)
+                }
+
+                try db.alter(table: "model_SSKJobRecord") { (table: TableAlteration) -> Void in
+                    table.add(column: "serverDeliveryTimestamp", .integer)
+                }
+
+                try db.alter(table: "model_TSInteraction") { (table: TableAlteration) -> Void in
+                    table.add(column: "serverDeliveryTimestamp", .integer)
+                }
+
+                // Backfill all incoming messages with "0" as their timestamp
+                try db.execute(sql: "UPDATE model_TSInteraction SET serverDeliveryTimestamp = 0 WHERE recordType IS \(SDSRecordType.incomingMessage.rawValue)")
+
+                // Backfill all jobs with "0" as their timestamp
+                try db.execute(sql: "UPDATE model_SSKJobRecord SET serverDeliveryTimestamp = 0 WHERE recordType IS \(SDSRecordType.messageDecryptJobRecord.rawValue)")
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.updateAnimatedStickers.rawValue) { db in
+            do {
+                try db.alter(table: "model_TSAttachment") { (table: TableAlteration) -> Void in
+                    table.add(column: "isAnimatedCached", .integer)
+                }
+                try db.alter(table: "model_InstalledSticker") { (table: TableAlteration) -> Void in
+                    table.add(column: "contentType", .text)
+                }
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.updateMarkedUnreadIndex.rawValue) { db in
+            do {
+                try db.drop(index: "index_model_TSThread_on_isMarkedUnread")
+                try db.create(
+                    index: "index_model_TSThread_on_isMarkedUnread_and_shouldThreadBeVisible",
+                    on: "model_TSThread",
+                    columns: ["isMarkedUnread", "shouldThreadBeVisible"]
+                )
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addGroupCallMessage2.rawValue) { db in
+            do {
+                try db.alter(table: "model_TSInteraction") { table in
+                    table.add(column: "eraId", .text)
+                    table.add(column: "hasEnded", .boolean)
+                    table.add(column: "creatorUuid", .text)
+                    table.add(column: "joinedMemberUuids", .blob)
+                }
+
+                try db.create(
+                    index: "index_model_TSInteraction_on_uniqueThreadId_and_hasEnded_and_recordType",
+                    on: "model_TSInteraction",
+                    columns: ["uniqueThreadId", "hasEnded", "recordType"]
+                )
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addGroupCallEraIdIndex.rawValue) { db in
+            do {
+                try db.create(
+                    index: "index_model_TSInteraction_on_uniqueThreadId_and_eraId_and_recordType",
+                    on: "model_TSInteraction",
+                    columns: ["uniqueThreadId", "eraId", "recordType"]
+                )
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addProfileBio.rawValue) { db in
+            do {
+                try db.alter(table: "model_OWSUserProfile") { table in
+                    table.add(column: "bio", .text)
+                    table.add(column: "bioEmoji", .text)
+                }
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addWasIdentityVerified.rawValue) { db in
+            do {
+                try db.alter(table: "model_TSInteraction") { table in
+                    table.add(column: "wasIdentityVerified", .boolean)
+                }
+
+                try db.execute(sql: "UPDATE model_TSInteraction SET wasIdentityVerified = 0")
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.storeMutedUntilDateAsMillisecondTimestamp.rawValue) { db in
+            do {
+                try db.alter(table: "model_TSThread") { table in
+                    table.add(column: "mutedUntilTimestamp", .integer).notNull().defaults(to: 0)
+                }
+
+                // Convert any existing mutedUntilDate (seconds) into mutedUntilTimestamp (milliseconds)
+                try db.execute(sql: "UPDATE model_TSThread SET mutedUntilTimestamp = CAST(mutedUntilDate * 1000 AS INT) WHERE mutedUntilDate IS NOT NULL")
+                try db.execute(sql: "UPDATE model_TSThread SET mutedUntilDate = NULL")
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addPaymentModels15.rawValue) { db in
+            do {
+                try db.alter(table: "model_TSInteraction") { (table: TableAlteration) -> Void in
+                    table.add(column: "paymentCancellation", .blob)
+                    table.add(column: "paymentNotification", .blob)
+                    table.add(column: "paymentRequest", .blob)
+                }
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addPaymentModels40.rawValue) { db in
+            do {
+                // PAYMENTS TODO: Remove.
+                try db.execute(sql: "DROP TABLE IF EXISTS model_TSPaymentModel")
+                try db.execute(sql: "DROP TABLE IF EXISTS model_TSPaymentRequestModel")
+
+                try db.create(table: "model_TSPaymentModel") { table in
+                    table.autoIncrementedPrimaryKey("id")
+                        .notNull()
+                    table.column("recordType", .integer)
+                        .notNull()
+                    table.column("uniqueId", .text)
+                        .notNull()
+                        .unique(onConflict: .fail)
+                    table.column("addressUuidString", .text)
+                    table.column("createdTimestamp", .integer)
+                        .notNull()
+                    table.column("isUnread", .boolean)
+                        .notNull()
+                    table.column("mcLedgerBlockIndex", .integer)
+                        .notNull()
+                    table.column("mcReceiptData", .blob)
+                    table.column("mcTransactionData", .blob)
+                    table.column("memoMessage", .text)
+                    table.column("mobileCoin", .blob)
+                    table.column("paymentAmount", .blob)
+                    table.column("paymentFailure", .integer)
+                        .notNull()
+                    table.column("paymentState", .integer)
+                        .notNull()
+                    table.column("paymentType", .integer)
+                        .notNull()
+                    table.column("requestUuidString", .text)
+                }
+
+                try db.create(index: "index_model_TSPaymentModel_on_uniqueId", on: "model_TSPaymentModel", columns: ["uniqueId"])
+                try db.create(index: "index_model_TSPaymentModel_on_paymentState", on: "model_TSPaymentModel", columns: ["paymentState"])
+                try db.create(index: "index_model_TSPaymentModel_on_mcLedgerBlockIndex", on: "model_TSPaymentModel", columns: ["mcLedgerBlockIndex"])
+                try db.create(index: "index_model_TSPaymentModel_on_mcReceiptData", on: "model_TSPaymentModel", columns: ["mcReceiptData"])
+                try db.create(index: "index_model_TSPaymentModel_on_mcTransactionData", on: "model_TSPaymentModel", columns: ["mcTransactionData"])
+                try db.create(index: "index_model_TSPaymentModel_on_isUnread", on: "model_TSPaymentModel", columns: ["isUnread"])
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.fixPaymentModels.rawValue) { db in
+            // We released a build with an out-of-date schema that didn't reflect
+            // `addPaymentModels15`. To fix this, we need to run the column adds
+            // again to get all users in a consistent state. We can safely skip
+            // this migration if it fails.
+            do {
+                try db.alter(table: "model_TSInteraction") { (table: TableAlteration) -> Void in
+                    table.add(column: "paymentCancellation", .blob)
+                    table.add(column: "paymentNotification", .blob)
+                    table.add(column: "paymentRequest", .blob)
+                }
+            } catch {
+                // We can safely skip this if it fails.
+                Logger.info("Skipping re-add of interaction payment columns.")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addGroupMember.rawValue) { db in
+            do {
+                try db.create(table: "model_TSGroupMember") { table in
+                    table.autoIncrementedPrimaryKey("id")
+                        .notNull()
+                    table.column("recordType", .integer)
+                        .notNull()
+                    table.column("uniqueId", .text)
+                        .notNull()
+                        .unique(onConflict: .fail)
+                    table.column("groupThreadId", .text)
+                        .notNull()
+                    table.column("phoneNumber", .text)
+                    table.column("uuidString", .text)
+                    table.column("lastInteractionTimestamp", .integer)
+                        .notNull().defaults(to: 0)
+                }
+
+                try db.create(index: "index_model_TSGroupMember_on_uniqueId",
+                              on: "model_TSGroupMember",
+                              columns: ["uniqueId"])
+                try db.create(index: "index_model_TSGroupMember_on_groupThreadId",
+                              on: "model_TSGroupMember",
+                              columns: ["groupThreadId"])
+                try db.create(index: "index_model_TSGroupMember_on_uuidString_and_groupThreadId",
+                              on: "model_TSGroupMember",
+                              columns: ["uuidString", "groupThreadId"],
+                              unique: true)
+                try db.create(index: "index_model_TSGroupMember_on_phoneNumber_and_groupThreadId",
+                              on: "model_TSGroupMember",
+                              columns: ["phoneNumber", "groupThreadId"],
+                              unique: true)
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.createPendingViewedReceipts.rawValue) { db in
+            do {
+                try db.create(table: "pending_viewed_receipts") { table in
+                    table.autoIncrementedPrimaryKey("id")
+                    table.column("threadId", .integer).notNull()
+                    table.column("messageTimestamp", .integer).notNull()
+                    table.column("authorPhoneNumber", .text)
+                    table.column("authorUuid", .text)
+                }
+                try db.create(index: "index_pending_viewed_receipts_on_threadId",
+                              on: "pending_viewed_receipts",
+                              columns: ["threadId"])
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addViewedToInteractions.rawValue) { db in
+            do {
+                try db.alter(table: "model_TSInteraction") { (table: TableAlteration) -> Void in
+                    table.add(column: "viewed", .boolean)
+                }
+
+                try db.execute(sql: "UPDATE model_TSInteraction SET viewed = 0")
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.createThreadAssociatedData.rawValue) { db in
+            do {
+                try db.create(table: "thread_associated_data") { table in
+                    table.autoIncrementedPrimaryKey("id")
+                    table.column("threadUniqueId", .text)
+                        .notNull()
+                        .unique(onConflict: .fail)
+                    table.column("isArchived", .boolean)
+                        .notNull()
+                        .defaults(to: false)
+                    table.column("isMarkedUnread", .boolean)
+                        .notNull()
+                        .defaults(to: false)
+                    table.column("mutedUntilTimestamp", .integer)
+                        .notNull()
+                        .defaults(to: 0)
+                }
+
+                try db.create(index: "index_thread_associated_data_on_threadUniqueId",
+                              on: "thread_associated_data",
+                              columns: ["threadUniqueId"],
+                              unique: true)
+                try db.create(index: "index_thread_associated_data_on_threadUniqueId_and_isMarkedUnread",
+                              on: "thread_associated_data",
+                              columns: ["threadUniqueId", "isMarkedUnread"])
+                try db.create(index: "index_thread_associated_data_on_threadUniqueId_and_isArchived",
+                              on: "thread_associated_data",
+                              columns: ["threadUniqueId", "isArchived"])
+            } catch {
+                owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.addServerGuidToInteractions.rawValue) { db in
+            do {
+                try db.alter(table: "model_TSInteraction") { (table: TableAlteration) -> Void in
+                    table.add(column: "serverGuid", .text)
+                }
             } catch {
                 owsFail("Error: \(error)")
             }
@@ -643,24 +1145,29 @@ public class GRDBSchemaMigrator: NSObject {
         // MARK: - Schema Migration Insertion Point
     }
 
-    func registerDataMigrations(migrator: inout DatabaseMigrator) {
+    func registerDataMigrations(migrator: DatabaseMigratorWrapper) {
 
         // The migration blocks should never throw. If we introduce a crashing
         // migration, we want the crash logs reflect where it occurred.
 
         migrator.registerMigration(MigrationId.dataMigration_populateGalleryItems.rawValue) { db in
             do {
-                try createInitialGalleryRecords(transaction: GRDBWriteTransaction(database: db))
+                let transaction = GRDBWriteTransaction(database: db)
+                defer { transaction.finalizeTransaction() }
+
+                try createInitialGalleryRecords(transaction: transaction)
             } catch {
                 owsFail("Error: \(error)")
             }
         }
 
         migrator.registerMigration(MigrationId.dataMigration_markOnboardedUsers_v2.rawValue) { db in
-            let transaction = GRDBWriteTransaction(database: db).asAnyWrite
-            if TSAccountManager.sharedInstance().isRegistered(transaction: transaction) {
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            if TSAccountManager.shared.isRegistered(transaction: transaction.asAnyWrite) {
                 Logger.info("marking existing user as onboarded")
-                TSAccountManager.sharedInstance().setIsOnboarded(true, transaction: transaction)
+                TSAccountManager.shared.setIsOnboarded(true, transaction: transaction.asAnyWrite)
             }
         }
 
@@ -669,14 +1176,19 @@ public class GRDBSchemaMigrator: NSObject {
         }
 
         migrator.registerMigration(MigrationId.dataMigration_enableV2RegistrationLockIfNecessary.rawValue) { db in
-            let transaction = GRDBWriteTransaction(database: db).asAnyWrite
-            guard KeyBackupService.hasMasterKey(transaction: transaction) else { return }
-            OWS2FAManager.keyValueStore().setBool(true, key: OWS2FAManager.isRegistrationLockV2EnabledKey, transaction: transaction)
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            guard KeyBackupService.hasMasterKey(transaction: transaction.asAnyWrite) else { return }
+
+            OWS2FAManager.keyValueStore().setBool(true, key: OWS2FAManager.isRegistrationLockV2EnabledKey, transaction: transaction.asAnyWrite)
         }
 
         migrator.registerMigration(MigrationId.dataMigration_resetStorageServiceData.rawValue) { db in
-            let transaction = GRDBWriteTransaction(database: db).asAnyWrite
-            SSKEnvironment.shared.storageServiceManager.resetLocalData(transaction: transaction)
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            Self.storageServiceManager.resetLocalData(transaction: transaction.asAnyWrite)
         }
 
         migrator.registerMigration(MigrationId.dataMigration_markAllInteractionsAsNotDeleted.rawValue) { db in
@@ -684,6 +1196,205 @@ public class GRDBSchemaMigrator: NSObject {
                 try db.execute(sql: "UPDATE model_TSInteraction SET wasRemotelyDeleted = 0")
             } catch {
                 owsFail("Error: \(error)")
+            }
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_recordMessageRequestInteractionIdEpoch.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            // Set the epoch only if we haven't already, this lets us track and grandfather
+            // conversations that existed before the message request feature was launched.
+            guard SSKPreferences.messageRequestInteractionIdEpoch(transaction: transaction) == nil else { return }
+
+            let maxId = GRDBInteractionFinder.maxRowId(transaction: transaction)
+            SSKPreferences.setMessageRequestInteractionIdEpoch(maxId, transaction: transaction)
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_indexSignalRecipients.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            // This migration was initially created as a schema migration instead of a data migration.
+            // If we already ran it there, we need to skip it here since we're doing inserts below that
+            // cannot be repeated.
+            guard !hasRunMigration("indexSignalRecipients", transaction: transaction) else { return }
+
+            SignalRecipient.anyEnumerate(transaction: transaction.asAnyWrite) { (signalRecipient: SignalRecipient,
+                _: UnsafeMutablePointer<ObjCBool>) in
+                GRDBFullTextSearchFinder.modelWasInserted(model: signalRecipient, transaction: transaction)
+            }
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_kbsStateCleanup.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            if KeyBackupService.hasMasterKey(transaction: transaction.asAnyRead) {
+                KeyBackupService.setMasterKeyBackedUp(true, transaction: transaction.asAnyWrite)
+            }
+
+            guard let isUsingRandomPinKey = OWS2FAManager.keyValueStore().getBool(
+                "isUsingRandomPinKey",
+                transaction: transaction.asAnyRead
+            ), isUsingRandomPinKey else { return }
+
+            OWS2FAManager.keyValueStore().removeValue(forKey: "isUsingRandomPinKey", transaction: transaction.asAnyWrite)
+            KeyBackupService.useDeviceLocalMasterKey(transaction: transaction.asAnyWrite)
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_turnScreenSecurityOnForExistingUsers.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            // Declare the key value store here, since it's normally only
+            // available in SignalMessaging (OWSPreferences).
+            let preferencesKeyValueStore = SDSKeyValueStore(collection: "SignalPreferences")
+            let screenSecurityKey = "Screen Security Key"
+            guard !preferencesKeyValueStore.hasValue(
+                forKey: screenSecurityKey,
+                transaction: transaction.asAnyRead
+            ) else { return }
+
+            preferencesKeyValueStore.setBool(true, key: screenSecurityKey, transaction: transaction.asAnyWrite)
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_disableLinkPreviewForExistingUsers.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+            let linkPreviewsWereEnabled = SSKPreferences.areLinkPreviewsEnabled(transaction: transaction.asAnyRead)
+
+            if linkPreviewsWereEnabled {
+                // Disable link previews until user interacts with megaphone
+                SSKPreferences.setAreLinkPreviewsEnabled(false, transaction: transaction.asAnyWrite)
+            } else {
+                // We don't want to show the megaphone for users that already had link previews disabled
+                ExperienceUpgradeFinder.markAsComplete(experienceUpgradeId: .linkPreviews, transaction: transaction)
+            }
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_groupIdMapping.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            TSThread.anyEnumerate(transaction: transaction.asAnyWrite) { (thread: TSThread,
+                _: UnsafeMutablePointer<ObjCBool>) in
+                guard let groupThread = thread as? TSGroupThread else {
+                    return
+                }
+                TSGroupThread.setGroupIdMapping(groupThread.uniqueId,
+                                                forGroupId: groupThread.groupModel.groupId,
+                                                transaction: transaction.asAnyWrite)
+            }
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_disableSharingSuggestionsForExistingUsers.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+            SSKPreferences.setAreSharingSuggestionsEnabled(false, transaction: transaction.asAnyWrite)
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_removeOversizedGroupAvatars.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            TSGroupThread.anyEnumerate(transaction: transaction.asAnyWrite) { (thread: TSThread, _) in
+                guard let groupThread = thread as? TSGroupThread else { return }
+                guard let avatarData = groupThread.groupModel.groupAvatarData else { return }
+                guard !TSGroupModel.isValidGroupAvatarData(avatarData) else { return }
+
+                var builder = groupThread.groupModel.asBuilder
+                builder.avatarData = nil
+                builder.avatarUrlPath = nil
+
+                do {
+                    let newGroupModel = try builder.build(transaction: transaction.asAnyWrite)
+                    groupThread.update(with: newGroupModel, transaction: transaction.asAnyWrite)
+                } catch {
+                    owsFail("Failed to remove invalid group avatar during migration: \(error)")
+                }
+            }
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_scheduleStorageServiceUpdateForMutedThreads.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            let cursor = TSThread.grdbFetchCursor(
+                sql: "SELECT * FROM \(ThreadRecord.databaseTableName) WHERE \(threadColumn: .mutedUntilTimestamp) > 0",
+                transaction: transaction
+            )
+
+            while let thread = try cursor.next() {
+                if let thread = thread as? TSContactThread {
+                    Self.storageServiceManager.recordPendingUpdates(updatedAddresses: [thread.contactAddress])
+                } else if let thread = thread as? TSGroupThread {
+                    Self.storageServiceManager.recordPendingUpdates(groupModel: thread.groupModel)
+                } else {
+                    owsFail("Unexpected thread type \(thread)")
+                }
+            }
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_populateGroupMember.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            let cursor = TSThread.grdbFetchCursor(
+                sql: "SELECT * FROM \(ThreadRecord.databaseTableName) WHERE \(threadColumn: .recordType) = \(SDSRecordType.groupThread.rawValue)",
+                transaction: transaction
+            )
+
+            while let thread = try cursor.next() {
+                guard let groupThread = thread as? TSGroupThread else {
+                    owsFail("Unexpected thread type \(thread)")
+                }
+                let interactionFinder = InteractionFinder(threadUniqueId: groupThread.uniqueId)
+                groupThread.groupMembership.fullMembers.forEach { address in
+                    // Group member addresses are low-trust, and the address cache has
+                    // not been populated yet at this point in time. We want to record
+                    // as close to a fully qualified address as we can in the database,
+                    // so defer to the address from the signal recipient (if one exists)
+                    let recipient = GRDBSignalRecipientFinder().signalRecipient(for: address, transaction: transaction)
+                    let memberAddress = recipient?.address ?? address
+
+                    let latestInteraction = interactionFinder.latestInteraction(from: memberAddress, transaction: transaction.asAnyWrite)
+                    let memberRecord = TSGroupMember(
+                        address: memberAddress,
+                        groupThreadId: groupThread.uniqueId,
+                        lastInteractionTimestamp: latestInteraction?.timestamp ?? 0
+                    )
+                    memberRecord.anyInsert(transaction: transaction.asAnyWrite)
+                }
+            }
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_cullInvalidIdentityKeySendingErrors.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            let sql = """
+                DELETE FROM \(InteractionRecord.databaseTableName)
+                WHERE \(interactionColumn: .recordType) = ?
+            """
+            transaction.executeUpdate(sql: sql, arguments: [SDSRecordType.invalidIdentityKeySendingErrorMessage.rawValue])
+        }
+
+        migrator.registerMigration(MigrationId.dataMigration_moveToThreadAssociatedData.rawValue) { db in
+            let transaction = GRDBWriteTransaction(database: db)
+            defer { transaction.finalizeTransaction() }
+
+            TSThread.anyEnumerate(transaction: transaction.asAnyWrite) { thread, _ in
+                do {
+                    try ThreadAssociatedData(
+                        threadUniqueId: thread.uniqueId,
+                        isArchived: thread.isArchivedObsolete,
+                        isMarkedUnread: thread.isMarkedUnreadObsolete,
+                        mutedUntilTimestamp: thread.mutedUntilTimestampObsolete
+                    ).insert(transaction.database)
+                } catch {
+                    owsFail("Error \(error)")
+                }
             }
         }
     }
@@ -1344,7 +2055,7 @@ public func createInitialGalleryRecords(transaction: GRDBWriteTransaction) throw
                 return
             }
 
-            try GRDBMediaGalleryFinder.insertGalleryRecord(attachmentStream: attachmentStream, transaction: transaction)
+            try MediaGalleryManager.insertGalleryRecord(attachmentStream: attachmentStream, transaction: transaction)
         }
     }
 }
@@ -1379,12 +2090,13 @@ public func dedupeSignalRecipients(transaction: SDSAnyWriteTransaction) throws {
         // Since we have duplicate recipients for an address, we want to keep the one returned by the
         // finder, since that is the one whose uniqueId is used as the `accountId` for the
         // accountId finder.
-        guard let primaryRecipient = SignalRecipient.registeredRecipient(for: address,
-                                                                         mustHaveDevices: false,
-                                                                         transaction: transaction) else {
-                                                                            owsFailDebug("primaryRecipient was unexpectedly nil")
-                                                                            continue
-
+        guard let primaryRecipient = SignalRecipient.get(
+            address: address,
+            mustHaveDevices: false,
+            transaction: transaction
+        ) else {
+            owsFailDebug("primaryRecipient was unexpectedly nil")
+            continue
         }
 
         let redundantRecipientIds = recipientIds.filter { $0 != primaryRecipient.uniqueId }
@@ -1396,5 +2108,13 @@ public func dedupeSignalRecipients(transaction: SDSAnyWriteTransaction) throws {
             Logger.info("removing redundant recipient: \(redundantRecipient)")
             redundantRecipient.anyRemove(transaction: transaction)
         }
+    }
+}
+
+private func hasRunMigration(_ identifier: String, transaction: GRDBReadTransaction) -> Bool {
+    do {
+        return try String.fetchOne(transaction.database, sql: "SELECT identifier FROM grdb_migrations WHERE identifier = ?", arguments: [identifier]) != nil
+    } catch {
+        owsFail("Error: \(error)")
     }
 }

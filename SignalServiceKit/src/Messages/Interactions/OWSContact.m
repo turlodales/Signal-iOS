@@ -1,18 +1,18 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSContact.h"
-#import "Contact.h"
-#import "MimeTypeUtil.h"
 #import "OWSContact+Private.h"
-#import "PhoneNumber.h"
-#import "TSAttachment.h"
-#import "TSAttachmentPointer.h"
-#import "TSAttachmentStream.h"
 #import <Contacts/Contacts.h>
 #import <SignalCoreKit/NSString+OWS.h>
+#import <SignalServiceKit/Contact.h>
+#import <SignalServiceKit/MimeTypeUtil.h>
+#import <SignalServiceKit/OWSContact.h>
+#import <SignalServiceKit/PhoneNumber.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSAttachment.h>
+#import <SignalServiceKit/TSAttachmentPointer.h>
+#import <SignalServiceKit/TSAttachmentStream.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -299,6 +299,9 @@ NSString *NSStringForContactAddressType(OWSContactAddressType value)
     if (self.displayName.length > 0) {
         [result appendFormat:@"displayName: %@, ", self.displayName];
     }
+    if (self.displayName.length > 0) {
+        [result appendFormat:@"nickname: %@, ", self.nickname];
+    }
 
     [result appendString:@"]"];
     return result;
@@ -323,6 +326,7 @@ NSString *NSStringForContactAddressType(OWSContactAddressType value)
     components.middleName = self.middleName;
     components.namePrefix = self.namePrefix;
     components.nameSuffix = self.nameSuffix;
+    components.nickname   = self.nickname;
     return components;
 }
 
@@ -330,11 +334,19 @@ NSString *NSStringForContactAddressType(OWSContactAddressType value)
 {
     if (_displayName.length < 1) {
         CNContact *_Nullable cnContact = [self systemContactForName];
-        _displayName = [CNContactFormatter stringFromContact:cnContact style:CNContactFormatterStyleFullName];
+        if (cnContact.nickname.length > 0) {
+            _displayName = cnContact.nickname.ows_stripped;
+        } else {
+            _displayName = [CNContactFormatter stringFromContact:cnContact style:CNContactFormatterStyleFullName];
+        }
     }
     if (_displayName.length < 1) {
-        // Fall back to using the organization name.
-        _displayName = self.organizationName;
+        if (_nickname.length > 0) {
+            _displayName = self.nickname;
+        } else {
+            // Fall back to using the organization name.
+            _displayName = self.organizationName;
+        }
     }
 }
 
@@ -353,6 +365,7 @@ NSString *NSStringForContactAddressType(OWSContactAddressType value)
     systemContact.familyName = self.familyName.ows_stripped;
     systemContact.namePrefix = self.namePrefix.ows_stripped;
     systemContact.nameSuffix = self.nameSuffix.ows_stripped;
+    systemContact.nickname = self.nickname.ows_stripped;
     // We don't need to set display name, it's implicit for system contacts.
     systemContact.organizationName = self.organizationName.ows_stripped;
     return systemContact;
@@ -362,7 +375,7 @@ NSString *NSStringForContactAddressType(OWSContactAddressType value)
 {
     return (self.givenName.ows_stripped.length > 0 || self.middleName.ows_stripped.length > 0
         || self.familyName.ows_stripped.length > 0 || self.namePrefix.ows_stripped.length > 0
-        || self.nameSuffix.ows_stripped.length > 0);
+            || self.nameSuffix.ows_stripped.length > 0 || self.nickname.ows_stripped.length > 0);
 }
 
 @end
@@ -528,25 +541,32 @@ NSString *NSStringForContactAddressType(OWSContactAddressType value)
 
 #pragma mark - Phone Numbers and Recipient IDs
 
-- (NSArray<NSString *> *)systemContactsWithSignalAccountPhoneNumbers:(id<ContactsManagerProtocol>)contactsManager
+- (NSArray<NSString *> *)systemContactsWithSignalAccountPhoneNumbers
 {
-    OWSAssertDebug(contactsManager);
-
     return [self.e164PhoneNumbers
-        filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *_Nullable recipientId,
+        filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *_Nullable phoneNumber,
                                         NSDictionary<NSString *, id> *_Nullable bindings) {
-            return [contactsManager isSystemContactWithSignalAccount:recipientId];
+            SignalServiceAddress *address = [[SignalServiceAddress alloc] initWithPhoneNumber:phoneNumber];
+            return [OWSContact.contactsManager isSystemContactWithSignalAccount:address];
         }]];
 }
 
-- (NSArray<NSString *> *)systemContactPhoneNumbers:(id<ContactsManagerProtocol>)contactsManager
+- (NSArray<NSString *> *)systemContactsWithSignalAccountPhoneNumbersWithTransaction:(SDSAnyReadTransaction *)transaction
 {
-    OWSAssertDebug(contactsManager);
+    return [self.e164PhoneNumbers
+        filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *_Nullable phoneNumber,
+                                        NSDictionary<NSString *, id> *_Nullable bindings) {
+            SignalServiceAddress *address = [[SignalServiceAddress alloc] initWithPhoneNumber:phoneNumber];
+            return [OWSContact.contactsManager isSystemContactWithSignalAccount:address transaction:transaction];
+        }]];
+}
 
+- (NSArray<NSString *> *)systemContactPhoneNumbers
+{
     return [self.e164PhoneNumbers
         filteredArrayUsingPredicate:[NSPredicate predicateWithBlock:^BOOL(NSString *_Nullable recipientId,
                                         NSDictionary<NSString *, id> *_Nullable bindings) {
-            return [contactsManager isSystemContactWithPhoneNumber:recipientId];
+            return [OWSContact.contactsManager isSystemContactWithPhoneNumber:recipientId];
         }]];
 }
 
@@ -594,6 +614,7 @@ NSString *NSStringForContactAddressType(OWSContactAddressType value)
     contactName.familyName = systemContact.familyName.ows_stripped;
     contactName.namePrefix = systemContact.namePrefix.ows_stripped;
     contactName.nameSuffix = systemContact.nameSuffix.ows_stripped;
+    contactName.nickname   = systemContact.nickname.ows_stripped;
     contactName.organizationName = systemContact.organizationName.ows_stripped;
     [contactName ensureDisplayName];
     contact.name = contactName;

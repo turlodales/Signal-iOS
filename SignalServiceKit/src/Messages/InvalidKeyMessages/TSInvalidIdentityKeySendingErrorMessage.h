@@ -1,17 +1,14 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSInvalidIdentityKeyErrorMessage.h"
+#import <SignalServiceKit/TSInvalidIdentityKeyErrorMessage.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @class PreKeyBundle;
 @class TSOutgoingMessage;
 @class TSThread;
-
-extern NSString *TSInvalidPreKeyBundleKey;
-extern NSString *TSInvalidRecipientKey;
 
 // DEPRECATED - we no longer create new instances of this class (as of  mid-2017); However, existing instances may
 // exist, so we should keep this class around to honor their old behavior.
@@ -20,11 +17,6 @@ __attribute__((deprecated)) @interface TSInvalidIdentityKeySendingErrorMessage :
 @property (nonatomic, readonly) NSString *messageId;
 
 - (nullable instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
-
-- (instancetype)initWithTimestamp:(uint64_t)timestamp
-                           thread:(TSThread *)thread
-                failedMessageType:(TSErrorMessageType)errorMessageType
-                          address:(nullable SignalServiceAddress *)address NS_UNAVAILABLE;
 
 // --- CODE GENERATION MARKER
 
@@ -40,6 +32,7 @@ __attribute__((deprecated)) @interface TSInvalidIdentityKeySendingErrorMessage :
                   uniqueThreadId:(NSString *)uniqueThreadId
                    attachmentIds:(NSArray<NSString *> *)attachmentIds
                             body:(nullable NSString *)body
+                      bodyRanges:(nullable MessageBodyRanges *)bodyRanges
                     contactShare:(nullable OWSContact *)contactShare
                  expireStartedAt:(uint64_t)expireStartedAt
                        expiresAt:(uint64_t)expiresAt
@@ -54,9 +47,10 @@ __attribute__((deprecated)) @interface TSInvalidIdentityKeySendingErrorMessage :
                        errorType:(TSErrorMessageType)errorType
                             read:(BOOL)read
                 recipientAddress:(nullable SignalServiceAddress *)recipientAddress
+             wasIdentityVerified:(BOOL)wasIdentityVerified
                        messageId:(NSString *)messageId
                     preKeyBundle:(PreKeyBundle *)preKeyBundle
-NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(grdbId:uniqueId:receivedAtTimestamp:sortId:timestamp:uniqueThreadId:attachmentIds:body:contactShare:expireStartedAt:expiresAt:expiresInSeconds:isViewOnceComplete:isViewOnceMessage:linkPreview:messageSticker:quotedMessage:storedShouldStartExpireTimer:wasRemotelyDeleted:errorType:read:recipientAddress:messageId:preKeyBundle:));
+NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(grdbId:uniqueId:receivedAtTimestamp:sortId:timestamp:uniqueThreadId:attachmentIds:body:bodyRanges:contactShare:expireStartedAt:expiresAt:expiresInSeconds:isViewOnceComplete:isViewOnceMessage:linkPreview:messageSticker:quotedMessage:storedShouldStartExpireTimer:wasRemotelyDeleted:errorType:read:recipientAddress:wasIdentityVerified:messageId:preKeyBundle:));
 
 // clang-format on
 

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -173,6 +173,48 @@ extension TestModel: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension TestModel: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == TestModel.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let dateValue: Date? = modelToCopy.dateValue
+            let doubleValue: Double = modelToCopy.doubleValue
+            let floatValue: Float = modelToCopy.floatValue
+            let int64Value: Int64 = modelToCopy.int64Value
+            let nsIntegerValue: Int = modelToCopy.nsIntegerValue
+            let nsNumberValueUsingInt64: NSNumber? = modelToCopy.nsNumberValueUsingInt64
+            let nsNumberValueUsingUInt64: NSNumber? = modelToCopy.nsNumberValueUsingUInt64
+            let nsuIntegerValue: UInt = modelToCopy.nsuIntegerValue
+            let uint64Value: UInt64 = modelToCopy.uint64Value
+
+            return TestModel(grdbId: id,
+                             uniqueId: uniqueId,
+                             dateValue: dateValue,
+                             doubleValue: doubleValue,
+                             floatValue: floatValue,
+                             int64Value: int64Value,
+                             nsIntegerValue: nsIntegerValue,
+                             nsNumberValueUsingInt64: nsNumberValueUsingInt64,
+                             nsNumberValueUsingUInt64: nsNumberValueUsingUInt64,
+                             nsuIntegerValue: nsuIntegerValue,
+                             uint64Value: uint64Value)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension TestModelSerializer {
@@ -319,9 +361,11 @@ public extension TestModel {
 
 @objc
 public class TestModelCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<TestModelRecord>?
 
-    init(cursor: RecordCursor<TestModelRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<TestModelRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -363,10 +407,10 @@ public extension TestModel {
         let database = transaction.database
         do {
             let cursor = try TestModelRecord.fetchCursor(database)
-            return TestModelCursor(cursor: cursor)
+            return TestModelCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return TestModelCursor(cursor: nil)
+            return TestModelCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -376,8 +420,6 @@ public extension TestModel {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return TestModel.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(TestModelRecord.databaseTableName) WHERE \(testModelColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -408,28 +450,20 @@ public extension TestModel {
                             batchSize: UInt,
                             block: @escaping (TestModel, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            TestModel.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? TestModel else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = TestModel.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = TestModel.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -457,10 +491,6 @@ public extension TestModel {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: TestModel.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -492,8 +522,6 @@ public extension TestModel {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: TestModel.collection())
         case .grdbRead(let grdbTransaction):
             return TestModelRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -503,8 +531,6 @@ public extension TestModel {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: TestModel.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try TestModelRecord.deleteAll(grdbTransaction.database)
@@ -553,8 +579,6 @@ public extension TestModel {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: TestModel.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(TestModelRecord.databaseTableName) WHERE \(testModelColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -572,11 +596,11 @@ public extension TestModel {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try TestModelRecord.fetchCursor(transaction.database, sqlRequest)
-            return TestModelCursor(cursor: cursor)
+            return TestModelCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return TestModelCursor(cursor: nil)
+            return TestModelCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -632,3 +656,20 @@ class TestModelSerializer: SDSSerializer {
         return TestModelRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, dateValue: dateValue, doubleValue: doubleValue, floatValue: floatValue, int64Value: int64Value, nsIntegerValue: nsIntegerValue, nsNumberValueUsingInt64: nsNumberValueUsingInt64, nsNumberValueUsingUInt64: nsNumberValueUsingUInt64, nsuIntegerValue: nsuIntegerValue, uint64Value: uint64Value)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension TestModel {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> TestModel {
+        guard let record = try asRecord() as? TestModelRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try TestModel.fromRecord(record)
+    }
+}
+#endif

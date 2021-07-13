@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
@@ -10,7 +10,6 @@ NS_ASSUME_NONNULL_BEGIN
 @class PhoneNumber;
 @class SDSAnyReadTransaction;
 @class SignalAccount;
-@class SignalAccountReadCache;
 @class SignalServiceAddress;
 @class TSThread;
 @class UIImage;
@@ -28,8 +27,19 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSString *)displayNameForAddress:(SignalServiceAddress *)address transaction:(SDSAnyReadTransaction *)transaction;
 - (NSString *)displayNameForSignalAccount:(SignalAccount *)signalAccount;
 
-- (NSString *)conversationColorNameForAddress:(SignalServiceAddress *)address
-                                  transaction:(SDSAnyReadTransaction *)transaction;
+/// Returns the user's nickname / first name, if supported by the name's locale.
+/// If we don't know the user's name components, falls back to displayNameForAddress:
+///
+/// The user can customize their short name preferences in the system settings app
+/// to any of these variants which we respect:
+///     * Given Name - Family Initial
+///     * Family Name - Given Initial
+///     * Given Name Only
+///     * Family Name Only
+///     * Prefer Nicknames
+///     * Full Names Only
+- (NSString *)shortDisplayNameForAddress:(SignalServiceAddress *)address
+                             transaction:(SDSAnyReadTransaction *)transaction;
 
 - (nullable NSPersonNameComponents *)nameComponentsForAddress:(SignalServiceAddress *)address;
 - (nullable NSPersonNameComponents *)nameComponentsForAddress:(SignalServiceAddress *)address
@@ -43,19 +53,18 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (BOOL)isSystemContactWithPhoneNumber:(NSString *)phoneNumber NS_SWIFT_NAME(isSystemContact(phoneNumber:));
 - (BOOL)isSystemContactWithAddress:(SignalServiceAddress *)address NS_SWIFT_NAME(isSystemContact(address:));
+- (BOOL)isSystemContactWithSignalAccount:(SignalServiceAddress *)address
+    NS_SWIFT_NAME(isSystemContactWithSignalAccount(_:));
+- (BOOL)isSystemContactWithSignalAccount:(SignalServiceAddress *)address
+                             transaction:(SDSAnyReadTransaction *)transaction
+    NS_SWIFT_NAME(isSystemContactWithSignalAccount(_:transaction:));
+- (BOOL)hasNameInSystemContactsForAddress:(SignalServiceAddress *)address;
+- (BOOL)hasNameInSystemContactsForAddress:(SignalServiceAddress *)address
+                              transaction:(SDSAnyReadTransaction *)transaction;
 
-- (BOOL)isSystemContactWithSignalAccount:(NSString *)phoneNumber;
-
-- (NSArray<SignalServiceAddress *> *)sortSignalServiceAddresses:(NSArray<SignalServiceAddress *> *)addresses
-                                                    transaction:(SDSAnyReadTransaction *)transaction;
-
-- (NSComparisonResult)compareSignalAccount:(SignalAccount *)left
-                         withSignalAccount:(SignalAccount *)right NS_SWIFT_NAME(compare(signalAccount:with:));
-
+- (NSString *)comparableNameForAddress:(SignalServiceAddress *)address transaction:(SDSAnyReadTransaction *)transaction;
 - (NSString *)comparableNameForSignalAccount:(SignalAccount *)signalAccount
                                  transaction:(SDSAnyReadTransaction *)transaction;
-
-@property (nonatomic, readonly) SignalAccountReadCache *signalAccountReadCache;
 
 @property (nonatomic, readonly) NSString *unknownUserLabel;
 

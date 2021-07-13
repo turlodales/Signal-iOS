@@ -1,14 +1,13 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import MultipeerConnectivity
 
 class DeviceTransferProgressViewController: DeviceTransferBaseViewController {
-    var deviceTransferService: DeviceTransferService { .shared }
 
-    override var requiresDismissConfirmation: Bool { TSAccountManager.sharedInstance().isTransferInProgress }
+    override var requiresDismissConfirmation: Bool { TSAccountManager.shared.isTransferInProgress }
 
     let progressView: TransferProgressView
     init(progress: Progress) {

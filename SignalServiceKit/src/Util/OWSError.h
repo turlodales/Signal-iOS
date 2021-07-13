@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
@@ -15,9 +15,10 @@ typedef NS_ENUM(NSInteger, OWSErrorCode) {
     OWSErrorCodeFailedToEncodeJson = 14,
     OWSErrorCodeFailedToDecodeQR = 15,
     OWSErrorCodePrivacyVerificationFailure = 20,
-    OWSErrorCodeUntrustedIdentity = 25,
+    OWSErrorCodeUntrustedIdentity = 777427,
     OWSErrorCodeFailedToSendOutgoingMessage = 30,
     OWSErrorCodeAssertionFailure = 31,
+    OWSErrorCodeGenericFailure = 32,
     OWSErrorCodeFailedToDecryptMessage = 100,
     OWSErrorCodeFailedToDecryptUDMessage = 101,
     OWSErrorCodeFailedToEncryptMessage = 110,
@@ -29,7 +30,6 @@ typedef NS_ENUM(NSInteger, OWSErrorCode) {
     OWSErrorCodeMessageSendDisabledDueToPreKeyUpdateFailures = 777405,
     OWSErrorCodeMessageSendFailedToBlockList = 777406,
     OWSErrorCodeMessageSendNoValidRecipients = 777407,
-    OWSErrorCodeContactsUpdaterRateLimit = 777408,
     OWSErrorCodeCouldNotWriteAttachmentData = 777409,
     OWSErrorCodeMessageDeletedBeforeSent = 777410,
     OWSErrorCodeDatabaseConversionFatalError = 777411,
@@ -61,7 +61,9 @@ typedef NS_ENUM(NSInteger, OWSErrorCode) {
     OWSErrorCodeMissingLocalThread,
     OWSErrorCodeContactSyncFailed,
     OWSErrorCodeAppDeregistered,
-    OWSErrorCodeRegistrationTransferAvailable
+    OWSErrorCodeRegistrationTransferAvailable,
+    OWSErrorCodeFailedToDecryptDuplicateMessage,
+    OWSErrorCodeServerRejectedSuspectedSpam
 };
 
 extern NSString *const OWSErrorRecipientAddressKey;
@@ -73,7 +75,14 @@ extern NSError *OWSErrorMakeUnableToProcessServerResponseError(void);
 extern NSError *OWSErrorMakeFailedToSendOutgoingMessageError(void);
 extern NSError *OWSErrorMakeNoSuchSignalRecipientError(void);
 extern NSError *OWSErrorMakeAssertionError(NSString *descriptionFormat, ...);
+extern NSError *OWSErrorMakeGenericError(NSString *descriptionFormat, ...);
 extern NSError *OWSErrorMakeMessageSendDisabledDueToPreKeyUpdateFailuresError(void);
 extern NSError *OWSErrorMakeMessageSendFailedDueToBlockListError(void);
+
+@interface NSError (OWSError)
+
+- (BOOL)ows_isSSKErrorWithCode:(NSUInteger)code;
+
+@end
 
 NS_ASSUME_NONNULL_END

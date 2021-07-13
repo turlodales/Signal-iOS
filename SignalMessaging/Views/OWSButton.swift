@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
@@ -8,7 +8,17 @@ import UIKit
 public class OWSButton: UIButton {
 
     @objc
-    var block: () -> Void = { }
+    public var block: () -> Void = { }
+
+    @objc
+    public var dimsWhenHighlighted = false
+
+    public override var isHighlighted: Bool {
+        didSet {
+            guard dimsWhenHighlighted else { return }
+            alpha = isHighlighted ? 0.4 : 1
+        }
+    }
 
     // MARK: -
 
@@ -43,7 +53,11 @@ public class OWSButton: UIButton {
     }
 
     @objc
-    public func setImage(imageName: String) {
+    public func setImage(imageName: String?) {
+        guard let imageName = imageName else {
+            setImage(nil, for: .normal)
+            return
+        }
         if let image = UIImage(named: imageName) {
             setImage(image.withRenderingMode(.alwaysTemplate), for: .normal)
         } else {

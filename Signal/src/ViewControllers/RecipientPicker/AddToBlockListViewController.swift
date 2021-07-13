@@ -1,12 +1,12 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import PromiseKit
 
 @objc
-protocol AddToBlockListDelegate: class {
+protocol AddToBlockListDelegate: AnyObject {
     func addToBlockListComplete()
 }
 
@@ -35,6 +35,16 @@ class AddToBlockListViewController: OWSViewController {
         )
     }
 
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        recipientPicker.applyTheme(to: self)
+    }
+
+    override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        recipientPicker.removeTheme(from: self)
+    }
+
     func block(address: SignalServiceAddress) {
         BlockListUIUtils.showBlockAddressActionSheet(
             address,
@@ -59,18 +69,19 @@ class AddToBlockListViewController: OWSViewController {
 }
 
 extension AddToBlockListViewController: RecipientPickerDelegate {
+
     func recipientPicker(
         _ recipientPickerViewController: RecipientPickerViewController,
         canSelectRecipient recipient: PickedRecipient
     ) -> RecipientPickerRecipientState {
         switch recipient.identifier {
         case .address(let address):
-            guard !recipientPicker.contactsViewHelper.isSignalServiceAddressBlocked(address) else {
+            guard !contactsViewHelper.isSignalServiceAddressBlocked(address) else {
                 return .userAlreadyInBlocklist
             }
             return .canBeSelected
         case .group(let thread):
-            guard !recipientPicker.contactsViewHelper.isThreadBlocked(thread) else {
+            guard !contactsViewHelper.isThreadBlocked(thread) else {
                 return .conversationAlreadyInBlocklist
             }
             return .canBeSelected
@@ -107,14 +118,15 @@ extension AddToBlockListViewController: RecipientPickerDelegate {
 
     func recipientPicker(
         _ recipientPickerViewController: RecipientPickerViewController,
-        accessoryMessageForRecipient recipient: PickedRecipient
+        accessoryMessageForRecipient recipient: PickedRecipient,
+        transaction: SDSAnyReadTransaction
     ) -> String? {
         switch recipient.identifier {
         case .address(let address):
-            guard recipientPicker.contactsViewHelper.isSignalServiceAddressBlocked(address) else { return nil }
+            guard contactsViewHelper.isSignalServiceAddressBlocked(address) else { return nil }
             return MessageStrings.conversationIsBlocked
         case .group(let thread):
-            guard recipientPicker.contactsViewHelper.isThreadBlocked(thread) else { return nil }
+            guard contactsViewHelper.isThreadBlocked(thread) else { return nil }
             return MessageStrings.conversationIsBlocked
         }
     }

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
@@ -19,15 +19,15 @@ public class OnboardingPermissionsViewController: OnboardingBaseViewController {
 
         view.backgroundColor = Theme.backgroundColor
 
-        navigationItem.rightBarButtonItem = UIBarButtonItem(title: NSLocalizedString("NAVIGATION_ITEM_SKIP_BUTTON", comment: "A button to skip a view."),
+        navigationItem.rightBarButtonItem = UIBarButtonItem(title: CommonStrings.skipButton,
                                                             style: .plain,
                                                             target: self,
                                                             action: #selector(skipWasPressed))
 
-        let titleLabel = self.titleLabel(text: NSLocalizedString("ONBOARDING_PERMISSIONS_TITLE", comment: "Title of the 'onboarding permissions' view."))
+        let titleLabel = self.createTitleLabel(text: NSLocalizedString("ONBOARDING_PERMISSIONS_TITLE", comment: "Title of the 'onboarding permissions' view."))
         titleLabel.accessibilityIdentifier = "onboarding.permissions." + "titleLabel"
 
-        let explanationLabel = self.explanationLabel(explanationText: NSLocalizedString("ONBOARDING_PERMISSIONS_EXPLANATION",
+        let explanationLabel = self.createExplanationLabel(explanationText: NSLocalizedString("ONBOARDING_PERMISSIONS_EXPLANATION",
                                                                                   comment: "Explanation in the 'onboarding permissions' view."))
         explanationLabel.accessibilityIdentifier = "onboarding.permissions." + "explanationLabel"
 
@@ -70,13 +70,10 @@ public class OnboardingPermissionsViewController: OnboardingBaseViewController {
         Logger.info("")
 
         firstly {
-            requestContactsAccess()
+            PushRegistrationManager.shared.registerUserNotificationSettings()
         }.then { _ in
-            return PushRegistrationManager.shared.registerUserNotificationSettings()
-        }.done { [weak self] in
-            guard let self = self else {
-                return
-            }
+            self.requestContactsAccess()
+        }.done {
             self.onboardingController.onboardingPermissionsDidComplete(viewController: self)
         }.catch { error in
             owsFailDebug("Error: \(error)")

@@ -1,9 +1,8 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSRecipientIdentity.h"
-#import <AxolotlKit/IdentityKeyStore.h>
+#import <SignalServiceKit/OWSRecipientIdentity.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -18,6 +17,13 @@ extern const NSUInteger kIdentityKeyLength;
 extern const NSUInteger kStoredIdentityKeyLength;
 #endif
 
+typedef NS_ENUM(NSInteger, TSMessageDirection) {
+    TSMessageDirectionUnknown = 0,
+    TSMessageDirectionIncoming,
+    TSMessageDirectionOutgoing
+};
+
+@class ECKeyPair;
 @class OWSRecipientIdentity;
 @class SDSAnyReadTransaction;
 @class SDSAnyWriteTransaction;
@@ -26,18 +32,16 @@ extern const NSUInteger kStoredIdentityKeyLength;
 @class SignalServiceAddress;
 
 // This class can be safely accessed and used from any thread.
-@interface OWSIdentityManager : NSObject <IdentityKeyStore>
+@interface OWSIdentityManager : NSObject
 
 + (instancetype)new NS_UNAVAILABLE;
 - (instancetype)init NS_UNAVAILABLE;
 - (instancetype)initWithDatabaseStorage:(SDSDatabaseStorage *)databaseStorage;
-- (void)recreateDatabaseQueue;
-
-+ (instancetype)sharedManager;
 
 - (void)generateNewIdentityKey;
 - (void)storeIdentityKeyPair:(ECKeyPair *)keyPair transaction:(SDSAnyWriteTransaction *)transaction;
 
+- (int)localRegistrationIdWithTransaction:(SDSAnyWriteTransaction *)transaction;
 - (nullable ECKeyPair *)identityKeyPairWithTransaction:(SDSAnyReadTransaction *)transaction;
 
 - (void)setVerificationState:(OWSVerificationState)verificationState
@@ -56,6 +60,8 @@ extern const NSUInteger kStoredIdentityKeyLength;
        isUserInitiatedChange:(BOOL)isUserInitiatedChange;
 
 - (nullable OWSRecipientIdentity *)recipientIdentityForAddress:(SignalServiceAddress *)address;
+- (nullable OWSRecipientIdentity *)recipientIdentityForAddress:(SignalServiceAddress *)address
+                                                   transaction:(SDSAnyReadTransaction *)transaction;
 
 /**
  * @param   address of the recipient
@@ -101,32 +107,6 @@ extern const NSUInteger kStoredIdentityKeyLength;
 #endif
 
 - (void)tryToSyncQueuedVerificationStates;
-
-#pragma mark - Deprecated IdentityStore methods
-
-- (nullable ECKeyPair *)identityKeyPair:(nullable id<SPKProtocolWriteContext>)protocolContext
-    DEPRECATED_MSG_ATTRIBUTE("use the strongly typed `transaction:` flavor instead");
-
-- (int)localRegistrationId:(nullable id<SPKProtocolWriteContext>)protocolContext
-    DEPRECATED_MSG_ATTRIBUTE("use the strongly typed `transaction:` flavor instead");
-
-- (BOOL)saveRemoteIdentity:(NSData *)identityKey
-               recipientId:(NSString *)accountId
-           protocolContext:(nullable id<SPKProtocolWriteContext>)protocolContext
-    DEPRECATED_MSG_ATTRIBUTE("use the strongly typed `transaction:` flavor instead");
-
-- (BOOL)isTrustedIdentityKey:(NSData *)identityKey
-                 recipientId:(NSString *)accountId
-                   direction:(TSMessageDirection)direction
-             protocolContext:(nullable id<SPKProtocolWriteContext>)protocolContext
-    DEPRECATED_MSG_ATTRIBUTE("use the strongly typed `transaction:` flavor instead");
-
-- (nullable NSData *)identityKeyForRecipientId:(NSString *)accountId
-    DEPRECATED_MSG_ATTRIBUTE("use the strongly typed `transaction:` flavor instead");
-
-- (nullable NSData *)identityKeyForRecipientId:(NSString *)accountId
-                               protocolContext:(nullable id<SPKProtocolReadContext>)protocolContext
-    DEPRECATED_MSG_ATTRIBUTE("use the strongly typed `transaction:` flavor instead");
 
 @end
 

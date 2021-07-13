@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
@@ -70,7 +70,7 @@ class ContactCell: UITableViewCell {
         self.subtitleLabel.font = UIFont.ows_dynamicTypeSubheadline
     }
 
-    func configure(contact: Contact, subtitleType: SubtitleCellValue, showsWhenSelected: Bool, contactsManager: OWSContactsManager) {
+    func configure(contact: Contact, subtitleType: SubtitleCellValue, showsWhenSelected: Bool) {
 
         self.contact = contact
         self.showsWhenSelected = showsWhenSelected
@@ -87,22 +87,16 @@ class ContactCell: UITableViewCell {
         if let contactImage = contactsManager.avatarImage(forCNContactId: contact.cnContactId) {
             contactImageView.image = contactImage
         } else {
-            let contactIdForDeterminingBackgroundColor: String
-            if let signalId = contact.parsedPhoneNumbers.first?.toE164() {
-                contactIdForDeterminingBackgroundColor = signalId
-            } else {
-                contactIdForDeterminingBackgroundColor = contact.fullName
-            }
-
             var nameComponents = PersonNameComponents()
             nameComponents.givenName = contact.firstName
             nameComponents.familyName = contact.lastName
 
-            let avatarBuilder = OWSContactAvatarBuilder(nonSignalNameComponents: nameComponents,
-                                                        colorSeed: contactIdForDeterminingBackgroundColor,
-                                                        diameter: ContactCell.kAvatarDiameter)
-
-            contactImageView.image = avatarBuilder.build()
+            let avatar = databaseStorage.read { transaction in
+                Self.avatarBuilder.avatarImage(personNameComponents: nameComponents,
+                                               diameterPoints: ContactCell.kAvatarDiameter,
+                                               transaction: transaction)
+            }
+            contactImageView.image = avatar
         }
     }
 
@@ -154,7 +148,7 @@ fileprivate extension CNContact {
 
         if let attributedName = CNContactFormatter.attributedString(from: self, style: .fullName, defaultAttributes: nil) {
             let highlightedName = attributedName.mutableCopy() as! NSMutableAttributedString
-            highlightedName.enumerateAttributes(in: NSRange(location: 0, length: highlightedName.length), options: [], using: { (attrs, range, _) in
+            highlightedName.enumerateAttributes(in: highlightedName.entireRange, options: [], using: { (attrs, range, _) in
                 if let property = attrs[NSAttributedString.Key(rawValue: CNContactPropertyAttribute)] as? String, property == keyToHighlight {
                     highlightedName.addAttributes(boldAttributes, range: range)
                 }

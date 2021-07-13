@@ -25,7 +25,7 @@ private class ImageEditorOperation: NSObject {
 // MARK: -
 
 @objc
-public protocol ImageEditorModelObserver: class {
+public protocol ImageEditorModelObserver: AnyObject {
     // Used for large changes to the model, when the entire
     // model should be reloaded.
     func imageEditorModelDidChange(before: ImageEditorContents,
@@ -259,10 +259,10 @@ public class ImageEditorModel: NSObject {
     private var temporaryFilePaths = [String]()
 
     @objc
-    public func temporaryFilePath(withFileExtension fileExtension: String) -> String {
+    public func temporaryFilePath(fileExtension: String) -> String {
         AssertIsOnMainThread()
 
-        let filePath = OWSFileSystem.temporaryFilePath(withFileExtension: fileExtension)
+        let filePath = OWSFileSystem.temporaryFilePath(fileExtension: fileExtension)
         temporaryFilePaths.append(filePath)
         return filePath
     }

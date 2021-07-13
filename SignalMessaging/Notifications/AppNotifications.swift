@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -21,25 +21,29 @@ import PromiseKit
 /// wired directly into the appropriate callback point.
 
 public enum AppNotificationCategory: CaseIterable {
-    case incomingMessageWithActions
+    case incomingMessageWithActions_CanReply
+    case incomingMessageWithActions_CannotReply
     case incomingMessageWithoutActions
     case incomingMessageFromNoLongerVerifiedIdentity
+    case incomingReactionWithActions_CanReply
+    case incomingReactionWithActions_CannotReply
     case infoOrErrorMessage
     case threadlessErrorMessage
     case incomingCall
     case missedCallWithActions
     case missedCallWithoutActions
     case missedCallFromNoLongerVerifiedIdentity
-    case grdbMigration
 }
 
-public enum AppNotificationAction: CaseIterable {
+public enum AppNotificationAction: String, CaseIterable {
     case answerCall
     case callBack
     case declineCall
     case markAsRead
     case reply
     case showThread
+    case reactWithThumbsUp
+    case showCallLobby
 }
 
 public struct AppNotificationUserInfoKey {
@@ -49,17 +53,24 @@ public struct AppNotificationUserInfoKey {
     public static let callBackUuid = "Signal.AppNotificationsUserInfoKey.callBackUuid"
     public static let callBackPhoneNumber = "Signal.AppNotificationsUserInfoKey.callBackPhoneNumber"
     public static let localCallId = "Signal.AppNotificationsUserInfoKey.localCallId"
+    public static let defaultAction = "Signal.AppNotificationsUserInfoKey.defaultAction"
 }
 
 extension AppNotificationCategory {
     var identifier: String {
         switch self {
-        case .incomingMessageWithActions:
+        case .incomingMessageWithActions_CanReply:
             return "Signal.AppNotificationCategory.incomingMessageWithActions"
+        case .incomingMessageWithActions_CannotReply:
+            return "Signal.AppNotificationCategory.incomingMessageWithActionsNoReply"
         case .incomingMessageWithoutActions:
             return "Signal.AppNotificationCategory.incomingMessage"
         case .incomingMessageFromNoLongerVerifiedIdentity:
             return "Signal.AppNotificationCategory.incomingMessageFromNoLongerVerifiedIdentity"
+        case .incomingReactionWithActions_CanReply:
+            return "Signal.AppNotificationCategory.incomingReactionWithActions"
+        case .incomingReactionWithActions_CannotReply:
+            return "Signal.AppNotificationCategory.incomingReactionWithActionsNoReply"
         case .infoOrErrorMessage:
             return "Signal.AppNotificationCategory.infoOrErrorMessage"
         case .threadlessErrorMessage:
@@ -72,18 +83,25 @@ extension AppNotificationCategory {
             return "Signal.AppNotificationCategory.missedCall"
         case .missedCallFromNoLongerVerifiedIdentity:
             return "Signal.AppNotificationCategory.missedCallFromNoLongerVerifiedIdentity"
-        case .grdbMigration:
-            return "Signal.AppNotificationCategory.grdbMigration"
         }
     }
 
     var actions: [AppNotificationAction] {
         switch self {
-        case .incomingMessageWithActions:
+        case .incomingMessageWithActions_CanReply:
+            if DebugFlags.reactWithThumbsUpFromLockscreen {
+                return [.markAsRead, .reply, .reactWithThumbsUp]
+            } else {
+                return [.markAsRead, .reply]
+            }
+        case .incomingMessageWithActions_CannotReply:
+            return [.markAsRead]
+        case .incomingReactionWithActions_CanReply:
             return [.markAsRead, .reply]
-        case .incomingMessageWithoutActions:
-            return []
-        case .incomingMessageFromNoLongerVerifiedIdentity:
+        case .incomingReactionWithActions_CannotReply:
+            return [.markAsRead]
+        case .incomingMessageWithoutActions,
+             .incomingMessageFromNoLongerVerifiedIdentity:
             return []
         case .infoOrErrorMessage:
             return []
@@ -96,8 +114,6 @@ extension AppNotificationCategory {
         case .missedCallWithoutActions:
             return []
         case .missedCallFromNoLongerVerifiedIdentity:
-            return []
-        case .grdbMigration:
             return []
         }
     }
@@ -118,18 +134,22 @@ extension AppNotificationAction {
             return "Signal.AppNotifications.Action.reply"
         case .showThread:
             return "Signal.AppNotifications.Action.showThread"
+        case .reactWithThumbsUp:
+            return "Signal.AppNotifications.Action.reactWithThumbsUp"
+        case .showCallLobby:
+            return "Signal.AppNotifications.Action.showCallLobby"
         }
     }
 }
 
 // Delay notification of incoming messages when it's likely to be read by a linked device to
 // avoid notifying a user on their phone while a conversation is actively happening on desktop.
-let kNotificationDelayForRemoteRead: TimeInterval = 5
+let kNotificationDelayForRemoteRead: TimeInterval = 20
 
 let kAudioNotificationsThrottleCount = 2
 let kAudioNotificationsThrottleInterval: TimeInterval = 5
 
-protocol NotificationPresenterAdaptee: class {
+protocol NotificationPresenterAdaptee: AnyObject {
 
     func registerNotificationSettings() -> Promise<Void>
 
@@ -141,8 +161,6 @@ protocol NotificationPresenterAdaptee: class {
     func cancelNotifications(messageId: String)
     func cancelNotifications(reactionId: String)
     func clearAllNotifications()
-
-    func notifyUserForGRDBMigration()
 
     var hasReceivedSyncMessageRecently: Bool { get }
 }
@@ -163,24 +181,7 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
 
         super.init()
 
-        AppReadiness.runNowOrWhenAppDidBecomeReady {
-            NotificationCenter.default.addObserver(self, selector: #selector(self.handleMessageRead), name: .incomingMessageMarkedAsRead, object: nil)
-        }
         SwiftSingletons.register(self)
-    }
-
-    // MARK: - Dependencies
-
-    var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    var identityManager: OWSIdentityManager {
-        return OWSIdentityManager.shared()
-    }
-
-    var preferences: OWSPreferences {
-        return Environment.shared.preferences
     }
 
     var previewType: NotificationType {
@@ -191,28 +192,13 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
         return previewType == .namePreview
     }
 
-    // MARK: -
-
-    @objc
-    public func handleMessageRead(notification: Notification) {
-        AssertIsOnMainThread()
-
-        switch notification.object {
-        case let incomingMessage as TSIncomingMessage:
-            Logger.debug("canceled notification for message: \(incomingMessage)")
-            cancelNotifications(messageId: incomingMessage.uniqueId)
-        default:
-            break
-        }
-    }
-
     // MARK: - Presenting Notifications
 
     public func registerNotificationSettings() -> Promise<Void> {
         return adaptee.registerNotificationSettings()
     }
 
-    public func presentIncomingCall(_ call: SignalCallNotificationInfo, callerName: String) {
+    public func presentIncomingCall(_ call: IndividualCallNotificationInfo, callerName: String) {
 
         let remoteAddress = call.remoteAddress
         let thread = TSContactThread.getOrCreateThread(contactAddress: remoteAddress)
@@ -227,7 +213,13 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
             notificationTitle = callerName
             threadIdentifier = thread.uniqueId
         }
-        let notificationBody = NotificationStrings.incomingCallBody
+
+        let notificationBody: String
+        switch call.offerMediaType {
+        case .audio: notificationBody = NotificationStrings.incomingAudioCallBody
+        case .video: notificationBody = NotificationStrings.incomingVideoCallBody
+        }
+
         let userInfo = [
             AppNotificationUserInfoKey.threadId: thread.uniqueId,
             AppNotificationUserInfoKey.localCallId: call.localId.uuidString
@@ -239,12 +231,12 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
                                 body: notificationBody,
                                 threadIdentifier: threadIdentifier,
                                 userInfo: userInfo,
-                                sound: .defaultiOSIncomingRingtone,
+                                sound: nil,
                                 replacingIdentifier: call.localId.uuidString)
         }
     }
 
-    public func presentMissedCall(_ call: SignalCallNotificationInfo, callerName: String) {
+    public func presentMissedCall(_ call: IndividualCallNotificationInfo, callerName: String) {
 
         let remoteAddress = call.remoteAddress
         let thread = TSContactThread.getOrCreateThread(contactAddress: remoteAddress)
@@ -259,7 +251,13 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
             notificationTitle = callerName
             threadIdentifier = thread.uniqueId
         }
-        let notificationBody = NotificationStrings.missedCallBody
+
+        let notificationBody: String
+        switch call.offerMediaType {
+        case .audio: notificationBody = NotificationStrings.missedAudioCallBody
+        case .video: notificationBody = NotificationStrings.missedVideoCallBody
+        }
+
         let userInfo = userInfoForMissedCall(thread: thread, remoteAddress: remoteAddress)
 
         let category: AppNotificationCategory = (shouldShowActions
@@ -277,7 +275,7 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
         }
     }
 
-    public func presentMissedCallBecauseOfNoLongerVerifiedIdentity(call: SignalCallNotificationInfo, callerName: String) {
+    public func presentMissedCallBecauseOfNoLongerVerifiedIdentity(call: IndividualCallNotificationInfo, callerName: String) {
 
         let remoteAddress = call.remoteAddress
         let thread = TSContactThread.getOrCreateThread(contactAddress: remoteAddress)
@@ -309,7 +307,7 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
         }
     }
 
-    public func presentMissedCallBecauseOfNewIdentity(call: SignalCallNotificationInfo, callerName: String) {
+    public func presentMissedCallBecauseOfNewIdentity(call: IndividualCallNotificationInfo, callerName: String) {
 
         let remoteAddress = call.remoteAddress
         let thread = TSContactThread.getOrCreateThread(contactAddress: remoteAddress)
@@ -355,11 +353,32 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
         return userInfo
     }
 
+    public func isThreadMuted(_ thread: TSThread, transaction: SDSAnyReadTransaction) -> Bool {
+        ThreadAssociatedData.fetchOrDefault(for: thread, transaction: transaction).isMuted
+    }
+
+    public func canNotify(for incomingMessage: TSIncomingMessage, thread: TSThread, transaction: SDSAnyReadTransaction) -> Bool {
+        guard isThreadMuted(thread, transaction: transaction) else { return true }
+
+        guard let localAddress = TSAccountManager.localAddress else {
+            owsFailDebug("Missing local address")
+            return false
+        }
+
+        let mentionedAddresses = MentionFinder.mentionedAddresses(for: incomingMessage, transaction: transaction.unwrapGrdbRead)
+        guard mentionedAddresses.contains(localAddress) else { return false }
+
+        switch thread.mentionNotificationMode {
+        case .default, .always:
+            return true
+        case .never:
+            return false
+        }
+    }
+
     public func notifyUser(for incomingMessage: TSIncomingMessage, thread: TSThread, transaction: SDSAnyReadTransaction) {
 
-        guard !thread.isMuted else {
-            return
-        }
+        guard canNotify(for: incomingMessage, thread: thread, transaction: transaction) else { return }
 
         // While batch processing, some of the necessary changes have not been commited.
         let rawMessageText = incomingMessage.previewText(transaction: transaction)
@@ -383,7 +402,7 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
                                            senderName,
                                            groupThread.groupNameOrDefault)
             default:
-                owsFailDebug("unexpected thread: \(thread)")
+                owsFailDebug("unexpected thread: \(thread.uniqueId)")
                 return
             }
 
@@ -403,7 +422,8 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
         // "no longer verified".
         var didIdentityChange = false
         for address in thread.recipientAddresses {
-            if self.identityManager.verificationState(for: address) == .noLongerVerified {
+            if self.identityManager.verificationState(for: address,
+                                                      transaction: transaction) == .noLongerVerified {
                 didIdentityChange = true
                 break
             }
@@ -415,7 +435,9 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
         } else if !shouldShowActions {
             category = .incomingMessageWithoutActions
         } else {
-            category = .incomingMessageWithActions
+            category = (thread.canSendToThread
+                            ? .incomingMessageWithActions_CanReply
+                            : .incomingMessageWithActions_CannotReply)
         }
         let userInfo = [
             AppNotificationUserInfoKey.threadId: thread.uniqueId,
@@ -435,7 +457,7 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
 
     public func notifyUser(for reaction: OWSReaction, on message: TSOutgoingMessage, thread: TSThread, transaction: SDSAnyReadTransaction) {
 
-        guard !thread.isMuted else { return }
+        guard !isThreadMuted(thread, transaction: transaction) else { return }
 
         // Reaction notifications only get displayed if we can
         // include the reaction details, otherwise we don't
@@ -456,16 +478,14 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
                 groupThread.groupNameOrDefault
             )
         default:
-            owsFailDebug("unexpected thread: \(thread)")
+            owsFailDebug("unexpected thread: \(thread.uniqueId)")
             return
         }
 
         let notificationBody: String
         if let bodyDescription: String = {
-            if let messageBody = message.body, !messageBody.isEmpty {
-                return messageBody.filterStringForDisplay()
-            } else if let oversizeText = message.oversizeText(with: transaction.unwrapGrdbRead), !oversizeText.isEmpty {
-                return oversizeText.filterStringForDisplay()
+            if let messageBody = message.plaintextBody(with: transaction.unwrapGrdbRead), !messageBody.isEmpty {
+                return messageBody
             } else {
                 return nil
             }
@@ -485,14 +505,14 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
                 notificationBody = String(format: NotificationStrings.incomingReactionAlbumMessageFormat, reaction.emoji)
             } else if firstAttachment?.isImage == true {
                 notificationBody = String(format: NotificationStrings.incomingReactionPhotoMessageFormat, reaction.emoji)
+            } else if firstAttachment?.isAnimated == true || firstAttachment?.isLoopingVideo == true {
+                notificationBody = String(format: NotificationStrings.incomingReactionGifMessageFormat, reaction.emoji)
             } else if firstAttachment?.isVideo == true {
                 notificationBody = String(format: NotificationStrings.incomingReactionVideoMessageFormat, reaction.emoji)
             } else if firstAttachment?.isVoiceMessage == true {
                 notificationBody = String(format: NotificationStrings.incomingReactionVoiceMessageFormat, reaction.emoji)
             } else if firstAttachment?.isAudio == true {
                 notificationBody = String(format: NotificationStrings.incomingReactionAudioMessageFormat, reaction.emoji)
-            } else if firstAttachment?.isAnimated == true {
-                notificationBody = String(format: NotificationStrings.incomingReactionGifMessageFormat, reaction.emoji)
             } else {
                 notificationBody = String(format: NotificationStrings.incomingReactionFileMessageFormat, reaction.emoji)
             }
@@ -504,7 +524,8 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
         // "no longer verified".
         var didIdentityChange = false
         for address in thread.recipientAddresses {
-            if self.identityManager.verificationState(for: address) == .noLongerVerified {
+            if self.identityManager.verificationState(for: address,
+                                                      transaction: transaction) == .noLongerVerified {
                 didIdentityChange = true
                 break
             }
@@ -516,7 +537,9 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
         } else if !shouldShowActions {
             category = .incomingMessageWithoutActions
         } else {
-            category = .incomingMessageWithActions
+            category = (thread.canSendToThread
+                            ? .incomingReactionWithActions_CanReply
+                            : .incomingReactionWithActions_CannotReply)
         }
         let userInfo = [
             AppNotificationUserInfoKey.threadId: thread.uniqueId,
@@ -563,6 +586,33 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
         }
     }
 
+    public func notifyForGroupCallSafetyNumberChange(inThread thread: TSThread) {
+        let notificationTitle: String?
+        switch previewType {
+        case .noNameNoPreview:
+            notificationTitle = nil
+        case .nameNoPreview, .namePreview:
+            notificationTitle = contactsManager.displayNameWithSneakyTransaction(thread: thread)
+        }
+
+        let notificationBody = NotificationStrings.groupCallSafetyNumberChangeBody
+        let threadId = thread.uniqueId
+        let userInfo: [String: Any] = [
+            AppNotificationUserInfoKey.threadId: threadId,
+            AppNotificationUserInfoKey.defaultAction: AppNotificationAction.showCallLobby.rawValue
+        ]
+
+        DispatchQueue.main.async {
+            let sound = self.requestSound(thread: thread)
+            self.adaptee.notify(category: .infoOrErrorMessage,
+                                title: notificationTitle,
+                                body: notificationBody,
+                                threadIdentifier: nil, // show ungrouped
+                                userInfo: userInfo,
+                                sound: sound)
+        }
+    }
+
     public func notifyUser(for errorMessage: TSErrorMessage, thread: TSThread, transaction: SDSAnyWriteTransaction) {
         switch errorMessage.errorType {
         case .noSession,
@@ -582,11 +632,8 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
         notifyUser(for: errorMessage as TSMessage, thread: thread, wantsSound: true, transaction: transaction)
     }
 
-    public func notifyUser(for infoMessage: TSInfoMessage, thread: TSThread, wantsSound: Bool, transaction: SDSAnyWriteTransaction) {
-        notifyUser(for: infoMessage as TSMessage, thread: thread, wantsSound: wantsSound, transaction: transaction)
-    }
-
-    private func notifyUser(for infoOrErrorMessage: TSMessage, thread: TSThread, wantsSound: Bool, transaction: SDSAnyWriteTransaction) {
+    public func notifyUser(for previewableInteraction: TSInteraction & OWSPreviewText, thread: TSThread, wantsSound: Bool, transaction: SDSAnyWriteTransaction) {
+        guard !isThreadMuted(thread, transaction: transaction) else { return }
 
         let notificationTitle: String?
         let threadIdentifier: String?
@@ -604,16 +651,20 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
         case .noNameNoPreview, .nameNoPreview:
             notificationBody = NotificationStrings.incomingMessageBody
         case .namePreview:
-            notificationBody = infoOrErrorMessage.previewText(transaction: transaction)
+            notificationBody = previewableInteraction.previewText(transaction: transaction)
         }
+
+        let isGroupCallMessage = previewableInteraction is OWSGroupCallMessage
+        let preferredDefaultAction: AppNotificationAction = isGroupCallMessage ? .showCallLobby : .showThread
 
         let threadId = thread.uniqueId
         let userInfo = [
             AppNotificationUserInfoKey.threadId: threadId,
-            AppNotificationUserInfoKey.messageId: infoOrErrorMessage.uniqueId
+            AppNotificationUserInfoKey.messageId: previewableInteraction.uniqueId,
+            AppNotificationUserInfoKey.defaultAction: preferredDefaultAction.rawValue
         ]
 
-        transaction.addAsyncCompletion {
+        transaction.addAsyncCompletionOnMain {
             let sound = wantsSound ? self.requestSound(thread: thread) : nil
             self.adaptee.notify(category: .infoOrErrorMessage,
                                 title: notificationTitle,
@@ -627,7 +678,7 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
     public func notifyUser(for errorMessage: ThreadlessErrorMessage, transaction: SDSAnyWriteTransaction) {
         let notificationBody = errorMessage.previewText(transaction: transaction)
 
-        transaction.addAsyncCompletion {
+        transaction.addAsyncCompletionOnMain {
             let sound = self.checkIfShouldPlaySound() ? OWSSounds.globalNotificationSound() : nil
             self.adaptee.notify(category: .threadlessErrorMessage,
                                 title: nil,
@@ -656,11 +707,6 @@ public class NotificationPresenter: NSObject, NotificationsProtocol {
     @objc
     public func clearAllNotifications() {
         adaptee.clearAllNotifications()
-    }
-
-    @objc
-    public func notifyUserForGRDBMigration() {
-        adaptee.notifyUserForGRDBMigration()
     }
 
     // MARK: -
@@ -735,7 +781,8 @@ extension TruncatedList: Collection {
     }
 }
 
-public protocol SignalCallNotificationInfo {
+public protocol IndividualCallNotificationInfo {
     var remoteAddress: SignalServiceAddress { get }
     var localId: UUID { get }
+    var offerMediaType: TSRecentCallOfferType { get }
 }

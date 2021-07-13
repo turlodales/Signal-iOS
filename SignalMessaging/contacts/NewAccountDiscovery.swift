@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -9,20 +9,6 @@ public class NewAccountDiscovery: NSObject {
 
     @objc
     public static let shared = NewAccountDiscovery()
-
-    // MARK: - Dependencies
-
-    var preferences: OWSPreferences {
-        return Environment.shared.preferences
-    }
-
-    var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    var notificationPresenter: NotificationsProtocol {
-        return SSKEnvironment.shared.notificationsManager
-    }
 
     // MARK: -
 
@@ -42,8 +28,7 @@ public class NewAccountDiscovery: NSObject {
         }
 
         databaseStorage.asyncWrite { transaction in
-            // Don't spam inbox with a ton of these
-            for recipient in newRecipients.prefix(3) {
+            for recipient in newRecipients {
 
                 guard !recipient.address.isLocalAddress else {
                     owsFailDebug("unexpectedly found localNumber")
@@ -64,11 +49,16 @@ public class NewAccountDiscovery: NSObject {
                                             messageType: .userJoinedSignal)
                 message.anyInsert(transaction: transaction)
 
+                guard let notificationPresenter = Self.notificationPresenter else {
+                    owsFailDebug("Missing notificationPresenter.")
+                    continue
+                }
+
                 // Keep these notifications less obtrusive by making them silent.
-                self.notificationPresenter.notifyUser(for: message,
-                                                      thread: thread,
-                                                      wantsSound: false,
-                                                      transaction: transaction)
+                notificationPresenter.notifyUser(for: message,
+                                                 thread: thread,
+                                                 wantsSound: false,
+                                                 transaction: transaction)
             }
         }
     }

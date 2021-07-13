@@ -1,12 +1,17 @@
 name: CI
 
-on: [pull_request]
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+      - release/*
 
 jobs:
   build_and_test:
     name: Build and Test
 
-    runs-on: macOS-latest
+    runs-on: macos-11
 
     steps:
       - name: Checkout Repo
@@ -53,6 +58,10 @@ jobs:
           bundle config path vendor/bundle
           bundle install --jobs 4 --retry 3
 
+      - name: Set up Rust
+        run: rustup target install x86_64-apple-ios
+        working-directory: Pods/SignalClient
+
       - name: Build and Test
         run: |
           function formatFailures() {
@@ -65,18 +74,21 @@ jobs:
   lint:
     name: Lint
 
-    runs-on: macOS-latest
+    runs-on: macos-11
 
     steps:
-      - uses: actions/checkout@v1
+      - uses: actions/checkout@v2
+
+      - name: Fetch base commit
+        run: git fetch origin --depth 1 ${{ github.base_ref }}
 
       - name: Install Dependencies
-        run: brew install swiftlint clang-format
+        run: brew install clang-format
 
       - name: Lint files changed in the PR
         run: |
           python Scripts/precommit.py --ref origin/${{ github.base_ref }}
 
           # https://help.github.com/en/actions/reference/development-tools-for-github-actions#logging-commands
-          git diff --name-only | sed -E 's/(.*)/::error file=\1::Incorrectly formatted (clang-format)/'
+          git diff --name-only | sed -E 's|(.*)|::error file=\1::Incorrectly formatted (Scripts/precommit.py)|'
           git diff --quiet || exit 1

@@ -1,8 +1,8 @@
 //
-//  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSAnalyticsEvents.h"
+#import <SignalServiceKit/OWSAnalyticsEvents.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -330,11 +330,6 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)messageReceiverErrorOversizeMessage
 {
     return @"message_receiver_error_oversize_message";
-}
-
-+ (NSString *)messageSendErrorCouldNotSerializeMessageJson
-{
-    return @"message_send_error_could_not_serialize_message_json";
 }
 
 + (NSString *)messageSendErrorFailedDueToPrekeyUpdateFailures

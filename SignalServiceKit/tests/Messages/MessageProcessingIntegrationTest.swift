@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import XCTest
@@ -8,34 +8,14 @@ import GRDB
 
 class MessageProcessingIntegrationTest: SSKBaseTestSwift {
 
-    // MARK: - Dependencies
-
-    var messageReceiver: OWSMessageReceiver {
-        return SSKEnvironment.shared.messageReceiver
-    }
-
-    var tsAccountManager: TSAccountManager {
-        return SSKEnvironment.shared.tsAccountManager
-    }
-
-    var identityManager: OWSIdentityManager {
-        return SSKEnvironment.shared.identityManager
-    }
-
-    var storageCoordinator: StorageCoordinator {
-        return SSKEnvironment.shared.storageCoordinator
-    }
-
-    // MARK: -
-
     let localE164Identifier = "+13235551234"
     let localUUID = UUID()
 
     let aliceE164Identifier = "+14715355555"
-    var aliceClient: SignalClient!
+    var aliceClient: TestSignalClient!
 
     let bobE164Identifier = "+18083235555"
-    var bobClient: SignalClient!
+    var bobClient: TestSignalClient!
 
     let localClient = LocalSignalClient()
     let runner = TestProtocolRunner()
@@ -46,9 +26,9 @@ class MessageProcessingIntegrationTest: SSKBaseTestSwift {
     override func setUp() {
         super.setUp()
 
-        // use the uiDatabase to be notified of DB writes so we can verify the expected
-        // changes occur
-        try! databaseStorage.grdbStorage.setupUIDatabase()
+        // Use DatabaseChangeObserver to be notified of DB writes so we
+        // can verify the expected changes occur.
+        try! databaseStorage.grdbStorage.setupDatabaseChangeObserver()
 
         // ensure local client has necessary "registered" state
         identityManager.generateNewIdentityKey()
@@ -56,30 +36,28 @@ class MessageProcessingIntegrationTest: SSKBaseTestSwift {
 
         bobClient = FakeSignalClient.generate(e164Identifier: bobE164Identifier)
         aliceClient = FakeSignalClient.generate(e164Identifier: aliceE164Identifier)
-
-        // for unit tests, we must manually start the decryptJobQueue
-        SSKEnvironment.shared.messageDecryptJobQueue.setup()
     }
 
     override func tearDown() {
-        databaseStorage.grdbStorage.testing_tearDownUIDatabase()
+        databaseStorage.grdbStorage.testing_tearDownDatabaseChangeObserver()
 
         super.tearDown()
     }
 
     // MARK: - Tests
 
-    func test_contactMessage_e164Envelope() {
-        storageCoordinator.useGRDBForTests()
-
-        // Re-initialize this state now that we've just switched databases.
-        identityManager.generateNewIdentityKey()
-        tsAccountManager.registerForTests(withLocalNumber: localE164Identifier, uuid: localUUID)
-
+    func test_contactMessage_e164AndUuidEnvelope() {
         write { transaction in
             try! self.runner.initialize(senderClient: self.bobClient,
                                         recipientClient: self.localClient,
                                         transaction: transaction)
+        }
+
+        // Wait until message processing has completed, otherwise future
+        // tests may break as we try and drain the processing queue.
+        let expectFlushNotification = expectation(description: "queue flushed")
+        NotificationCenter.default.observe(once: MessageProcessor.messageProcessorDidFlushQueue).done { _ in
+            expectFlushNotification.fulfill()
         }
 
         let expectMessageProcessed = expectation(description: "message processed")
@@ -89,7 +67,7 @@ class MessageProcessingIntegrationTest: SSKBaseTestSwift {
             XCTAssertEqual(0, TSThread.anyCount(transaction: transaction))
         }
 
-        let snapshotDelegate = DatabaseSnapshotBlockDelegate { _ in
+        let databaseDelegate = DatabaseWriteBlockDelegate { _ in
             self.read { transaction in
                 // Each time a write occurs, check to see if we've achieved the expected DB state.
                 //
@@ -111,31 +89,34 @@ class MessageProcessingIntegrationTest: SSKBaseTestSwift {
                 }
             }
         }
-        guard let observer = databaseStorage.grdbStorage.uiDatabaseObserver else {
+        guard let observer = databaseStorage.grdbStorage.databaseChangeObserver else {
             owsFailDebug("observer was unexpectedly nil")
             return
         }
-        observer.appendSnapshotDelegate(snapshotDelegate)
+        observer.appendDatabaseWriteDelegate(databaseDelegate)
 
         let envelopeBuilder = try! fakeService.envelopeBuilder(fromSenderClient: bobClient, bodyText: "Those who stands for nothing will fall for anything")
         envelopeBuilder.setSourceE164(bobClient.e164Identifier!)
+        envelopeBuilder.setSourceUuid(bobClient.uuidIdentifier)
         let envelopeData = try! envelopeBuilder.buildSerializedData()
-        messageReceiver.handleReceivedEnvelopeData(envelopeData)
+        messageProcessor.processEncryptedEnvelopeData(envelopeData, serverDeliveryTimestamp: NSDate.ows_millisecondTimeStamp()) { XCTAssertNil($0) }
 
         waitForExpectations(timeout: 1.0)
     }
 
-    func test_contactMessage_UUIDEnvelope() {
-        guard FeatureFlags.allowUUIDOnlyContacts else {
-            // This test is known to be failing.
-            // It's intended as TDD for the upcoming UUID work.
-            return
-        }
+    func test_contactMessage_UuidOnlyEnvelope() {
 
         write { transaction in
             try! self.runner.initialize(senderClient: self.bobClient,
                                         recipientClient: self.localClient,
                                         transaction: transaction)
+        }
+
+        // Wait until message processing has completed, otherwise future
+        // tests may break as we try and drain the processing queue.
+        let expectFlushNotification = expectation(description: "queue flushed")
+        NotificationCenter.default.observe(once: MessageProcessor.messageProcessorDidFlushQueue).done { _ in
+            expectFlushNotification.fulfill()
         }
 
         let expectMessageProcessed = expectation(description: "message processed")
@@ -145,7 +126,7 @@ class MessageProcessingIntegrationTest: SSKBaseTestSwift {
             XCTAssertEqual(0, TSThread.anyCount(transaction: transaction))
         }
 
-        let snapshotDelegate = DatabaseSnapshotBlockDelegate { _ in
+        let snapshotDelegate = DatabaseWriteBlockDelegate { _ in
             self.read { transaction in
                 // Each time a write occurs, check to see if we've achieved the expected DB state.
                 //
@@ -168,16 +149,16 @@ class MessageProcessingIntegrationTest: SSKBaseTestSwift {
                 }
             }
         }
-        guard let observer = databaseStorage.grdbStorage.uiDatabaseObserver else {
+        guard let observer = databaseStorage.grdbStorage.databaseChangeObserver else {
             owsFailDebug("observer was unexpectedly nil")
             return
         }
-        observer.appendSnapshotDelegate(snapshotDelegate)
+        observer.appendDatabaseWriteDelegate(snapshotDelegate)
 
         let envelopeBuilder = try! fakeService.envelopeBuilder(fromSenderClient: bobClient, bodyText: "Those who stands for nothing will fall for anything")
         envelopeBuilder.setSourceUuid(bobClient.uuidIdentifier)
         let envelopeData = try! envelopeBuilder.buildSerializedData()
-        messageReceiver.handleReceivedEnvelopeData(envelopeData)
+        messageProcessor.processEncryptedEnvelopeData(envelopeData, serverDeliveryTimestamp: NSDate.ows_millisecondTimeStamp()) { XCTAssertNil($0) }
 
         waitForExpectations(timeout: 1.0)
     }
@@ -185,28 +166,18 @@ class MessageProcessingIntegrationTest: SSKBaseTestSwift {
 
 // MARK: - Helpers
 
-class DatabaseSnapshotBlockDelegate {
+class DatabaseWriteBlockDelegate {
     let block: (Database) -> Void
     init(block: @escaping (Database) -> Void) {
         self.block = block
     }
 }
 
-extension DatabaseSnapshotBlockDelegate: DatabaseSnapshotDelegate {
+extension DatabaseWriteBlockDelegate: DatabaseWriteDelegate {
 
-    // MARK: - Transaction Lifecycle
-
-    func snapshotTransactionDidChange(with event: DatabaseEvent) { /* no-op */ }
-
-    func snapshotTransactionDidCommit(db: Database) {
+    func databaseDidChange(with event: DatabaseEvent) { /* no-op */ }
+    func databaseDidCommit(db: Database) {
         block(db)
     }
-
-    func snapshotTransactionDidRollback(db: Database) { /* no-op */ }
-
-    // MARK: - Snapshot LifeCycle (Post Commit)
-
-    func databaseSnapshotWillUpdate() { /* no-op */ }
-    func databaseSnapshotDidUpdate() { /* no-op */ }
-    func databaseSnapshotDidUpdateExternally() { /* no-op */ }
+    func databaseDidRollback(db: Database) { /* no-op */ }
 }

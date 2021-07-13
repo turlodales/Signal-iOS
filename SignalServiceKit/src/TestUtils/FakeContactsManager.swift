@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Contacts
@@ -20,6 +20,10 @@ public class FakeContactsManager: NSObject, ContactsManagerProtocol {
 
     public func displayName(for thread: TSThread, transaction: SDSAnyReadTransaction) -> String {
         return "Fake name"
+    }
+
+    public func shortDisplayName(for address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> String {
+        return "Short fake name"
     }
 
     public func nameComponents(for address: SignalServiceAddress) -> PersonNameComponents? {
@@ -50,8 +54,25 @@ public class FakeContactsManager: NSObject, ContactsManagerProtocol {
         return true
     }
 
-    public func conversationColorName(for address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> String {
-        ConversationColorName.indigo.rawValue
+    public func isSystemContact(withSignalAccount phoneNumber: String, transaction: SDSAnyReadTransaction) -> Bool {
+        return true
+    }
+
+    public func hasNameInSystemContacts(for address: SignalServiceAddress) -> Bool {
+        return true
+    }
+
+    public func hasNameInSystemContacts(for address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> Bool {
+        return true
+    }
+
+    public func isSystemContactWithSignalAccount(_ address: SignalServiceAddress) -> Bool {
+        return true
+    }
+
+    public func isSystemContactWithSignalAccount(_ address: SignalServiceAddress,
+                                                 transaction: SDSAnyReadTransaction) -> Bool {
+        return true
     }
 
     public func sortSignalServiceAddresses(_ addresses: [SignalServiceAddress],
@@ -61,8 +82,11 @@ public class FakeContactsManager: NSObject, ContactsManagerProtocol {
 
     public func compare(signalAccount left: SignalAccount, with right: SignalAccount) -> ComparisonResult {
         // If this method ends up being used by the tests, we should provide a better implementation.
-        assertionFailure("TODO")
-        return ComparisonResult.orderedAscending
+        owsFail("TODO")
+    }
+
+    public func comparableName(for address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> String {
+        return "Fake name"
     }
 
     public func comparableName(for signalAccount: SignalAccount, transaction: SDSAnyReadTransaction) -> String {
@@ -79,11 +103,6 @@ public class FakeContactsManager: NSObject, ContactsManagerProtocol {
 
     public func avatarImage(forCNContactId contactId: String?) -> UIImage? {
         return nil
-    }
-
-    private let _signalAccountReadCache = SignalAccountReadCache()
-    public var signalAccountReadCache: SignalAccountReadCache {
-        return _signalAccountReadCache
     }
 
     public var unknownUserLabel: String {

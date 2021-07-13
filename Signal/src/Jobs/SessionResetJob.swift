@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -25,13 +25,14 @@ public class SessionResetJobQueue: NSObject, JobQueue {
     }
     public static let maxRetries: UInt = 10
     public let requiresInternet: Bool = true
+    public var isEnabled: Bool { CurrentAppContext().isMainApp }
     public var runningOperations = AtomicArray<SessionResetOperation>()
 
     @objc
     public override init() {
         super.init()
 
-        AppReadiness.runNowOrWhenAppDidBecomeReady {
+        AppReadiness.runNowOrWhenAppDidBecomeReadySync {
             self.setup()
         }
     }
@@ -91,20 +92,6 @@ public class SessionResetOperation: OWSOperation, DurableOperation {
         self.jobRecord = jobRecord
     }
 
-    // MARK: Dependencies
-
-    var sessionStore: SSKSessionStore {
-        return SSKEnvironment.shared.sessionStore
-    }
-
-    var messageSender: MessageSender {
-        return SSKEnvironment.shared.messageSender
-    }
-
-    var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
     // MARK: 
 
     var firstAttempt = true
@@ -114,8 +101,8 @@ public class SessionResetOperation: OWSOperation, DurableOperation {
 
         if firstAttempt {
             self.databaseStorage.write { transaction in
-                Logger.info("deleting sessions for recipient: \(self.recipientAddress)")
-                self.sessionStore.deleteAllSessions(for: self.recipientAddress, transaction: transaction)
+                Logger.info("archiving sessions for recipient: \(self.recipientAddress)")
+                self.sessionStore.archiveAllSessions(for: self.recipientAddress, transaction: transaction)
             }
             firstAttempt = false
         }
@@ -158,20 +145,7 @@ public class SessionResetOperation: OWSOperation, DurableOperation {
     }
 
     override public func retryInterval() -> TimeInterval {
-        // Arbitrary backoff factor...
-        // With backOffFactor of 1.9
-        // try  1 delay:  0.00s
-        // try  2 delay:  0.19s
-        // ...
-        // try  5 delay:  1.30s
-        // ...
-        // try 11 delay: 61.31s
-        let backoffFactor = 1.9
-        let maxBackoff = kHourInterval
-
-        let seconds = 0.1 * min(maxBackoff, pow(backoffFactor, Double(self.jobRecord.failureCount)))
-
-        return seconds
+        return OWSOperation.retryIntervalForExponentialBackoff(failureCount: jobRecord.failureCount)
     }
 
     override public func didFail(error: Error) {

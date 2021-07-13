@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
@@ -7,6 +7,15 @@ NS_ASSUME_NONNULL_BEGIN
 static inline BOOL OWSIsDebugBuild()
 {
 #ifdef DEBUG
+    return YES;
+#else
+    return NO;
+#endif
+}
+
+static inline BOOL OWSIsTestableBuild()
+{
+#ifdef TESTABLE_BUILD
     return YES;
 #else
     return NO;
@@ -38,6 +47,7 @@ NSString *NSStringForUIApplicationState(UIApplicationState value);
 
 @property (nonatomic, readonly) BOOL isMainApp;
 @property (nonatomic, readonly) BOOL isMainAppAndActive;
+@property (nonatomic, readonly) BOOL isNSE;
 
 // Whether the user is using a right-to-left language like Arabic.
 @property (nonatomic, readonly) BOOL isRTL;
@@ -100,6 +110,8 @@ NSString *NSStringForUIApplicationState(UIApplicationState value);
 // Returns the VC that should be used to present alerts, modals, etc.
 - (nullable UIViewController *)frontmostViewController;
 
+- (void)openSystemSettings;
+
 // Returns nil if isMainApp is NO
 - (nullable ActionSheetAction *)openSystemSettingsActionWithCompletion:(void (^_Nullable)(void))completion;
 
@@ -128,6 +140,12 @@ NSString *NSStringForUIApplicationState(UIApplicationState value);
 @property (nonatomic, readonly) BOOL shouldProcessIncomingMessages;
 
 @property (nonatomic, readonly) BOOL hasUI;
+
+@property (nonatomic, readonly) BOOL didLastLaunchNotTerminate;
+
+@property (nonatomic, readonly) NSString *debugLogsDirPath;
+
+@property (nonatomic, readonly) BOOL hasActiveCall;
 
 @end
 

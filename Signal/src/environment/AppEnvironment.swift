@@ -1,12 +1,13 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import SignalServiceKit
 import SignalMessaging
 
-@objc public class AppEnvironment: NSObject {
+@objc
+public class AppEnvironment: NSObject {
 
     private static var _shared: AppEnvironment = AppEnvironment()
 
@@ -26,79 +27,52 @@ import SignalMessaging
     }
 
     @objc
-    public var callMessageHandler: WebRTCCallMessageHandler
+    public var callMessageHandlerRef: WebRTCCallMessageHandler
 
     @objc
-    public var callService: CallService
+    public var callServiceRef: CallService
 
     @objc
-    public var outboundCallInitiator: OutboundCallInitiator
+    public var outboundIndividualCallInitiatorRef: OutboundIndividualCallInitiator
 
     @objc
-    public var accountManager: AccountManager
+    public var accountManagerRef: AccountManager
 
     @objc
-    public var notificationPresenter: NotificationPresenter
+    public var notificationPresenterRef: NotificationPresenter
 
     @objc
-    public var pushRegistrationManager: PushRegistrationManager
+    public var pushRegistrationManagerRef: PushRegistrationManager
 
     @objc
-    public var sessionResetJobQueue: SessionResetJobQueue
+    public var sessionResetJobQueueRef: SessionResetJobQueue
 
     @objc
-    public var broadcastMediaMessageJobQueue: BroadcastMediaMessageJobQueue
+    let deviceTransferServiceRef = DeviceTransferService()
 
     @objc
-    public var backup: OWSBackup
-
-    @objc
-    public var userNotificationActionHandler: UserNotificationActionHandler
-
-    @objc
-    public var backupLazyRestore: BackupLazyRestore
-
-    @objc
-    let deviceTransferService = DeviceTransferService()
+    let cvAudioPlayerRef = CVAudioPlayer()
 
     private override init() {
-        self.callMessageHandler = WebRTCCallMessageHandler()
-        self.callService = CallService()
-        self.outboundCallInitiator = OutboundCallInitiator()
-        self.accountManager = AccountManager()
-        self.notificationPresenter = NotificationPresenter()
-        self.pushRegistrationManager = PushRegistrationManager()
-        self.sessionResetJobQueue = SessionResetJobQueue()
-        self.broadcastMediaMessageJobQueue = BroadcastMediaMessageJobQueue()
-        self.backup = OWSBackup()
-        self.backupLazyRestore = BackupLazyRestore()
-        self.userNotificationActionHandler = UserNotificationActionHandler()
+        self.callMessageHandlerRef = WebRTCCallMessageHandler()
+        self.callServiceRef = CallService()
+        self.outboundIndividualCallInitiatorRef = OutboundIndividualCallInitiator()
+        self.accountManagerRef = AccountManager()
+        self.notificationPresenterRef = NotificationPresenter()
+        self.pushRegistrationManagerRef = PushRegistrationManager()
+        self.sessionResetJobQueueRef = SessionResetJobQueue()
 
         super.init()
 
         SwiftSingletons.register(self)
-
-        YDBToGRDBMigration.add(keyStore: backup.keyValueStore, label: "backup")
-        YDBToGRDBMigration.add(keyStore: AppUpdateNag.shared.keyValueStore, label: "AppUpdateNag")
-        YDBToGRDBMigration.add(keyStore: ProfileViewController.keyValueStore(), label: "ProfileViewController")
     }
 
     @objc
     public func setup() {
-        if FeatureFlags.answerCallsOnSecondaryDevice {
-            callService.createCallUIAdapter()
-        } else {
-            AppReadiness.runNowOrWhenAppWillBecomeReady {
-                // Currently, we only build the CallUIAdapter for the primary device, which we can't
-                // determine until *after* storage has been setup. Once we create calling on all
-                // devices, we can create the callUIAdapter unconditionally, on all devices, and get
-                // rid of this.
-                self.callService.createCallUIAdapter()
-            }
-        }
+        callService.individualCallService.createCallUIAdapter()
 
         // Hang certain singletons on SSKEnvironment too.
-        SSKEnvironment.shared.notificationsManager = notificationPresenter
-        SSKEnvironment.shared.callMessageHandler = callMessageHandler
+        SSKEnvironment.shared.notificationsManagerRef = notificationPresenterRef
+        SSKEnvironment.shared.callMessageHandlerRef = callMessageHandlerRef
     }
 }

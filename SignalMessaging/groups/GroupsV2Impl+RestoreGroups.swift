@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -7,28 +7,6 @@ import PromiseKit
 import SignalServiceKit
 
 public extension GroupsV2Impl {
-
-    // MARK: - Dependencies
-
-    private static var tsAccountManager: TSAccountManager {
-        return TSAccountManager.sharedInstance()
-    }
-
-    private static var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    private static var groupV2Updates: GroupV2UpdatesSwift {
-        return SSKEnvironment.shared.groupV2Updates as! GroupV2UpdatesSwift
-    }
-
-    private static var groupsV2: GroupsV2 {
-        return SSKEnvironment.shared.groupsV2
-    }
-
-    private static var reachabilityManager: SSKReachabilityManager {
-        return SSKEnvironment.shared.reachabilityManager
-    }
 
     // MARK: - Restore Groups
 
@@ -92,7 +70,7 @@ public extension GroupsV2Impl {
         // Mark as needing restore.
         groupsFromStorageService_EnqueuedForRestore.setData(masterKeyData, key: key, transaction: transaction)
 
-        transaction.addAsyncCompletion {
+        transaction.addAsyncCompletionOffMain {
             self.enqueueRestoreGroupPass()
         }
     }
@@ -259,9 +237,7 @@ public extension GroupsV2Impl {
             }.catch(on: .global()) { (error) in
                 // tryToRestoreNextGroup() should never fail.
                 owsFailDebug("Group restore failed: \(error)")
-                let nsError: NSError = error as NSError
-                nsError.isRetryable = false
-                self.reportError(nsError)
+                self.reportError(error.asUnretryableError)
             }
         }
 

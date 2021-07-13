@@ -1,22 +1,36 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import PromiseKit
+import SignalClient
 
 extension RemoteAttestation {
 
-    // MARK: - Dependencies
-
-    private static var networkManager: TSNetworkManager {
-        return SSKEnvironment.shared.networkManager
+    struct EnclaveConfig {
+        let enclaveName: String
+        let mrenclave: String
+        let host: String
+        let censorshipCircumventionPrefix: String
     }
 
     // MARK: -
 
-    public static func performForKeyBackup(auth: RemoteAttestationAuth?) -> Promise<RemoteAttestation> {
-        return performAttestation(for: .keyBackup, auth: auth).map { attestationResponse -> RemoteAttestation in
+    public static func performForKeyBackup(
+        auth: RemoteAttestationAuth?,
+        enclave: KeyBackupEnclave
+    ) -> Promise<RemoteAttestation> {
+        return performAttestation(
+            for: .keyBackup,
+            auth: auth,
+            config: EnclaveConfig(
+                enclaveName: enclave.name,
+                mrenclave: enclave.mrenclave,
+                host: TSConstants.keyBackupURL,
+                censorshipCircumventionPrefix: TSConstants.keyBackupCensorshipPrefix
+            )
+        ).map { attestationResponse -> RemoteAttestation in
             return try parseAttestation(params: attestationResponse.responseBody,
                                         clientEphemeralKeyPair: attestationResponse.clientEphemeralKeyPair,
                                         cookies: attestationResponse.cookies,
@@ -27,26 +41,35 @@ extension RemoteAttestation {
     }
 
     public struct CDSAttestation {
+        /// An opaque, server-specified identifier to link an attestation to its corresponding envelope
+        public typealias Id = String
+
         let cookies: [HTTPCookie]
         let auth: RemoteAttestationAuth
         let enclaveConfig: EnclaveConfig
-        let remoteAttestations: [RemoteAttestation]
+        let remoteAttestations: [Id: RemoteAttestation]
     }
 
     public static func performForCDS() -> Promise<CDSAttestation> {
-        return performAttestation(for: .contactDiscovery).map { attestationResponse -> CDSAttestation in
-            let attestationsParams: [[String: Any]] = try attestationResponse.responseBody.required(key: "attestations")
+        return performAttestation(
+            for: .contactDiscovery,
+            config: EnclaveConfig(
+                enclaveName: TSConstants.contactDiscoveryEnclaveName,
+                mrenclave: TSConstants.contactDiscoveryMrEnclave,
+                host: TSConstants.contactDiscoveryURL,
+                censorshipCircumventionPrefix: TSConstants.contactDiscoveryCensorshipPrefix
+            )
+        ).map { attestationResponse -> CDSAttestation in
+            let attestationBody: [CDSAttestation.Id: [String: Any]] = try attestationResponse.responseBody.required(key: "attestations")
 
             // The client MUST reject server responses with more than 3 Remote Attestation Responses attached,
             // for security reasons.
-            guard (1..<4).contains(attestationsParams.count) else {
-                throw ParamParser.ParseError.invalidFormat("attestations", description: "invalid attestation count: \(attestationsParams.count)")
+            guard (1..<4).contains(attestationBody.count) else {
+                throw ParamParser.ParseError.invalidFormat("attestations", description: "invalid attestation count: \(attestationBody.count)")
             }
 
-            let attestations: [RemoteAttestation] = try attestationsParams.map { attestationParams in
-                guard let parser = ParamParser(responseObject: attestationParams) else {
-                    throw ParamParser.ParseError.invalidFormat("attestations[]", description: "invalid attestation")
-                }
+            let attestations: [CDSAttestation.Id: RemoteAttestation] = try attestationBody.mapValues { attestationParams in
+                let parser = ParamParser(dictionary: attestationParams)
                 return try parseAttestation(params: parser,
                                             clientEphemeralKeyPair: attestationResponse.clientEphemeralKeyPair,
                                             cookies: attestationResponse.cookies,
@@ -78,15 +101,18 @@ extension RemoteAttestation {
         let auth: RemoteAttestationAuth
     }
 
-    private static func performAttestation(for service: RemoteAttestationService, auth: RemoteAttestationAuth? = nil) -> Promise<AttestationResponse> {
-        firstly { () -> Promise<RemoteAttestationAuth> in
+    private static func performAttestation(
+        for service: RemoteAttestationService,
+        auth: RemoteAttestationAuth? = nil,
+        config: EnclaveConfig
+    ) -> Promise<AttestationResponse> {
+        firstly(on: .global()) { () -> Promise<RemoteAttestationAuth> in
             if let auth = auth {
                 return Promise.value(auth)
             } else {
                 return getAuth(for: service)
             }
-        }.then { auth -> Promise<AttestationResponse> in
-            let config = enclaveConfig(for: service)
+        }.then(on: .global()) { auth -> Promise<AttestationResponse> in
             let clientEphemeralKeyPair = Curve25519.generateKeyPair()
 
             let request = remoteAttestationRequest(enclaveName: config.enclaveName,
@@ -193,34 +219,86 @@ extension RemoteAttestation {
         Logger.verbose("remote attestation complete")
         return RemoteAttestation(cookies: cookies, keys: keys, requestId: requestId, enclaveName: enclaveName, auth: auth)
     }
+}
 
-    // MARK: -
-
-    struct EnclaveConfig {
-        let enclaveName: String
-        let mrenclave: String
-        let host: String
-        let censorshipCircumventionPrefix: String
+extension RemoteAttestationError {
+    public var reason: String? {
+        return userInfo[RemoteAttestationErrorKey_Reason] as? String
     }
 
-    private static func enclaveConfig(for service: RemoteAttestationService) -> EnclaveConfig {
-        switch service {
-        case .contactDiscovery:
-            return EnclaveConfig(enclaveName: TSConstants.contactDiscoveryEnclaveName,
-                                 mrenclave: TSConstants.contactDiscoveryMrEnclave,
-                                 host: TSConstants.contactDiscoveryURL,
-                                 censorshipCircumventionPrefix: TSConstants.contactDiscoveryCensorshipPrefix)
-        case .keyBackup:
-            return EnclaveConfig(enclaveName: TSConstants.keyBackupEnclaveName,
-                                 mrenclave: TSConstants.keyBackupMrEnclave,
-                                 host: TSConstants.keyBackupURL,
-                                 censorshipCircumventionPrefix: TSConstants.keyBackupCensorshipPrefix)
-        }
+    fileprivate init(_ code: Code, reason: String) {
+        owsFailDebug("Error: \(reason)")
+        self.init(code, userInfo: [RemoteAttestationErrorKey_Reason: reason])
     }
 }
 
-public extension RemoteAttestationError {
-    var reason: String? {
-        return userInfo[RemoteAttestationErrorKey_Reason] as? String
+@objc
+public class RemoteAttestationKeys: NSObject {
+    @objc
+    public let clientEphemeralKeyPair: ECKeyPair
+
+    @objc
+    public let serverEphemeralPublic: Data
+
+    @objc
+    public let serverStaticPublic: Data
+
+    @objc
+    public let clientKey: OWSAES256Key
+
+    @objc
+    public let serverKey: OWSAES256Key
+
+    @objc
+    public init(clientEphemeralKeyPair: ECKeyPair, serverEphemeralPublic: Data, serverStaticPublic: Data) throws {
+        if serverEphemeralPublic.isEmpty {
+            throw RemoteAttestationError(.assertionError, reason: "Invalid serverEphemeralPublic")
+        }
+        if serverStaticPublic.isEmpty {
+            throw RemoteAttestationError(.assertionError, reason: "Invalid serverStaticPublic")
+        }
+
+        self.clientEphemeralKeyPair = clientEphemeralKeyPair
+        self.serverEphemeralPublic = serverEphemeralPublic
+        self.serverStaticPublic = serverStaticPublic
+
+        do {
+            let clientPrivateKey = clientEphemeralKeyPair.identityKeyPair.privateKey
+            let serverEphemeralPublicKey = try! ECPublicKey(keyData: serverEphemeralPublic).key
+            let serverStaticPublicKey = try! ECPublicKey(keyData: serverStaticPublic).key
+
+            let ephemeralToEphemeral = clientPrivateKey.keyAgreement(with: serverEphemeralPublicKey)
+            let ephemeralToStatic = clientPrivateKey.keyAgreement(with: serverStaticPublicKey)
+
+            let masterSecret = ephemeralToEphemeral + ephemeralToStatic
+            let publicKeys = clientEphemeralKeyPair.publicKey + serverEphemeralPublic + serverStaticPublic
+
+            let derivedMaterial = try hkdf(
+                outputLength: Int(kAES256_KeyByteLength) * 2,
+                version: 3,
+                inputKeyMaterial: masterSecret,
+                salt: publicKeys,
+                info: []
+            )
+
+            let clientKeyData = derivedMaterial[0..<Int(kAES256_KeyByteLength)]
+            guard let clientKey = OWSAES256Key(data: Data(clientKeyData)) else {
+                owsFail("failed to create client key")
+            }
+            self.clientKey = clientKey
+
+            let serverKeyData = derivedMaterial[Int(kAES256_KeyByteLength)...]
+            guard let serverKey = OWSAES256Key(data: Data(serverKeyData)) else {
+                owsFail("failed to create server key")
+            }
+            self.serverKey = serverKey
+
+        } catch {
+            owsFailDebug("Error: failed to derive keys - \(error)")
+            throw RemoteAttestationError(.assertionError, userInfo: [
+                RemoteAttestationErrorKey_Reason: "failed to derive keys",
+                NSUnderlyingErrorKey: error
+            ])
+        }
     }
 }

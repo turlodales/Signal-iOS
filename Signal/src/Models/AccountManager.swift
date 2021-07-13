@@ -1,10 +1,16 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import PromiseKit
 import SignalServiceKit
+
+public enum AccountManagerError: Error {
+    case reregistrationDifferentAccount
+}
+
+// MARK: -
 
 /**
  * Signal is actually two services - textSecure for messages and red phone (for calls). 
@@ -13,61 +19,13 @@ import SignalServiceKit
 @objc
 public class AccountManager: NSObject {
 
-    // MARK: - Dependencies
-
-    var profileManager: OWSProfileManager {
-        return OWSProfileManager.shared()
-    }
-
-    private var networkManager: TSNetworkManager {
-        return SSKEnvironment.shared.networkManager
-    }
-
-    private var preferences: OWSPreferences {
-        return Environment.shared.preferences
-    }
-
-    private var tsAccountManager: TSAccountManager {
-        return TSAccountManager.sharedInstance()
-    }
-
-    private var accountServiceClient: AccountServiceClient {
-        return SSKEnvironment.shared.accountServiceClient
-    }
-
-    private var storageServiceManager: StorageServiceManagerProtocol {
-        return SSKEnvironment.shared.storageServiceManager
-    }
-
-    private var deviceService: DeviceService {
-        return DeviceService.shared
-    }
-
-    var pushRegistrationManager: PushRegistrationManager {
-        return AppEnvironment.shared.pushRegistrationManager
-    }
-
-    var readReceiptManager: OWSReadReceiptManager {
-        return OWSReadReceiptManager.shared()
-    }
-
-    var identityManager: OWSIdentityManager {
-        return SSKEnvironment.shared.identityManager
-    }
-
-    var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    // MARK: -
-
     @objc
     public override init() {
         super.init()
 
         SwiftSingletons.register(self)
 
-        AppReadiness.runNowOrWhenAppDidBecomeReady {
+        AppReadiness.runNowOrWhenAppDidBecomeReadySync {
             if self.tsAccountManager.isRegistered {
                 self.recordUuidIfNecessary()
             }
@@ -103,11 +61,15 @@ public class AccountManager: NSObject {
     func getPreauthChallenge(recipientId: String) -> Promise<String?> {
         return firstly {
             return self.pushRegistrationManager.requestPushTokens()
-        }.then { (_: String, voipToken: String) -> Promise<String?> in
+        }.then { (vanillaToken: String, voipToken: String?) -> Promise<String?> in
             let (pushPromise, pushResolver) = Promise<String>.pending()
             self.pushRegistrationManager.preauthChallengeResolver = pushResolver
 
-            return self.accountServiceClient.requestPreauthChallenge(recipientId: recipientId, pushToken: voipToken).then { () -> Promise<String?> in
+            return self.accountServiceClient.requestPreauthChallenge(
+                recipientId: recipientId,
+                pushToken: voipToken?.nilIfEmpty ?? vanillaToken,
+                isVoipToken: !voipToken.isEmptyOrNil
+            ).then { () -> Promise<String?> in
                 let timeout: TimeInterval
                 if OWSIsDebugBuild() && TSConstants.isUsingProductionService {
                     // won't receive production voip in debug build, don't wait for long
@@ -126,6 +88,8 @@ public class AccountManager: NSObject {
                 // not deployed to production yet.
                 if error.httpStatusCode == 404 {
                     Logger.warn("404 while requesting preauthChallenge: \(error)")
+                } else if error.isNetworkFailureOrTimeout {
+                    Logger.warn("Network failure while requesting preauthChallenge: \(error)")
                 } else {
                     fallthrough
                 }
@@ -149,14 +113,17 @@ public class AccountManager: NSObject {
         return firstly {
             self.registerForTextSecure(verificationCode: verificationCode, pin: pin, checkForAvailableTransfer: checkForAvailableTransfer)
         }.then { response -> Promise<Void> in
-            assert(!FeatureFlags.allowUUIDOnlyContacts || response.uuid != nil)
+            assert(response.uuid != nil)
             self.tsAccountManager.uuidAwaitingVerification = response.uuid
 
             self.databaseStorage.write { transaction in
                 if !self.tsAccountManager.isReregistering {
                     // For new users, read receipts are on by default.
-                    self.readReceiptManager.setAreReadReceiptsEnabled(true,
+                    self.receiptManager.setAreReadReceiptsEnabled(true,
                                                                       transaction: transaction)
+
+                    // New users also have the onboarding banner cards enabled
+                    GetStartedBannerViewController.enableAllCards(writeTx: transaction)
                 }
 
                 // If the user previously had a PIN, but we don't have record of it,
@@ -171,7 +138,7 @@ public class AccountManager: NSObject {
         }.then {
             self.createPreKeys()
         }.done {
-            self.profileManager.fetchAndUpdateLocalUsersProfile()
+            self.profileManager.fetchLocalUsersProfile()
         }.then { _ -> Promise<Void> in
             return self.syncPushTokens().recover { (error) -> Promise<Void> in
                 switch error {
@@ -211,7 +178,7 @@ public class AccountManager: NSObject {
                 // Note we *don't* return this promise. There's no need to block registration on
                 // it completing, and if there are any errors, it's durable.
                 firstly {
-                    self.profileManager.reuploadLocalProfilePromise()
+                    self.profileManagerImpl.reuploadLocalProfilePromise()
                 }.catch { error in
                     Logger.error("error: \(error)")
                 }
@@ -224,6 +191,37 @@ public class AccountManager: NSObject {
     }
 
     func completeSecondaryLinking(provisionMessage: ProvisionMessage, deviceName: String) -> Promise<Void> {
+        // * Primary devices _can_ re-register with a new uuid.
+        // * Secondary devices _cannot_ be re-linked to primaries with a different uuid.
+        if tsAccountManager.isReregistering {
+            var canChangePhoneNumbers = false
+            if let oldUUID = tsAccountManager.reregistrationUUID(),
+               let newUUID = provisionMessage.uuid {
+                if !tsAccountManager.isPrimaryDevice,
+                   oldUUID != newUUID {
+                    Logger.verbose("oldUUID: \(oldUUID)")
+                    Logger.verbose("newUUID: \(newUUID)")
+                    Logger.warn("Cannot re-link with a different uuid.")
+                    return Promise(error: AccountManagerError.reregistrationDifferentAccount)
+                } else if oldUUID == newUUID {
+                    // Secondary devices _can_ re-link to primaries with different
+                    // phone numbers if the uuid is present and has not changed.
+                    canChangePhoneNumbers = true
+                }
+            }
+            // * Primary devices _cannot_ re-register with a new phone number.
+            // * Secondary devices _cannot_ be re-linked to primaries with a different phone number
+            //   unless the uuid is present and has not changed.
+            if !canChangePhoneNumbers,
+               let reregistrationPhoneNumber = tsAccountManager.reregistrationPhoneNumber(),
+               reregistrationPhoneNumber != provisionMessage.phoneNumber {
+                Logger.verbose("reregistrationPhoneNumber: \(reregistrationPhoneNumber)")
+                Logger.verbose("provisionMessage.phoneNumber: \(provisionMessage.phoneNumber)")
+                Logger.warn("Cannot re-register with a different phone number.")
+                return Promise(error: AccountManagerError.reregistrationDifferentAccount)
+            }
+        }
+
         tsAccountManager.phoneNumberAwaitingVerification = provisionMessage.phoneNumber
         tsAccountManager.uuidAwaitingVerification = provisionMessage.uuid
 
@@ -242,12 +240,12 @@ public class AccountManager: NSObject {
                 self.identityManager.storeIdentityKeyPair(provisionMessage.identityKeyPair,
                                                           transaction: transaction)
 
-                self.profileManager.setLocalProfileKey(provisionMessage.profileKey,
-                                                       wasLocallyInitiated: false,
-                                                       transaction: transaction)
+                self.profileManagerImpl.setLocalProfileKey(provisionMessage.profileKey,
+                                                           userProfileWriter: .linking,
+                                                           transaction: transaction)
 
                 if let areReadReceiptsEnabled = provisionMessage.areReadReceiptsEnabled {
-                    self.readReceiptManager.setAreReadReceiptsEnabled(areReadReceiptsEnabled,
+                    self.receiptManager.setAreReadReceiptsEnabled(areReadReceiptsEnabled,
                                                                       transaction: transaction)
                 }
 
@@ -275,15 +273,15 @@ public class AccountManager: NSObject {
                     throw error
                 }
             }
-        }.then {
-            self.deviceService.updateSecondaryDeviceCapabilities()
+        }.then(on: .global()) {
+            self.serviceClient.updateSecondaryDeviceCapabilities()
         }.done {
             self.completeRegistration()
         }.then { _ -> Promise<Void> in
             BenchEventStart(title: "waiting for initial storage service restore", eventId: "initial-storage-service-restore")
 
             self.databaseStorage.asyncWrite { transaction in
-                OWSSyncManager.shared().sendKeysSyncRequestMessage(transaction: transaction)
+                OWSSyncManager.shared.sendKeysSyncRequestMessage(transaction: transaction)
             }
 
             let storageServiceRestorePromise = firstly {
@@ -303,7 +301,7 @@ public class AccountManager: NSObject {
             BenchEventStart(title: "waiting for initial contact and group sync", eventId: "initial-contact-sync")
 
             let initialSyncMessagePromise = firstly {
-                OWSSyncManager.shared().sendInitialSyncRequestsAwaitingCreatedThreadOrdering(timeoutSeconds: 60)
+                OWSSyncManager.shared.sendInitialSyncRequestsAwaitingCreatedThreadOrdering(timeoutSeconds: 60)
             }.done(on: .global() ) { orderedThreadIds in
                 Logger.debug("orderedThreadIds: \(orderedThreadIds)")
                 // Maintain the remote sort ordering of threads by inserting `syncedThread` messages
@@ -400,9 +398,9 @@ public class AccountManager: NSObject {
         databaseStorage.write { transaction in
             self.identityManager.storeIdentityKeyPair(identityKeyPair,
                                                       transaction: transaction)
-            self.profileManager.setLocalProfileKey(profileKey,
-                                                   wasLocallyInitiated: false,
-                                                   transaction: transaction)
+            self.profileManagerImpl.setLocalProfileKey(profileKey,
+                                                       userProfileWriter: .debugging,
+                                                       transaction: transaction)
             self.tsAccountManager.setStoredServerAuthToken(serverAuthToken,
                                                            deviceId: 1,
                                                            transaction: transaction)
@@ -419,7 +417,7 @@ public class AccountManager: NSObject {
 
     private func syncPushTokens() -> Promise<Void> {
         Logger.info("")
-        let job = SyncPushTokensJob(accountManager: self, preferences: self.preferences)
+        let job = SyncPushTokensJob()
         job.uploadOnlyIfStale = false
         return job.run()
     }
@@ -431,7 +429,7 @@ public class AccountManager: NSObject {
 
     // MARK: Message Delivery
 
-    func updatePushTokens(pushToken: String, voipToken: String) -> Promise<Void> {
+    func updatePushTokens(pushToken: String, voipToken: String?) -> Promise<Void> {
         return Promise { resolver in
             tsAccountManager.registerForPushNotifications(pushToken: pushToken,
                                                           voipToken: voipToken,
@@ -469,10 +467,7 @@ public class AccountManager: NSObject {
             _ = self.ensureUuid().catch { error in
                 // Until we're in a UUID-only world, don't require a
                 // local UUID.
-                if FeatureFlags.allowUUIDOnlyContacts {
-                    owsFailDebug("error: \(error)")
-                }
-                Logger.warn("error: \(error)")
+                owsFailDebug("error: \(error)")
             }
         }
     }

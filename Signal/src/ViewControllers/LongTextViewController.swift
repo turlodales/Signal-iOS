@@ -1,48 +1,33 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import SignalServiceKit
 import SignalMessaging
 
-@objc
-public protocol LongTextViewDelegate {
-    @objc
+protocol LongTextViewDelegate: AnyObject {
     func longTextViewMessageWasDeleted(_ longTextViewController: LongTextViewController)
 }
 
-@objc
+// MARK: -
 public class LongTextViewController: OWSViewController {
-
-    // MARK: - Dependencies
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
 
     // MARK: - Properties
 
-    @objc
     weak var delegate: LongTextViewDelegate?
 
-    let viewItem: ConversationViewItem
+    let itemViewModel: CVItemViewModelImpl
 
     var messageTextView: UITextView!
 
-    var displayableText: DisplayableText? {
-        return viewItem.displayableBodyText
-    }
-
-    var fullText: String {
-        return displayableText?.fullText ?? ""
-    }
+    var displayableText: DisplayableText? { itemViewModel.displayableBodyText }
+    var fullAttributedText: NSAttributedString { displayableText?.fullAttributedText ?? NSAttributedString() }
 
     // MARK: Initializers
 
-    @objc
-    public required init(viewItem: ConversationViewItem) {
-        self.viewItem = viewItem
+    public required init(itemViewModel: CVItemViewModelImpl) {
+        self.itemViewModel = itemViewModel
         super.init()
     }
 
@@ -51,14 +36,14 @@ public class LongTextViewController: OWSViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
 
-        self.navigationItem.title = NSLocalizedString("LONG_TEXT_VIEW_TITLE",
-                                                      comment: "Title for the 'long text message' view.")
+        navigationItem.title = NSLocalizedString("LONG_TEXT_VIEW_TITLE",
+                                                 comment: "Title for the 'long text message' view.")
 
         createViews()
 
         self.messageTextView.contentOffset = CGPoint(x: 0, y: self.messageTextView.contentInset.top)
 
-        databaseStorage.add(databaseStorageObserver: self)
+        databaseStorage.appendDatabaseChangeDelegate(self)
     }
 
     // MARK: -
@@ -66,10 +51,10 @@ public class LongTextViewController: OWSViewController {
     private func refreshContent() {
         AssertIsOnMainThread()
 
-        let uniqueId = self.viewItem.interaction.uniqueId
+        let uniqueId = itemViewModel.interaction.uniqueId
 
         do {
-            try databaseStorage.uiReadThrows { transaction in
+            try databaseStorage.readThrows { transaction in
                 guard TSInteraction.anyFetch(uniqueId: uniqueId, transaction: transaction) != nil else {
                     Logger.error("Message was deleted")
                     throw LongTextViewError.messageWasDeleted
@@ -106,9 +91,29 @@ public class LongTextViewController: OWSViewController {
         messageTextView.isUserInteractionEnabled = true
         messageTextView.textColor = Theme.primaryTextColor
         if let displayableText = displayableText {
-            messageTextView.text = fullText
+            let mutableText = NSMutableAttributedString(attributedString: fullAttributedText)
+            mutableText.addAttributes(
+                [.font: UIFont.ows_dynamicTypeBody, .foregroundColor: Theme.primaryTextColor],
+                range: mutableText.entireRange
+            )
+
+            // Mentions have a custom style on the long-text view
+            // that differs from the message, so we re-color them here.
+            Mention.updateWithStyle(.longMessageView, in: mutableText)
+
+            let hasPendingMessageRequest = databaseStorage.read { transaction in
+                itemViewModel.thread.hasPendingMessageRequest(transaction: transaction.unwrapGrdbRead)
+            }
+            CVComponentBodyText.configureTextView(messageTextView,
+                                                  interaction: itemViewModel.interaction,
+                                                  displayableText: displayableText)
+            CVComponentBodyText.linkifyData(attributedText: mutableText,
+                                            linkifyStyle: .linkAttribute,
+                                            hasPendingMessageRequest: hasPendingMessageRequest,
+                                            shouldAllowLinkification: displayableText.shouldAllowLinkification)
+
+            messageTextView.attributedText = mutableText
             messageTextView.textAlignment = displayableText.fullTextNaturalAlignment
-            messageTextView.ensureShouldLinkifyText(displayableText.shouldAllowLinkification)
         } else {
             owsFailDebug("displayableText was unexpectedly nil")
             messageTextView.text = ""
@@ -153,36 +158,43 @@ public class LongTextViewController: OWSViewController {
 
     // MARK: - Actions
 
-    @objc func shareButtonPressed(_ sender: UIBarButtonItem) {
-        AttachmentSharing.showShareUI(forText: fullText, sender: sender)
+    @objc
+    func shareButtonPressed(_ sender: UIBarButtonItem) {
+        AttachmentSharing.showShareUI(forText: fullAttributedText.string, sender: sender)
     }
 
-    @objc func forwardButtonPressed() {
-        ForwardMessageNavigationController.present(for: viewItem, from: self, delegate: self)
+    @objc
+    func forwardButtonPressed() {
+        ForwardMessageNavigationController.present(for: itemViewModel, from: self, delegate: self)
     }
 }
 
 // MARK: -
 
-extension LongTextViewController: SDSDatabaseStorageObserver {
-    public func databaseStorageDidUpdate(change: SDSDatabaseStorageChange) {
+extension LongTextViewController: DatabaseChangeDelegate {
+
+    public func databaseChangesWillUpdate() {
+        AssertIsOnMainThread()
+    }
+
+    public func databaseChangesDidUpdate(databaseChanges: DatabaseChanges) {
         AssertIsOnMainThread()
 
-        guard change.didUpdate(interaction: self.viewItem.interaction) else {
+        guard databaseChanges.didUpdate(interaction: itemViewModel.interaction) else {
             return
         }
-        assert(change.didUpdateInteractions)
+        assert(databaseChanges.didUpdateInteractions)
 
         refreshContent()
     }
 
-    public func databaseStorageDidUpdateExternally() {
+    public func databaseChangesDidUpdateExternally() {
         AssertIsOnMainThread()
 
         refreshContent()
     }
 
-    public func databaseStorageDidReset() {
+    public func databaseChangesDidReset() {
         AssertIsOnMainThread()
 
         refreshContent()
@@ -192,7 +204,7 @@ extension LongTextViewController: SDSDatabaseStorageObserver {
 // MARK: -
 
 extension LongTextViewController: ForwardMessageDelegate {
-    public func forwardMessageFlowDidComplete(viewItem: ConversationViewItem,
+    public func forwardMessageFlowDidComplete(itemViewModel: CVItemViewModelImpl,
                                               threads: [TSThread]) {
         dismiss(animated: true) {
             self.didForwardMessage(threads: threads)
@@ -211,7 +223,7 @@ extension LongTextViewController: ForwardMessageDelegate {
             owsFailDebug("Missing thread.")
             return
         }
-        guard thread.uniqueId != viewItem.interaction.uniqueThreadId else {
+        guard thread.uniqueId != itemViewModel.interaction.uniqueThreadId else {
             return
         }
         SignalApp.shared().presentConversation(for: thread, animated: true)

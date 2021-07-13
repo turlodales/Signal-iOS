@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -8,12 +8,23 @@ import SignalServiceKit
 @objc
 public class OWSFlatButton: UIView {
 
-    private let button: UIButton
+    public let button: UIButton
 
     private var pressedBlock : (() -> Void)?
 
     private var upColor: UIColor?
     private var downColor: UIColor?
+
+    @objc
+    public var cornerRadius: CGFloat {
+        set {
+            button.layer.cornerRadius = newValue
+            button.clipsToBounds = newValue > 0
+        }
+        get {
+            button.layer.cornerRadius
+        }
+    }
 
     @objc
     public override var accessibilityIdentifier: String? {
@@ -60,7 +71,7 @@ public class OWSFlatButton: UIView {
         createContent()
     }
 
-    @available(*, unavailable, message:"use other constructor instead.")
+    @available(*, unavailable, message: "use other constructor instead.")
     required public init?(coder aDecoder: NSCoder) {
         notImplemented()
     }
@@ -136,18 +147,26 @@ public class OWSFlatButton: UIView {
 
     @objc
     public class func heightForFont(_ font: UIFont) -> CGFloat {
-        // Button height should be 48pt if the font is 17pt.
-        return font.pointSize * 48 / 17
+        font.lineHeight * 2.5
     }
 
     // MARK: Methods
 
     @objc
-    public func setTitle(title: String, font: UIFont,
-                         titleColor: UIColor ) {
-        button.setTitle(title, for: .normal)
-        button.setTitleColor(titleColor, for: .normal)
-        button.titleLabel!.font = font
+    public func setTitleColor(_ color: UIColor) {
+        button.setTitleColor(color, for: .normal)
+    }
+
+    @objc
+    public func setTitle(title: String? = nil, font: UIFont? = nil, titleColor: UIColor? = nil) {
+        title.map { button.setTitle($0, for: .normal) }
+        font.map { button.titleLabel?.font = $0 }
+        titleColor.map { setTitleColor($0) }
+    }
+
+    @objc
+    public func setAttributedTitle(_ title: NSAttributedString) {
+        button.setAttributedTitle(title, for: .normal)
     }
 
     @objc
@@ -195,10 +214,7 @@ public class OWSFlatButton: UIView {
 
     @objc
     public func setPressedBlock(_ pressedBlock: @escaping () -> Void) {
-        guard self.pressedBlock == nil else {
-            owsFailDebug("Button already has pressed block.")
-            return
-        }
+        guard self.pressedBlock == nil else { return }
         self.pressedBlock = pressedBlock
     }
 
@@ -225,6 +241,10 @@ public class OWSFlatButton: UIView {
             owsFailDebug("Missing button font.")
             return
         }
-        autoSetDimension(.height, toSize: font.lineHeight * 2.5)
+        autoSetDimension(.height, toSize: Self.heightForFont(font))
+    }
+
+    override public var intrinsicContentSize: CGSize {
+        button.intrinsicContentSize
     }
 }

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -10,28 +10,6 @@ import PromiseKit
 #if DEBUG
 
 class DebugUIGroupsV2: DebugUIPage {
-
-    // MARK: Dependencies
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    private var tsAccountManager: TSAccountManager {
-        return .sharedInstance()
-    }
-
-    private var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    private var messageSenderJobQueue: MessageSenderJobQueue {
-        return SSKEnvironment.shared.messageSenderJobQueue
-    }
-
-    private var groupsV2: GroupsV2 {
-        return SSKEnvironment.shared.groupsV2
-    }
 
     // MARK: Overrides 
 
@@ -47,9 +25,19 @@ class DebugUIGroupsV2: DebugUIPage {
                 self?.insertGroupUpdateInfoMessages(groupThread: groupThread)
             })
 
+            sectionItems.append(OWSTableItem(title: "Send group update.") { [weak self] in
+                self?.sendGroupUpdate(groupThread: groupThread)
+            })
+
             if groupThread.isGroupV2Thread {
+                // v2 Group
                 sectionItems.append(OWSTableItem(title: "Kick other group members.") { [weak self] in
                     self?.kickOtherGroupMembers(groupThread: groupThread)
+                })
+            } else {
+                // v1 Group
+                sectionItems.append(OWSTableItem(title: "Send empty v1 group update.") { [weak self] in
+                    self?.sendEmptyV1GroupUpdate(groupThread: groupThread)
                 })
             }
         }
@@ -65,9 +53,51 @@ class DebugUIGroupsV2: DebugUIPage {
             sectionItems.append(OWSTableItem(title: "Send partially-invalid group messages.") { [weak self] in
                 self?.sendPartiallyInvalidGroupMessages(groupThread: groupThread)
             })
+            sectionItems.append(OWSTableItem(title: "Update v2 group immediately.") { [weak self] in
+                self?.updateV2GroupImmediately(groupThread: groupThread)
+            })
+        }
+
+        if let groupThread = thread as? TSGroupThread {
+            sectionItems.append(OWSTableItem(title: "Try to migrate group (is already migrated on service).") {
+                Self.migrate(groupThread: groupThread,
+                             migrationMode: .isAlreadyMigratedOnService)
+            })
+            sectionItems.append(OWSTableItem(title: "Try to migrate group (only if already migrated on service).") {
+                Self.migrate(groupThread: groupThread,
+                             migrationMode: .possiblyAlreadyMigratedOnService)
+            })
+            sectionItems.append(OWSTableItem(title: "Try to migrate group (polite manual migration).") {
+                Self.migrate(groupThread: groupThread,
+                             migrationMode: .manualMigrationPolite)
+            })
+            sectionItems.append(OWSTableItem(title: "Try to migrate group (aggressive manual migration).") {
+                Self.migrate(groupThread: groupThread,
+                             migrationMode: .manualMigrationAggressive)
+            })
+            sectionItems.append(OWSTableItem(title: "Try to migrate group (polite auto migration).") {
+                Self.migrate(groupThread: groupThread,
+                             migrationMode: .autoMigrationPolite)
+            })
+            sectionItems.append(OWSTableItem(title: "Try to migrate group (aggressive auto migration).") {
+                Self.migrate(groupThread: groupThread,
+                             migrationMode: .autoMigrationAggressive)
+            })
         }
 
         return OWSTableSection(title: "Groups v2", items: sectionItems)
+    }
+
+    private static func migrate(groupThread: TSGroupThread,
+                                migrationMode: GroupsV2MigrationMode) {
+        _ = firstly { () -> Promise<TSGroupThread> in
+            GroupsV2Migration.tryToMigrate(groupThread: groupThread,
+                                           migrationMode: migrationMode)
+        }.done { _ in
+            Logger.verbose("Done.")
+        }.catch { error in
+            Logger.verbose("Error: \(error).")
+        }
     }
 
     private func insertGroupUpdateInfoMessages(groupThread: TSGroupThread) {
@@ -92,26 +122,23 @@ class DebugUIGroupsV2: DebugUIPage {
                                                        prefix: "V1 Group, Anon Updater:",
                                                        transaction: transaction)
 
-                if FeatureFlags.groupsV2CreateGroups {
-                    try self.insertGroupUpdateInfoMessages(groupThread: groupThread,
-                                                           groupsVersion: .V2,
-                                                           isLocalUpdate: true,
-                                                           prefix: "V2 Group, Local Updater:",
-                                                           transaction: transaction)
+                try self.insertGroupUpdateInfoMessages(groupThread: groupThread,
+                                                       groupsVersion: .V2,
+                                                       isLocalUpdate: true,
+                                                       prefix: "V2 Group, Local Updater:",
+                                                       transaction: transaction)
 
-                    try self.insertGroupUpdateInfoMessages(groupThread: groupThread,
-                                                           groupsVersion: .V2,
-                                                           isLocalUpdate: false,
-                                                           prefix: "V2 Group, Other Updater:",
-                                                           transaction: transaction)
+                try self.insertGroupUpdateInfoMessages(groupThread: groupThread,
+                                                       groupsVersion: .V2,
+                                                       isLocalUpdate: false,
+                                                       prefix: "V2 Group, Other Updater:",
+                                                       transaction: transaction)
 
-                    try self.insertGroupUpdateInfoMessages(groupThread: groupThread,
-                                                           groupsVersion: .V2,
-                                                           isAnonymousUpdate: true,
-                                                           prefix: "V2 Group, Anon Updater:",
-                                                           transaction: transaction)
-
-                }
+                try self.insertGroupUpdateInfoMessages(groupThread: groupThread,
+                                                       groupsVersion: .V2,
+                                                       isAnonymousUpdate: true,
+                                                       prefix: "V2 Group, Anon Updater:",
+                                                       transaction: transaction)
             } catch {
                 owsFailDebug("Error: \(error)")
             }
@@ -130,10 +157,13 @@ class DebugUIGroupsV2: DebugUIPage {
         // These will fail if you aren't registered or
         // don't have some Signal users in your contacts.
         let localAddress = tsAccountManager.localAddress!
-        var allAddresses = contactsManager.signalAccounts.map { $0.recipientAddress }
+        var allAddresses = contactsManagerImpl.signalAccounts.map { $0.recipientAddress }
         if groupsVersion == .V2 {
             // V2 group members must have a uuid.
             allAddresses = allAddresses.filter { $0.uuid != nil }
+        }
+        guard allAddresses.count >= 3 else {
+            return owsFailDebug("Not enough Signal users in your contacts.")
         }
         let updaterAddress: SignalServiceAddress?
         if isAnonymousUpdate {
@@ -155,7 +185,7 @@ class DebugUIGroupsV2: DebugUIPage {
         var defaultModelBuilder = TSGroupModelBuilder()
         defaultModelBuilder.groupsVersion = groupsVersion
         var defaultMembershipBuilder = GroupMembership.Builder()
-        defaultMembershipBuilder.addNonPendingMember(localAddress, role: .administrator)
+        defaultMembershipBuilder.addFullMember(localAddress, role: .administrator)
         defaultModelBuilder.groupMembership = defaultMembershipBuilder.build()
         let defaultModel = try defaultModelBuilder.build(transaction: transaction)
         let defaultDMToken = DisappearingMessageToken.disabledToken
@@ -223,10 +253,10 @@ class DebugUIGroupsV2: DebugUIPage {
             modelBuilder2.name = "name 2"
             modelBuilder2.avatarData = "avatar 2".data(using: .utf8)
             var groupMembershipBuilder1 = model1.groupMembership.asBuilder
-            groupMembershipBuilder1.addNonPendingMember(otherAddress0, role: .normal)
+            groupMembershipBuilder1.addFullMember(otherAddress0, role: .normal)
             if groupsVersion == .V2,
                 let updaterUuid = updaterAddress?.uuid {
-                groupMembershipBuilder1.addPendingMember(otherAddress1,
+                groupMembershipBuilder1.addInvitedMember(otherAddress1,
                                                          role: .normal,
                                                          addedByUuid: updaterUuid)
             }
@@ -354,7 +384,7 @@ class DebugUIGroupsV2: DebugUIPage {
             var groupMembershipBuilder1 = defaultModel.groupMembership.asBuilder
             for member in members {
                 groupMembershipBuilder1.remove(member)
-                groupMembershipBuilder1.addNonPendingMember(member, role: .normal)
+                groupMembershipBuilder1.addFullMember(member, role: .normal)
             }
             modelBuilder1.groupMembership = groupMembershipBuilder1.build()
             let model1 = try modelBuilder1.build(transaction: transaction)
@@ -363,7 +393,7 @@ class DebugUIGroupsV2: DebugUIPage {
             var groupMembershipBuilder2 = defaultModel.groupMembership.asBuilder
             for member in members {
                 groupMembershipBuilder2.remove(member)
-                groupMembershipBuilder2.addNonPendingMember(member, role: .administrator)
+                groupMembershipBuilder2.addFullMember(member, role: .administrator)
             }
             modelBuilder2.groupMembership = groupMembershipBuilder2.build()
             let model2 = try modelBuilder2.build(transaction: transaction)
@@ -408,7 +438,7 @@ class DebugUIGroupsV2: DebugUIPage {
             var groupMembershipBuilder2 = defaultModel.groupMembership.asBuilder
             for member in members {
                 groupMembershipBuilder2.remove(member)
-                groupMembershipBuilder2.addNonPendingMember(member, role: .administrator)
+                groupMembershipBuilder2.addFullMember(member, role: .administrator)
             }
             modelBuilder2.groupMembership = groupMembershipBuilder2.build()
             let model2 = try modelBuilder2.build(transaction: transaction)
@@ -466,7 +496,7 @@ class DebugUIGroupsV2: DebugUIPage {
                 var groupMembershipBuilder2 = defaultModel.groupMembership.asBuilder
                 for member in members {
                     groupMembershipBuilder2.remove(member)
-                    groupMembershipBuilder2.addPendingMember(member, role: .normal, addedByUuid: inviterUuid)
+                    groupMembershipBuilder2.addInvitedMember(member, role: .normal, addedByUuid: inviterUuid)
                 }
                 modelBuilder2.groupMembership = groupMembershipBuilder2.build()
                 let model2 = try modelBuilder2.build(transaction: transaction)
@@ -476,7 +506,7 @@ class DebugUIGroupsV2: DebugUIPage {
                 var groupMembershipBuilder3 = defaultModel.groupMembership.asBuilder
                 for member in members {
                     groupMembershipBuilder3.remove(member)
-                    groupMembershipBuilder3.addNonPendingMember(member, role: .administrator)
+                    groupMembershipBuilder3.addFullMember(member, role: .administrator)
                 }
                 modelBuilder3.groupMembership = groupMembershipBuilder3.build()
                 let model3 = try modelBuilder3.build(transaction: transaction)
@@ -523,7 +553,7 @@ class DebugUIGroupsV2: DebugUIPage {
 
         let oldGroupMembership = oldGroupModel.groupMembership
         var groupMembershipBuilder = oldGroupMembership.asBuilder
-        for address in oldGroupMembership.allUsers {
+        for address in oldGroupMembership.allMembersOfAnyKind {
             if address != localAddress {
                 groupMembershipBuilder.remove(address)
             }
@@ -535,7 +565,8 @@ class DebugUIGroupsV2: DebugUIPage {
             let newGroupModel = try databaseStorage.read { transaction in
                 try groupModelBuilder.buildAsV2(transaction: transaction)
             }
-            return GroupManager.localUpdateExistingGroup(groupModel: newGroupModel,
+            return GroupManager.localUpdateExistingGroup(oldGroupModel: oldGroupModel,
+                                                         newGroupModel: newGroupModel,
                                                          dmConfiguration: nil,
                                                          groupUpdateSourceAddress: localAddress)
         }.done { (_) -> Void in
@@ -558,6 +589,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return firstly {
                 GroupManager.localCreateNewGroup(members: [otherUserAddress],
                                                  name: "Real group, both users are in the group",
+                                                 disappearingMessageToken: .disabledToken,
                                                  shouldSendMessage: false)
             }.map(on: .global()) { (groupThread: TSGroupThread) in
                 guard let validGroupModelV2 = groupThread.groupModel as? TSGroupModelV2 else {
@@ -571,6 +603,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return firstly {
                 GroupManager.localCreateNewGroup(members: [],
                                                  name: "Real group, recipient is not in the group",
+                                                 disappearingMessageToken: .disabledToken,
                                                  shouldSendMessage: false)
             }.map(on: .global()) { (groupThread: TSGroupThread) in
                 guard let missingOtherUserGroupModelV2 = groupThread.groupModel as? TSGroupModelV2 else {
@@ -586,12 +619,13 @@ class DebugUIGroupsV2: DebugUIPage {
             return firstly { () -> Promise<TSGroupThread> in
                 GroupManager.localCreateNewGroup(members: [otherUserAddress],
                                                  name: "Real group, sender is not in the group",
+                                                 disappearingMessageToken: .disabledToken,
                                                  shouldSendMessage: false)
             }.then(on: .global()) { (groupThread: TSGroupThread) -> Promise<TSGroupThread> in
                 guard let groupModel = groupThread.groupModel as? TSGroupModelV2 else {
                     throw OWSAssertionError("Invalid groupModel.")
                 }
-                guard groupModel.groupMembership.isNonPendingMember(otherUserAddress) else {
+                guard groupModel.groupMembership.isFullMember(otherUserAddress) else {
                     throw OWSAssertionError("Other user is not a full member.")
                 }
                 // Last admin (local user) can't leave group, so first
@@ -643,7 +677,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return try! groupsV2.groupV2ContextInfo(forMasterKeyData: masterKeyData)
         }
 
-        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalServiceAddress) -> Data in
             // Real and valid group id/master key/secret params.
             // Other user is not in the group.
             let masterKeyData = missingOtherUserGroupContextInfo.masterKeyData
@@ -661,7 +695,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return Self.contentProtoData(forDataBuilder: dataBuilder)
         })
 
-        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalServiceAddress) -> Data in
             // Real and valid group id/master key/secret params.
             // Local user is not in the group.
             let masterKeyData = missingLocalUserGroupContextInfo.masterKeyData
@@ -679,7 +713,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return Self.contentProtoData(forDataBuilder: dataBuilder)
         })
 
-        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalServiceAddress) -> Data in
             // Real and valid group id/master key/secret params.
             let masterKeyData = validGroupContextInfo.masterKeyData
             // Non-existent revision.
@@ -696,7 +730,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return Self.contentProtoData(forDataBuilder: dataBuilder)
         })
 
-        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalServiceAddress) -> Data in
             // Real and valid group id/master key/secret params.
             var masterKeyData = validGroupContextInfo.masterKeyData
             // Truncate the master key.
@@ -715,7 +749,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return Self.contentProtoData(forDataBuilder: dataBuilder)
         })
 
-        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalServiceAddress) -> Data in
             // Real and valid group id/master key/secret params.
             var masterKeyData = validGroupContextInfo.masterKeyData
             // Append garbage to the master key.
@@ -734,7 +768,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return Self.contentProtoData(forDataBuilder: dataBuilder)
         })
 
-        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalServiceAddress) -> Data in
             // Real and valid group id/master key/secret params.
             var masterKeyData = validGroupContextInfo.masterKeyData
             // Replace master key with zeroes.
@@ -753,7 +787,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return Self.contentProtoData(forDataBuilder: dataBuilder)
         })
 
-        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalServiceAddress) -> Data in
             // Real and valid group id/master key/secret params.
             let masterKeyData = validGroupContextInfo.masterKeyData
 
@@ -768,7 +802,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return Self.contentProtoData(forDataBuilder: dataBuilder)
         })
 
-        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalServiceAddress) -> Data in
             // Real revision.
             let revision: UInt32 = 0
 
@@ -783,7 +817,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return Self.contentProtoData(forDataBuilder: dataBuilder)
         })
 
-        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalServiceAddress) -> Data in
             // Valid-looking group id/master key/secret params, but doesn't
             // correspond to an actual group on the service.
             let groupV2ContextInfo: GroupV2ContextInfo = buildValidGroupContextInfo()
@@ -801,7 +835,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return Self.contentProtoData(forDataBuilder: dataBuilder)
         })
 
-        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: contactThread) { (_: SignalServiceAddress) -> Data in
             // Real and valid group id/master key/secret params.
             let masterKeyData = validGroupContextInfo.masterKeyData
             // Real revision.
@@ -834,7 +868,7 @@ class DebugUIGroupsV2: DebugUIPage {
         let masterKey = try! GroupsV2Protos.masterKeyData(forGroupModel: groupModelV2)
         let groupContextInfo = try! self.groupsV2.groupV2ContextInfo(forMasterKeyData: masterKey)
 
-        messages.append(OWSDynamicOutgoingMessage(thread: groupThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: groupThread) { (_: SignalServiceAddress) -> Data in
             // Real and valid group id/master key/secret params.
             let masterKeyData = groupContextInfo.masterKeyData
             // Real revision.
@@ -855,7 +889,7 @@ class DebugUIGroupsV2: DebugUIPage {
             return Self.contentProtoData(forDataBuilder: dataBuilder)
         })
 
-        messages.append(OWSDynamicOutgoingMessage(thread: groupThread) { (_: SignalRecipient) -> Data in
+        messages.append(OWSDynamicOutgoingMessage(thread: groupThread) { (_: SignalServiceAddress) -> Data in
             // Real and valid group id/master key/secret params.
             let masterKeyData = groupContextInfo.masterKeyData
             // Real revision.
@@ -883,6 +917,64 @@ class DebugUIGroupsV2: DebugUIPage {
         contentBuilder.setDataMessage(dataProto)
         let plaintextData = try! contentBuilder.buildSerializedData()
         return plaintextData
+    }
+
+    private func sendEmptyV1GroupUpdate(groupThread: TSGroupThread) {
+
+        guard let localAddress = tsAccountManager.localAddress else {
+            return owsFailDebug("Missing localAddress.")
+        }
+
+        let groupModel = groupThread.groupModel
+        let timestamp = NSDate.ows_millisecondTimeStamp()
+        let message = OWSDynamicOutgoingMessage(thread: groupThread) { (_: SignalServiceAddress) -> Data in
+            let groupContextBuilder = SSKProtoGroupContext.builder(id: groupModel.groupId)
+            groupContextBuilder.setType(.update)
+            groupContextBuilder.addMembersE164(localAddress.phoneNumber!)
+
+            let memberBuilder = SSKProtoGroupContextMember.builder()
+            memberBuilder.setE164(localAddress.phoneNumber!)
+            groupContextBuilder.addMembers(try! memberBuilder.build())
+
+            let dataBuilder = SSKProtoDataMessage.builder()
+            dataBuilder.setTimestamp(timestamp)
+            dataBuilder.setGroup(try! groupContextBuilder.build())
+            dataBuilder.setRequiredProtocolVersion(0)
+            return Self.contentProtoData(forDataBuilder: dataBuilder)
+        }
+
+        firstly { () -> Promise<Void> in
+            messageSender.sendMessage(.promise, message.asPreparer)
+        }.done { (_) -> Void in
+            Logger.info("Success.")
+        }.catch { error in
+            owsFailDebug("Error: \(error)")
+        }
+    }
+
+    private func sendGroupUpdate(groupThread: TSGroupThread) {
+        firstly {
+            GroupManager.sendGroupUpdateMessage(thread: groupThread)
+        }.done { _ in
+            Logger.info("Success.")
+        }.catch { error in
+            owsFailDebug("Error: \(error)")
+        }
+    }
+
+    private func updateV2GroupImmediately(groupThread: TSGroupThread) {
+        guard let groupModelV2 = groupThread.groupModel as? TSGroupModelV2 else {
+            owsFailDebug("Invalid groupModel.")
+            return
+        }
+        firstly {
+            self.groupV2Updates.tryToRefreshV2GroupUpToCurrentRevisionImmediately(groupId: groupModelV2.groupId,
+                                                                                  groupSecretParamsData: groupModelV2.secretParamsData)
+        }.done { _ in
+            Logger.info("Success.")
+        }.catch { error in
+            owsFailDebug("Error: \(error)")
+        }
     }
 }
 

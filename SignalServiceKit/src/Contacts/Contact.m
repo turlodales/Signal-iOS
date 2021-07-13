@@ -1,38 +1,28 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "Contact.h"
-#import "PhoneNumber.h"
-#import "SSKEnvironment.h"
-#import "SignalRecipient.h"
-#import "TSAccountManager.h"
 #import <Contacts/Contacts.h>
 #import <SignalCoreKit/Cryptography.h>
 #import <SignalCoreKit/NSString+OWS.h>
+#import <SignalServiceKit/Contact.h>
+#import <SignalServiceKit/PhoneNumber.h>
+#import <SignalServiceKit/SSKEnvironment.h>
+#import <SignalServiceKit/SignalRecipient.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSAccountManager.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @interface Contact ()
 
 @property (nonatomic, readonly) NSDictionary<NSString *, NSString *> *phoneNumberNameMap;
-@property (nonatomic, readonly) NSUInteger imageHash;
 
 @end
 
 #pragma mark -
 
 @implementation Contact
-
-#pragma mark - Dependencies
-
-- (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
-
-#pragma mark -
 
 @synthesize comparableNameFirstLast = _comparableNameFirstLast;
 @synthesize comparableNameLastFirst = _comparableNameLastFirst;
@@ -49,12 +39,12 @@ NS_ASSUME_NONNULL_BEGIN
                      cnContactId:(nullable NSString *)cnContactId
                        firstName:(nullable NSString *)firstName
                         lastName:(nullable NSString *)lastName
+                        nickname:(nullable NSString *)nickname
                         fullName:(NSString *)fullName
             userTextPhoneNumbers:(NSArray<NSString *> *)userTextPhoneNumbers
               phoneNumberNameMap:(NSDictionary<NSString *, NSString *> *)phoneNumberNameMap
               parsedPhoneNumbers:(NSArray<PhoneNumber *> *)parsedPhoneNumbers
                           emails:(NSArray<NSString *> *)emails
-                 imageDataToHash:(nullable NSData *)imageDataToHash
 {
     self = [super init];
 
@@ -70,23 +60,11 @@ NS_ASSUME_NONNULL_BEGIN
     _firstName = [firstName copy];
     _lastName = [lastName copy];
     _fullName = [fullName copy];
+    _nickname = [nickname copy];
     _userTextPhoneNumbers = [userTextPhoneNumbers copy];
     _phoneNumberNameMap = [phoneNumberNameMap copy];
     _parsedPhoneNumbers = [parsedPhoneNumbers copy];
     _emails = [emails copy];
-
-    if (imageDataToHash != nil) {
-        NSUInteger hashValue = 0;
-        NSData *_Nullable hashData = [Cryptography computeSHA256Digest:imageDataToHash
-                                                      truncatedToBytes:sizeof(hashValue)];
-        if (!hashData) {
-            OWSFailDebug(@"could not compute hash for avatar.");
-        }
-        [hashData getBytes:&hashValue length:sizeof(hashValue)];
-        _imageHash = hashValue;
-    } else {
-        _imageHash = 0;
-    }
 
     return self;
 }
@@ -170,12 +148,12 @@ NS_ASSUME_NONNULL_BEGIN
                       cnContactId:cnContact.identifier
                         firstName:cnContact.givenName.ows_stripped
                          lastName:cnContact.familyName.ows_stripped
+                         nickname:cnContact.nickname.ows_stripped
                          fullName:[Contact formattedFullNameWithCNContact:cnContact]
              userTextPhoneNumbers:userTextPhoneNumbers
                phoneNumberNameMap:phoneNumberNameMap
                parsedPhoneNumbers:parsedPhoneNumbers
-                           emails:emailAddresses
-                  imageDataToHash:[Contact avatarDataForCNContact:cnContact]];
+                           emails:emailAddresses];
 }
 
 - (NSString *)uniqueId
@@ -252,7 +230,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (NSString *)combineLeftName:(NSString *)leftName withRightName:(NSString *)rightName usingSeparator:(NSString *)separator {
     const BOOL leftNameNonEmpty = (leftName.length > 0);
     const BOOL rightNameNonEmpty = (rightName.length > 0);
-    
+
+    if (self.nickname.length > 0) {
+        return self.nickname;
+    }
+
     if (leftNameNonEmpty && rightNameNonEmpty) {
         return [NSString stringWithFormat:@"%@%@%@", leftName, separator, rightName];
     } else if (leftNameNonEmpty) {
@@ -266,21 +248,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (NSString *)description {
     return [NSString stringWithFormat:@"%@: %@", self.fullName, self.userTextPhoneNumbers];
-}
-
-- (NSArray<SignalServiceAddress *> *)registeredAddresses
-{
-    __block NSMutableArray<SignalServiceAddress *> *addresses = [NSMutableArray array];
-
-    [self.databaseStorage readWithBlock:^(SDSAnyReadTransaction *transaction) {
-        for (NSString *e164PhoneNumber in self.e164sForIntersection) {
-            SignalServiceAddress *address = [[SignalServiceAddress alloc] initWithPhoneNumber:e164PhoneNumber];
-            if ([SignalRecipient isRegisteredRecipient:address transaction:transaction]) {
-                [addresses addObject:address];
-            }
-        }
-    }];
-    return [addresses copy];
 }
 
 + (NSComparator)comparatorSortingNamesByFirstThenLast:(BOOL)firstNameOrdering {
@@ -302,9 +269,10 @@ NS_ASSUME_NONNULL_BEGIN
 }
 
 - (NSString *)nameForAddress:(SignalServiceAddress *)address
+         registeredAddresses:(NSArray<SignalServiceAddress *> *)registeredAddresses
 {
     OWSAssertDebug(address.isValid);
-    OWSAssertDebug([self.registeredAddresses containsObject:address]);
+    OWSAssertDebug([registeredAddresses containsObject:address]);
 
     // We don't have contacts entries for addresses without phone numbers
     if (!address.phoneNumber) {
@@ -331,6 +299,15 @@ NS_ASSUME_NONNULL_BEGIN
     }
 }
 
+- (NSArray<NSString *> *)e164PhoneNumbers
+{
+    NSMutableArray<NSString *> *result = [NSMutableArray new];
+    for (PhoneNumber *phoneNumber in self.parsedPhoneNumbers) {
+        [result addObject:phoneNumber.toE164];
+    }
+    return result;
+}
+
 // This method is used to de-bounce system contact fetch notifications
 // by checking for changes in the contact data.
 - (NSUInteger)hash
@@ -338,16 +315,16 @@ NS_ASSUME_NONNULL_BEGIN
     // base hash is some arbitrary number
     NSUInteger hash = 1825038313;
 
-    hash = hash ^ self.fullName.hash;
+    hash ^= self.fullName.hash;
 
-    hash = hash ^ self.imageHash;
+    hash ^= self.nickname.hash;
 
-    for (PhoneNumber *phoneNumber in self.parsedPhoneNumbers) {
-        hash = hash ^ phoneNumber.toE164.hash;
+    for (NSString *phoneNumber in self.e164PhoneNumbers) {
+        hash ^= phoneNumber.hash;
     }
 
     for (NSString *email in self.emails) {
-        hash = hash ^ email.hash;
+        hash ^= email.hash;
     }
 
     return hash;
@@ -395,6 +372,7 @@ NS_ASSUME_NONNULL_BEGIN
     if (formattedFullName.length == 0) {
         mergedCNContact.namePrefix = newCNContact.namePrefix.ows_stripped;
         mergedCNContact.givenName = newCNContact.givenName.ows_stripped;
+        mergedCNContact.nickname = newCNContact.nickname.ows_stripped;
         mergedCNContact.middleName = newCNContact.middleName.ows_stripped;
         mergedCNContact.familyName = newCNContact.familyName.ows_stripped;
         mergedCNContact.nameSuffix = newCNContact.nameSuffix.ows_stripped;

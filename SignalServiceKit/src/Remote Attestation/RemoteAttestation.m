@@ -1,21 +1,20 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "RemoteAttestation.h"
+#import <SignalServiceKit/RemoteAttestation.h>
 #import "NSError+OWSOperation.h"
-#import "OWSError.h"
-#import "OWSRequestFactory.h"
-#import "RemoteAttestationQuote.h"
-#import "RemoteAttestationSigningCertificate.h"
-#import "SSKEnvironment.h"
-#import "TSNetworkManager.h"
 #import <Curve25519Kit/Curve25519.h>
-#import <HKDFKit/HKDFKit.h>
 #import <SignalCoreKit/Cryptography.h>
 #import <SignalCoreKit/NSData+OWS.h>
 #import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalServiceKit/OWSError.h>
+#import <SignalServiceKit/OWSRequestFactory.h>
+#import <SignalServiceKit/RemoteAttestationQuote.h>
+#import <SignalServiceKit/RemoteAttestationSigningCertificate.h>
+#import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSNetworkManager.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -30,6 +29,15 @@ NSError *RemoteAttestationErrorMakeWithReason(NSInteger code, NSString *reason)
                            userInfo:@{ RemoteAttestationErrorKey_Reason : reason }];
 }
 
+NSString *NSStringForRemoteAttestationService(RemoteAttestationService value) {
+    switch (value) {
+        case RemoteAttestationServiceContactDiscovery:
+            return @"ContactDiscovery";
+        case RemoteAttestationServiceKeyBackup:
+            return @"KeyBackup";
+    }
+}
+
 @interface RemoteAttestationAuth ()
 
 @property (nonatomic) NSString *username;
@@ -40,120 +48,6 @@ NSError *RemoteAttestationErrorMakeWithReason(NSInteger code, NSString *reason)
 #pragma mark -
 
 @implementation RemoteAttestationAuth
-
-@end
-
-#pragma mark -
-
-@interface RemoteAttestationKeys ()
-
-@property (nonatomic) ECKeyPair *clientEphemeralKeyPair;
-@property (nonatomic) NSData *serverEphemeralPublic;
-@property (nonatomic) NSData *serverStaticPublic;
-
-@property (nonatomic) OWSAES256Key *clientKey;
-@property (nonatomic) OWSAES256Key *serverKey;
-
-@end
-
-#pragma mark -
-
-@implementation RemoteAttestationKeys
-
-- (nullable RemoteAttestationKeys *)initWithClientEphemeralKeyPair:(ECKeyPair *)clientEphemeralKeyPair
-                                             serverEphemeralPublic:(NSData *)serverEphemeralPublic
-                                                serverStaticPublic:(NSData *)serverStaticPublic
-                                                             error:(NSError **)error
-{
-    self = [super init];
-    
-    if (!clientEphemeralKeyPair) {
-        *error = RemoteAttestationErrorMakeWithReason(
-            RemoteAttestationAssertionError, @"Missing clientEphemeralKeyPair");
-        return nil;
-    }
-    if (serverEphemeralPublic.length < 1) {
-        *error = RemoteAttestationErrorMakeWithReason(
-            RemoteAttestationAssertionError, @"Invalid serverEphemeralPublic");
-        return nil;
-    }
-    if (serverStaticPublic.length < 1) {
-        *error = RemoteAttestationErrorMakeWithReason(
-            RemoteAttestationAssertionError, @"Invalid serverStaticPublic");
-        return nil;
-    }
-    _clientEphemeralKeyPair = clientEphemeralKeyPair;
-    _serverEphemeralPublic = serverEphemeralPublic;
-    _serverStaticPublic = serverStaticPublic;
-    if (![self deriveKeys]) {
-        *error = RemoteAttestationErrorMakeWithReason(
-            RemoteAttestationAssertionError, @"failed to derive keys");
-        return nil;
-    }
-    return self;
-}
-
-// Returns YES on success.
-- (BOOL)deriveKeys
-{
-    NSData *ephemeralToEphemeral;
-    NSData *ephemeralToStatic;
-    @try {
-        ephemeralToEphemeral =
-            [Curve25519 throws_generateSharedSecretFromPublicKey:self.serverEphemeralPublic andKeyPair:self.clientEphemeralKeyPair];
-        ephemeralToStatic =
-            [Curve25519 throws_generateSharedSecretFromPublicKey:self.serverStaticPublic andKeyPair:self.clientEphemeralKeyPair];
-    } @catch (NSException *exception) {
-        OWSFailDebug(@"could not generate shared secrets: %@", exception);
-        return NO;
-    }
-
-    NSData *masterSecret = [ephemeralToEphemeral dataByAppendingData:ephemeralToStatic];
-    NSData *publicKeys = [NSData join:@[
-        self.clientEphemeralKeyPair.publicKey,
-        self.serverEphemeralPublic,
-        self.serverStaticPublic,
-    ]];
-
-    NSData *_Nullable derivedMaterial;
-    @try {
-        derivedMaterial =
-            [HKDFKit throws_deriveKey:masterSecret info:nil salt:publicKeys outputSize:(int)kAES256_KeyByteLength * 2];
-    } @catch (NSException *exception) {
-        OWSFailDebug(@"could not derive service key: %@", exception);
-        return NO;
-    }
-
-    if (!derivedMaterial) {
-        OWSFailDebug(@"missing derived service key.");
-        return NO;
-    }
-    if (derivedMaterial.length != kAES256_KeyByteLength * 2) {
-        OWSFailDebug(@"derived service key has unexpected length.");
-        return NO;
-    }
-
-    NSData *_Nullable clientKeyData =
-        [derivedMaterial subdataWithRange:NSMakeRange(kAES256_KeyByteLength * 0, kAES256_KeyByteLength)];
-    OWSAES256Key *_Nullable clientKey = [OWSAES256Key keyWithData:clientKeyData];
-    if (!clientKey) {
-        OWSFailDebug(@"clientKey has unexpected length.");
-        return NO;
-    }
-
-    NSData *_Nullable serverKeyData =
-        [derivedMaterial subdataWithRange:NSMakeRange(kAES256_KeyByteLength * 1, kAES256_KeyByteLength)];
-    OWSAES256Key *_Nullable serverKey = [OWSAES256Key keyWithData:serverKeyData];
-    if (!serverKey) {
-        OWSFailDebug(@"serverKey has unexpected length.");
-        return NO;
-    }
-
-    self.clientKey = clientKey;
-    self.serverKey = serverKey;
-
-    return YES;
-}
 
 @end
 
@@ -262,10 +156,37 @@ NSError *RemoteAttestationErrorMakeWithReason(NSInteger code, NSString *reason)
                                    success:(void (^)(RemoteAttestationAuth *))successHandler
                                    failure:(void (^)(NSError *error))failureHandler
 {
+    if (!self.tsAccountManager.isRegisteredAndReady) {
+        return failureHandler(OWSErrorMakeGenericError(@"Not registered."));
+    }
+
+    if (SSKDebugFlags.internalLogging) {
+        OWSLogInfo(@"service: %@", NSStringForRemoteAttestationService(service));
+    }
+
     TSRequest *request = [OWSRequestFactory remoteAttestationAuthRequestForService:service];
-    [[TSNetworkManager sharedManager] makeRequest:request
+    [[TSNetworkManager shared] makeRequest:request
       success:^(NSURLSessionDataTask *task, id responseDict) {
-          dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+
+        if (SSKDebugFlags.internalLogging) {
+            OWSAssertDebug([task.response isKindOfClass:NSHTTPURLResponse.class]);
+            NSHTTPURLResponse *response = (NSHTTPURLResponse *)task.response;
+            OWSLogInfo(@"statusCode: %lu", (unsigned long) response.statusCode);
+            for (NSString *header in response.allHeaderFields) {
+                if ([response respondsToSelector:@selector(valueForHTTPHeaderField:)]) {
+                    NSString *_Nullable headerValue = [response valueForHTTPHeaderField:header];
+                    OWSLogInfo(@"Header: %@ -> %@", header, headerValue);
+                } else {
+                    OWSLogInfo(@"Header: %@", header);
+                }
+            }
+            
+#if TESTABLE_BUILD
+            [TSNetworkManager logCurlForTask:task];
+#endif
+        }
+
+        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
               RemoteAttestationAuth *_Nullable auth = [self parseAuthParams:responseDict];
               if (!auth) {
                   OWSLogError(@"remote attestation auth could not be parsed: %@", responseDict);
@@ -412,10 +333,16 @@ NSError *RemoteAttestationErrorMakeWithReason(NSInteger code, NSString *reason)
     BOOL isExpired = [now isAfterDate:timestampDatePlus1Day];
 
     if (isExpired) {
-        OWSFailDebug(@"Signature is expired: %@", signatureBodyEntity.timestamp);
-        *error = RemoteAttestationErrorMakeWithReason(
-            RemoteAttestationAssertionError, @"Signature is expired.");
-        return NO;
+        if (SSKDebugFlags.internalLogging) {
+            OWSLogInfo(@"signatureBody: %@", signatureBody);
+            OWSLogInfo(@"signature: %@", signature);
+        }
+        if (SSKFeatureFlags.isUsingProductionService) {
+            OWSFailDebug(@"Signature is expired: %@", signatureBodyEntity.timestamp);
+            *error = RemoteAttestationErrorMakeWithReason(
+                                                          RemoteAttestationAssertionError, @"Signature is expired.");
+            return NO;
+        }
     }
 
     return YES;

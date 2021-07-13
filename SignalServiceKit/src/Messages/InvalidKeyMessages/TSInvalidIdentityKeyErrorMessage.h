@@ -1,8 +1,8 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSErrorMessage.h"
+#import <SignalServiceKit/TSErrorMessage.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -13,10 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (nullable instancetype)initWithCoder:(NSCoder *)coder NS_DESIGNATED_INITIALIZER;
 
-- (instancetype)initWithThread:(TSThread *)thread
-             failedMessageType:(TSErrorMessageType)errorMessageType
-                       address:(nullable SignalServiceAddress *)address NS_UNAVAILABLE;
-
+- (BOOL)acceptNewIdentityKeyWithError:(NSError **)error;
 - (void)throws_acceptNewIdentityKey NS_SWIFT_UNAVAILABLE("throws objc exceptions");
 - (nullable NSData *)throws_newIdentityKey NS_SWIFT_UNAVAILABLE("throws objc exceptions");
 - (SignalServiceAddress *)theirSignalAddress;

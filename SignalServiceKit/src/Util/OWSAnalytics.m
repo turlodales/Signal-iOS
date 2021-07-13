@@ -1,15 +1,15 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSAnalytics.h"
 #import <CocoaLumberjack/CocoaLumberjack.h>
+#import <SignalServiceKit/OWSAnalytics.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSAnalytics
 
-+ (instancetype)sharedInstance
++ (instancetype)shared
 {
     static OWSAnalytics *instance = nil;
     static dispatch_once_t onceToken;
@@ -51,7 +51,7 @@ NS_ASSUME_NONNULL_BEGIN
         location:(const char *)location
             line:(int)line
 {
-    [[self sharedInstance] logEvent:eventName severity:severity parameters:parameters location:location line:line];
+    [[self shared] logEvent:eventName severity:severity parameters:parameters location:location line:line];
 }
 
 - (void)logEvent:(NSString *)eventName
@@ -106,7 +106,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (void)appLaunchDidBegin
 {
-    [self.sharedInstance appLaunchDidBegin];
+    [self.shared appLaunchDidBegin];
 }
 
 - (void)appLaunchDidBegin

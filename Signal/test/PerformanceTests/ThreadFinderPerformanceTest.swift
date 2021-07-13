@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -8,40 +8,24 @@ import SignalServiceKit
 
 class ThreadFinderPerformanceTest: PerformanceBaseTest {
 
-    func testYDBPerf_enumerateVisibleThreads() {
-        storageCoordinator.useYDBForTests()
+    func testPerf_enumerateVisibleThreads() {
         measureMetrics(XCTestCase.defaultPerformanceMetrics, automaticallyStartMeasuring: false) {
             enumerateVisibleThreads(isArchived: false)
         }
     }
 
-    func testYDBPerf_enumerateVisibleThreads_isArchived() {
-        storageCoordinator.useYDBForTests()
-        measureMetrics(XCTestCase.defaultPerformanceMetrics, automaticallyStartMeasuring: false) {
-            enumerateVisibleThreads(isArchived: true)
-        }
-    }
-
-    func testGRDBPerf_enumerateVisibleThreads() {
-        storageCoordinator.useGRDBForTests()
-        measureMetrics(XCTestCase.defaultPerformanceMetrics, automaticallyStartMeasuring: false) {
-            enumerateVisibleThreads(isArchived: false)
-        }
-    }
-
-    func testGRDBPerf_enumerateVisibleThreads_isArchived() {
-        storageCoordinator.useGRDBForTests()
+    func testPerf_enumerateVisibleThreads_isArchived() {
         measureMetrics(XCTestCase.defaultPerformanceMetrics, automaticallyStartMeasuring: false) {
             enumerateVisibleThreads(isArchived: true)
         }
     }
 
     func enumerateVisibleThreads(isArchived: Bool) {
-        // To properly stress YDB and GRDB, we want a large number
+        // To properly stress GRDB, we want a large number
         // of threads with a large number of messages.
         //
         // NOTE: the total thread count is 4 x threadCount.
-        let threadCount = 100
+        let threadCount = DebugFlags.fastPerfTests ? 5 : 100
         var emptyThreads = [TSThread]()
         var hasMessageThreads = [TSThread]()
         var archivedThreads = [TSThread]()
@@ -73,7 +57,7 @@ class ThreadFinderPerformanceTest: PerformanceBaseTest {
         }
 
         // Note that we enumerate _twice_ (archived & non-archived)
-        let readCount = 10
+        let readCount = DebugFlags.fastPerfTests ? 2 : 10
 
         read { transaction in
             self.startMeasuring()
@@ -118,13 +102,12 @@ class ThreadFinderPerformanceTest: PerformanceBaseTest {
         return result
     }
 
-    private let threadMessageCount = 10
+    private let threadMessageCount = DebugFlags.fastPerfTests ? 2 : 10
 
     func insertThread(threadType: ThreadType) -> TSThread {
         // .empty
         let contactThread = ContactThreadFactory().create()
         XCTAssertFalse(contactThread.shouldThreadBeVisible)
-        XCTAssertFalse(contactThread.isArchived)
         if threadType == .empty {
             return contactThread
         }
@@ -135,13 +118,11 @@ class ThreadFinderPerformanceTest: PerformanceBaseTest {
         write { transaction in
             if let latestThread = TSThread.anyFetch(uniqueId: contactThread.uniqueId, transaction: transaction) {
                 XCTAssertFalse(latestThread.shouldThreadBeVisible)
-                XCTAssertFalse(latestThread.isArchived)
+                XCTAssertFalse(ThreadAssociatedData.fetchOrDefault(for: latestThread, transaction: transaction).isArchived)
             } else {
                 XCTFail("Missing thread.")
             }
 
-            // YDB perf suffers with large numbers of messages,
-            // so the larger the value here, the better.
             for _ in 0..<self.threadMessageCount {
                 let message = messageFactory.build(transaction: transaction)
                 message.anyInsert(transaction: transaction)
@@ -149,7 +130,7 @@ class ThreadFinderPerformanceTest: PerformanceBaseTest {
 
             if let latestThread = TSThread.anyFetch(uniqueId: contactThread.uniqueId, transaction: transaction) {
                 XCTAssertTrue(latestThread.shouldThreadBeVisible)
-                XCTAssertFalse(latestThread.isArchived)
+                XCTAssertFalse(ThreadAssociatedData.fetchOrDefault(for: latestThread, transaction: transaction).isArchived)
             } else {
                 XCTFail("Missing thread.")
             }
@@ -162,16 +143,23 @@ class ThreadFinderPerformanceTest: PerformanceBaseTest {
         write { transaction in
             if let latestThread = TSThread.anyFetch(uniqueId: contactThread.uniqueId, transaction: transaction) {
                 XCTAssertTrue(latestThread.shouldThreadBeVisible)
-                XCTAssertFalse(latestThread.isArchived)
+                XCTAssertFalse(ThreadAssociatedData.fetchOrDefault(for: latestThread, transaction: transaction).isArchived)
             } else {
                 XCTFail("Missing thread.")
             }
 
-            contactThread.archiveThread(with: transaction)
+            ThreadAssociatedData.fetchOrDefault(
+                for: contactThread,
+                transaction: transaction
+            ).updateWith(
+                isArchived: true,
+                updateStorageService: false,
+                transaction: transaction
+            )
 
             if let latestThread = TSThread.anyFetch(uniqueId: contactThread.uniqueId, transaction: transaction) {
                 XCTAssertTrue(latestThread.shouldThreadBeVisible)
-                XCTAssertTrue(latestThread.isArchived)
+                XCTAssertTrue(ThreadAssociatedData.fetchOrDefault(for: latestThread, transaction: transaction).isArchived)
             } else {
                 XCTFail("Missing thread.")
             }
@@ -184,7 +172,7 @@ class ThreadFinderPerformanceTest: PerformanceBaseTest {
         write { transaction in
             if let latestThread = TSThread.anyFetch(uniqueId: contactThread.uniqueId, transaction: transaction) {
                 XCTAssertTrue(latestThread.shouldThreadBeVisible)
-                XCTAssertTrue(latestThread.isArchived)
+                XCTAssertTrue(ThreadAssociatedData.fetchOrDefault(for: latestThread, transaction: transaction).isArchived)
             } else {
                 XCTFail("Missing thread.")
             }
@@ -194,7 +182,7 @@ class ThreadFinderPerformanceTest: PerformanceBaseTest {
 
             if let latestThread = TSThread.anyFetch(uniqueId: contactThread.uniqueId, transaction: transaction) {
                 XCTAssertTrue(latestThread.shouldThreadBeVisible)
-                XCTAssertFalse(latestThread.isArchived)
+                XCTAssertFalse(ThreadAssociatedData.fetchOrDefault(for: latestThread, transaction: transaction).isArchived)
             } else {
                 XCTFail("Missing thread.")
             }

@@ -1,14 +1,14 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSErrorMessage.h"
-#import "ContactsManagerProtocol.h"
-#import "OWSMessageManager.h"
-#import "SSKEnvironment.h"
-#import "TSContactThread.h"
 #import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalServiceKit/ContactsManagerProtocol.h>
+#import <SignalServiceKit/OWSMessageManager.h>
+#import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSContactThread.h>
+#import <SignalServiceKit/TSErrorMessage.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -96,67 +96,24 @@ NSUInteger TSErrorMessageSchemaVersion = 2;
     return self;
 }
 
-- (instancetype)initWithTimestamp:(uint64_t)timestamp
-                           thread:(TSThread *)thread
-                failedMessageType:(TSErrorMessageType)errorMessageType
-                          address:(nullable SignalServiceAddress *)address
+- (instancetype)initErrorMessageWithBuilder:(TSErrorMessageBuilder *)errorMessageBuilder
 {
-    self = [super initMessageWithBuilder:[TSMessageBuilder messageBuilderWithThread:thread
-                                                                          timestamp:timestamp
-                                                                        messageBody:nil]];
+    self = [super initMessageWithBuilder:errorMessageBuilder];
+
     if (!self) {
         return self;
     }
 
-    _errorType = errorMessageType;
-    _recipientAddress = address;
+    _errorType = errorMessageBuilder.errorType;
+    _recipientAddress = errorMessageBuilder.recipientAddress;
     _errorMessageSchemaVersion = TSErrorMessageSchemaVersion;
+    _wasIdentityVerified = errorMessageBuilder.wasIdentityVerified;
 
     if (self.isDynamicInteraction) {
         self.read = YES;
     }
 
     return self;
-}
-
-- (instancetype)initWithThread:(TSThread *)thread
-             failedMessageType:(TSErrorMessageType)errorMessageType
-                       address:(nullable SignalServiceAddress *)address
-{
-    self = [super initMessageWithBuilder:[TSMessageBuilder messageBuilderWithThread:thread messageBody:nil]];
-    if (!self) {
-        return self;
-    }
-
-    _errorType = errorMessageType;
-    _recipientAddress = address;
-    _errorMessageSchemaVersion = TSErrorMessageSchemaVersion;
-
-    if (self.isDynamicInteraction) {
-        self.read = YES;
-    }
-
-    return self;
-}
-
-- (instancetype)initWithThread:(TSThread *)thread failedMessageType:(TSErrorMessageType)errorMessageType
-{
-    return [self initWithThread:thread failedMessageType:errorMessageType address:nil];
-}
-
-- (instancetype)initWithEnvelope:(SSKProtoEnvelope *)envelope
-                 withTransaction:(SDSAnyWriteTransaction *)transaction
-               failedMessageType:(TSErrorMessageType)errorMessageType
-{
-    TSContactThread *contactThread = [TSContactThread getOrCreateThreadWithContactAddress:envelope.sourceAddress
-                                                                              transaction:transaction];
-
-    // Legit usage of senderTimestamp. We don't actually currently surface it in the UI, but it serves as
-    // a reference to the envelope which we failed to process.
-    return [self initWithTimestamp:envelope.timestamp
-                            thread:contactThread
-                 failedMessageType:errorMessageType
-                           address:nil];
 }
 
 // --- CODE GENERATION MARKER
@@ -173,6 +130,7 @@ NSUInteger TSErrorMessageSchemaVersion = 2;
                   uniqueThreadId:(NSString *)uniqueThreadId
                    attachmentIds:(NSArray<NSString *> *)attachmentIds
                             body:(nullable NSString *)body
+                      bodyRanges:(nullable MessageBodyRanges *)bodyRanges
                     contactShare:(nullable OWSContact *)contactShare
                  expireStartedAt:(uint64_t)expireStartedAt
                        expiresAt:(uint64_t)expiresAt
@@ -187,6 +145,7 @@ NSUInteger TSErrorMessageSchemaVersion = 2;
                        errorType:(TSErrorMessageType)errorType
                             read:(BOOL)read
                 recipientAddress:(nullable SignalServiceAddress *)recipientAddress
+             wasIdentityVerified:(BOOL)wasIdentityVerified
 {
     self = [super initWithGrdbId:grdbId
                         uniqueId:uniqueId
@@ -196,6 +155,7 @@ NSUInteger TSErrorMessageSchemaVersion = 2;
                     uniqueThreadId:uniqueThreadId
                      attachmentIds:attachmentIds
                               body:body
+                        bodyRanges:bodyRanges
                       contactShare:contactShare
                    expireStartedAt:expireStartedAt
                          expiresAt:expiresAt
@@ -215,6 +175,7 @@ NSUInteger TSErrorMessageSchemaVersion = 2;
     _errorType = errorType;
     _read = read;
     _recipientAddress = recipientAddress;
+    _wasIdentityVerified = wasIdentityVerified;
 
     return self;
 }
@@ -264,6 +225,9 @@ NSUInteger TSErrorMessageSchemaVersion = 2;
         case TSErrorMessageGroupCreationFailed:
             return NSLocalizedString(@"GROUP_CREATION_FAILED",
                 @"Message shown in conversation view that indicates there were issues with group creation.");
+        case TSErrorMessageSessionRefresh:
+            return NSLocalizedString(
+                @"ERROR_MESSAGE_SESSION_REFRESH", @"Text notifying the user that their secure session has been reset");
         default:
             OWSFailDebug(@"failure: unknown error type");
             break;
@@ -274,40 +238,52 @@ NSUInteger TSErrorMessageSchemaVersion = 2;
 + (instancetype)corruptedMessageWithEnvelope:(SSKProtoEnvelope *)envelope
                              withTransaction:(SDSAnyWriteTransaction *)transaction
 {
-    return [[self alloc] initWithEnvelope:envelope
-                          withTransaction:transaction
-                        failedMessageType:TSErrorMessageInvalidMessage];
+    return [[TSErrorMessageBuilder errorMessageBuilderWithErrorType:TSErrorMessageInvalidMessage
+                                                           envelope:envelope
+                                                        transaction:transaction] build];
 }
 
 + (instancetype)invalidVersionWithEnvelope:(SSKProtoEnvelope *)envelope
                            withTransaction:(SDSAnyWriteTransaction *)transaction
 {
-    return [[self alloc] initWithEnvelope:envelope
-                          withTransaction:transaction
-                        failedMessageType:TSErrorMessageInvalidVersion];
+    return [[TSErrorMessageBuilder errorMessageBuilderWithErrorType:TSErrorMessageInvalidVersion
+                                                           envelope:envelope
+                                                        transaction:transaction] build];
 }
 
 + (instancetype)invalidKeyExceptionWithEnvelope:(SSKProtoEnvelope *)envelope
                                 withTransaction:(SDSAnyWriteTransaction *)transaction
 {
-    return [[self alloc] initWithEnvelope:envelope
-                          withTransaction:transaction
-                        failedMessageType:TSErrorMessageInvalidKeyException];
+    return [[TSErrorMessageBuilder errorMessageBuilderWithErrorType:TSErrorMessageInvalidKeyException
+                                                           envelope:envelope
+                                                        transaction:transaction] build];
 }
 
 + (instancetype)missingSessionWithEnvelope:(SSKProtoEnvelope *)envelope
                            withTransaction:(SDSAnyWriteTransaction *)transaction
 {
-    return [[self alloc] initWithEnvelope:envelope
-                          withTransaction:transaction
-                        failedMessageType:TSErrorMessageNoSession];
+    return [[TSErrorMessageBuilder errorMessageBuilderWithErrorType:TSErrorMessageNoSession
+                                                           envelope:envelope
+                                                        transaction:transaction] build];
 }
 
-+ (instancetype)nonblockingIdentityChangeInThread:(TSThread *)thread address:(SignalServiceAddress *)address
++ (instancetype)sessionRefreshWithEnvelope:(SSKProtoEnvelope *)envelope
+                           withTransaction:(SDSAnyWriteTransaction *)transaction
 {
-    return [[self alloc] initWithThread:thread
-                      failedMessageType:TSErrorMessageNonBlockingIdentityChange
-                                address:address];
+    return [[TSErrorMessageBuilder errorMessageBuilderWithErrorType:TSErrorMessageSessionRefresh
+                                                           envelope:envelope
+                                                        transaction:transaction] build];
+}
+
++ (instancetype)nonblockingIdentityChangeInThread:(TSThread *)thread
+                                          address:(SignalServiceAddress *)address
+                              wasIdentityVerified:(BOOL)wasIdentityVerified
+{
+    TSErrorMessageBuilder *builder =
+        [TSErrorMessageBuilder errorMessageBuilderWithThread:thread errorType:TSErrorMessageNonBlockingIdentityChange];
+    builder.recipientAddress = address;
+    builder.wasIdentityVerified = wasIdentityVerified;
+    return [builder build];
 }
 
 #pragma mark - OWSReadTracking
@@ -324,7 +300,7 @@ NSUInteger TSErrorMessageSchemaVersion = 2;
 
 - (void)markAsReadAtTimestamp:(uint64_t)readTimestamp
                        thread:(TSThread *)thread
-                 circumstance:(OWSReadCircumstance)circumstance
+                 circumstance:(OWSReceiptCircumstance)circumstance
                   transaction:(SDSAnyWriteTransaction *)transaction
 {
     OWSAssertDebug(transaction);
@@ -341,14 +317,6 @@ NSUInteger TSErrorMessageSchemaVersion = 2;
                                          }];
 
     // Ignore `circumstance` - we never send read receipts for error messages.
-}
-
-- (BOOL)isSpecialMessage
-{
-    if (self.errorType == TSErrorMessageNonBlockingIdentityChange) {
-        return YES;
-    }
-    return [super isSpecialMessage];
 }
 
 @end

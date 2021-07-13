@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -157,6 +157,42 @@ extension OWSBackupFragment: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension OWSBackupFragment: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == OWSBackupFragment.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let attachmentId: String? = modelToCopy.attachmentId
+            let downloadFilePath: String? = modelToCopy.downloadFilePath
+            let encryptionKey: Data = modelToCopy.encryptionKey
+            let recordName: String = modelToCopy.recordName
+            let relativeFilePath: String? = modelToCopy.relativeFilePath
+            let uncompressedDataLength: NSNumber? = modelToCopy.uncompressedDataLength
+
+            return OWSBackupFragment(grdbId: id,
+                                     uniqueId: uniqueId,
+                                     attachmentId: attachmentId,
+                                     downloadFilePath: downloadFilePath,
+                                     encryptionKey: encryptionKey,
+                                     recordName: recordName,
+                                     relativeFilePath: relativeFilePath,
+                                     uncompressedDataLength: uncompressedDataLength)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension OWSBackupFragmentSerializer {
@@ -297,9 +333,11 @@ public extension OWSBackupFragment {
 
 @objc
 public class OWSBackupFragmentCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<BackupFragmentRecord>?
 
-    init(cursor: RecordCursor<BackupFragmentRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<BackupFragmentRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -341,10 +379,10 @@ public extension OWSBackupFragment {
         let database = transaction.database
         do {
             let cursor = try BackupFragmentRecord.fetchCursor(database)
-            return OWSBackupFragmentCursor(cursor: cursor)
+            return OWSBackupFragmentCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return OWSBackupFragmentCursor(cursor: nil)
+            return OWSBackupFragmentCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -354,8 +392,6 @@ public extension OWSBackupFragment {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return OWSBackupFragment.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(BackupFragmentRecord.databaseTableName) WHERE \(backupFragmentColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -386,28 +422,20 @@ public extension OWSBackupFragment {
                             batchSize: UInt,
                             block: @escaping (OWSBackupFragment, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            OWSBackupFragment.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? OWSBackupFragment else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = OWSBackupFragment.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = OWSBackupFragment.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -435,10 +463,6 @@ public extension OWSBackupFragment {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: OWSBackupFragment.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -470,8 +494,6 @@ public extension OWSBackupFragment {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: OWSBackupFragment.collection())
         case .grdbRead(let grdbTransaction):
             return BackupFragmentRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -481,8 +503,6 @@ public extension OWSBackupFragment {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: OWSBackupFragment.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try BackupFragmentRecord.deleteAll(grdbTransaction.database)
@@ -531,8 +551,6 @@ public extension OWSBackupFragment {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: OWSBackupFragment.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(BackupFragmentRecord.databaseTableName) WHERE \(backupFragmentColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -550,11 +568,11 @@ public extension OWSBackupFragment {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try BackupFragmentRecord.fetchCursor(transaction.database, sqlRequest)
-            return OWSBackupFragmentCursor(cursor: cursor)
+            return OWSBackupFragmentCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return OWSBackupFragmentCursor(cursor: nil)
+            return OWSBackupFragmentCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -607,3 +625,20 @@ class OWSBackupFragmentSerializer: SDSSerializer {
         return BackupFragmentRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, attachmentId: attachmentId, downloadFilePath: downloadFilePath, encryptionKey: encryptionKey, recordName: recordName, relativeFilePath: relativeFilePath, uncompressedDataLength: uncompressedDataLength)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension OWSBackupFragment {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> OWSBackupFragment {
+        guard let record = try asRecord() as? BackupFragmentRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try OWSBackupFragment.fromRecord(record)
+    }
+}
+#endif

@@ -1,9 +1,8 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "ConversationInputToolbar.h"
-#import "ConversationInputTextView.h"
 #import "Environment.h"
 #import "OWSContactsManager.h"
 #import "OWSMath.h"
@@ -11,24 +10,23 @@
 #import "UIFont+OWS.h"
 #import "ViewControllerUtils.h"
 #import <PromiseKit/AnyPromise.h>
-#import <SignalMessaging/OWSFormat.h>
 #import <SignalMessaging/SignalMessaging-Swift.h>
 #import <SignalMessaging/UIView+OWS.h>
 #import <SignalServiceKit/NSTimer+OWS.h>
+#import <SignalServiceKit/OWSFormat.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/TSQuotedMessage.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
-typedef NS_CLOSED_ENUM(NSUInteger, VoiceMemoRecordingState){
+typedef NS_CLOSED_ENUM(NSUInteger, VoiceMemoRecordingState) {
     VoiceMemoRecordingState_Idle,
     VoiceMemoRecordingState_RecordingHeld,
-    VoiceMemoRecordingState_RecordingLocked
+    VoiceMemoRecordingState_RecordingLocked,
+    VoiceMemoRecordingState_Draft
 };
 
 typedef NS_CLOSED_ENUM(NSUInteger, KeyboardType) { KeyboardType_System, KeyboardType_Sticker, KeyboardType_Attachment };
-
-static void *kConversationInputTextViewObservingContext = &kConversationInputTextViewObservingContext;
 
 const CGFloat kMinTextViewHeight = 36;
 const CGFloat kMinToolbarItemHeight = 44;
@@ -39,7 +37,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
 @interface InputLinkPreview : NSObject
 
-@property (nonatomic) NSString *previewUrl;
+@property (nonatomic) NSURL *previewUrl;
 @property (nonatomic, nullable) OWSLinkPreviewDraft *linkPreviewDraft;
 
 @end
@@ -52,6 +50,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
 #pragma mark -
 
+
 @interface ConversationInputToolbar () <ConversationTextViewToolbarDelegate,
     QuotedReplyPreviewDelegate,
     LinkPreviewViewDraftDelegate,
@@ -59,6 +58,8 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     AttachmentKeyboardDelegate>
 
 @property (nonatomic, readonly) ConversationStyle *conversationStyle;
+
+@property (nonatomic, weak) id<ConversationInputToolbarDelegate> inputToolbarDelegate;
 
 @property (nonatomic, readonly) ConversationInputTextView *inputTextView;
 @property (nonatomic, readonly) UIButton *cameraButton;
@@ -70,6 +71,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 @property (nonatomic, readonly) UIView *linkPreviewWrapper;
 @property (nonatomic, readonly) StickerHorizontalListView *suggestedStickerView;
 @property (nonatomic) NSArray<StickerInfo *> *suggestedStickerInfos;
+@property (nonatomic, readonly) StickerViewCache *suggestedStickerViewCache;
 @property (nonatomic, readonly) UIStackView *outerStack;
 @property (nonatomic, readonly) UIStackView *mediaAndSendStack;
 
@@ -78,31 +80,37 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
 #pragma mark - Voice Memo Recording UI
 
-@property (nonatomic, nullable) UIView *voiceMemoUI;
 @property (nonatomic, nullable) VoiceMemoLockView *voiceMemoLockView;
-@property (nonatomic, nullable) UIView *voiceMemoContentView;
+@property (nonatomic, readonly) UIView *voiceMemoContentViewLeftSpacer;
+@property (nonatomic, readonly) UIView *voiceMemoContentViewRightSpacer;
+@property (nonatomic, readonly) UIView *voiceMemoContentView;
 @property (nonatomic) NSDate *voiceMemoStartTime;
 @property (nonatomic, nullable) NSTimer *voiceMemoUpdateTimer;
 @property (nonatomic) UIGestureRecognizer *voiceMemoGestureRecognizer;
 @property (nonatomic, nullable) UILabel *voiceMemoCancelLabel;
 @property (nonatomic, nullable) UIView *voiceMemoRedRecordingCircle;
 @property (nonatomic, nullable) UILabel *recordingLabel;
-@property (nonatomic, readonly) BOOL isRecordingVoiceMemo;
+@property (nonatomic) BOOL isShowingVoiceMemoUI;
 @property (nonatomic) VoiceMemoRecordingState voiceMemoRecordingState;
 @property (nonatomic) CGPoint voiceMemoGestureStartLocation;
+@property (nonatomic, nullable, weak) UIView *voiceMemoTooltip;
+@property (nonatomic, nullable) VoiceMessageModel *voiceMemoDraft;
 @property (nonatomic, nullable) NSArray<NSLayoutConstraint *> *layoutContraints;
 @property (nonatomic) UIEdgeInsets receivedSafeAreaInsets;
 @property (nonatomic, nullable) InputLinkPreview *inputLinkPreview;
 @property (nonatomic) BOOL wasLinkPreviewCancelled;
 @property (nonatomic, nullable, weak) LinkPreviewView *linkPreviewView;
-@property (nonatomic, nullable, weak) UIView *stickerTooltip;
+@property (nonatomic) BOOL isConfigurationComplete;
 
 #pragma mark - Keyboards
 
 @property (nonatomic) KeyboardType desiredKeyboardType;
 @property (nonatomic, readonly) StickerKeyboard *stickerKeyboard;
 @property (nonatomic, readonly) AttachmentKeyboard *attachmentKeyboard;
-@property (nonatomic) BOOL isMeasuringKeyboardHeight;
+@property (nonatomic) BOOL hasMeasuredKeyboardHeight;
+
+#pragma mark - Quoted replies
+@property (nonatomic, assign, readwrite) BOOL isAnimatingQuotedReply;
 
 @end
 
@@ -110,15 +118,27 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
 @implementation ConversationInputToolbar
 
+@synthesize stickerKeyboard = _stickerKeyboard;
+@synthesize attachmentKeyboard = _attachmentKeyboard;
+
 - (instancetype)initWithConversationStyle:(ConversationStyle *)conversationStyle
+                             messageDraft:(nullable MessageBody *)messageDraft
+                     inputToolbarDelegate:(id<ConversationInputToolbarDelegate>)inputToolbarDelegate
+                    inputTextViewDelegate:(id<ConversationInputTextViewDelegate>)inputTextViewDelegate
+                          mentionDelegate:(id<MentionTextViewDelegate>)mentionDelegate
 {
     self = [super initWithFrame:CGRectZero];
 
     _conversationStyle = conversationStyle;
     _receivedSafeAreaInsets = UIEdgeInsetsZero;
+    _suggestedStickerViewCache = [[StickerViewCache alloc] initWithMaxSize:12];
+
+    self.inputToolbarDelegate = inputToolbarDelegate;
 
     if (self) {
-        [self createContents];
+        [self createContentsWithMessageDraft:messageDraft
+                       inputTextViewDelegate:inputTextViewDelegate
+                             mentionDelegate:mentionDelegate];
     }
 
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -133,18 +153,6 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     return self;
 }
 
-#pragma mark - Dependencies
-
-- (OWSLinkPreviewManager *)linkPreviewManager
-{
-    return SSKEnvironment.shared.linkPreviewManager;
-}
-
-- (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
-
 #pragma mark -
 
 - (CGSize)intrinsicContentSize
@@ -154,7 +162,9 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     return CGSizeZero;
 }
 
-- (void)createContents
+- (void)createContentsWithMessageDraft:(nullable MessageBody *)messageDraft
+                 inputTextViewDelegate:(id<ConversationInputTextViewDelegate>)inputTextViewDelegate
+                       mentionDelegate:(id<MentionTextViewDelegate>)mentionDelegate
 {
     // The input toolbar should *always* be layed out left-to-right, even when using
     // a right-to-left language. The convention for messaging apps is for the send
@@ -169,7 +179,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     // gap between the keyboard and the bottom of the input bar during
     // the animation. Extend the background below the toolbar's bounds
     // by this much to mask that extra space.
-    CGFloat backgroundExtension = 100;
+    CGFloat backgroundExtension = 500;
 
     if (UIAccessibilityIsReduceTransparencyEnabled()) {
         self.backgroundColor = Theme.toolbarBackgroundColor;
@@ -201,6 +211,12 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     [self.inputTextView setContentHuggingLow];
     [self.inputTextView setCompressionResistanceLow];
     SET_SUBVIEW_ACCESSIBILITY_IDENTIFIER(self, _inputTextView);
+
+    // NOTE: Don't set inputTextViewDelegate until configuration is complete.
+    self.inputTextView.mentionDelegate = mentionDelegate;
+
+    // NOTE: Don't set inputTextViewDelegate until configuration is complete.
+    self.inputTextView.inputTextViewDelegate = inputTextViewDelegate;
 
     _textViewHeightConstraint = [self.inputTextView autoSetDimension:ALDimensionHeight toSize:kMinTextViewHeight];
 
@@ -240,6 +256,8 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     _voiceMemoButton = [UIButton buttonWithType:UIButtonTypeCustom];
     self.voiceMemoButton.accessibilityLabel = NSLocalizedString(@"INPUT_TOOLBAR_VOICE_MEMO_BUTTON_ACCESSIBILITY_LABEL",
         @"accessibility label for the button which records voice memos");
+    self.voiceMemoButton.accessibilityHint = NSLocalizedString(@"INPUT_TOOLBAR_VOICE_MEMO_BUTTON_ACCESSIBILITY_HINT",
+        @"accessibility hint for the button which records voice memos");
     UIImage *micIcon = [Theme iconImage:ThemeIconMicButton];
     [self.voiceMemoButton setTemplateImage:micIcon tintColor:Theme.primaryIconColor];
     [self.voiceMemoButton autoSetDimensionsToSize:CGSizeMake(40, kMinToolbarItemHeight)];
@@ -266,6 +284,10 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
     self.userInteractionEnabled = YES;
 
+    if (SSKDebugFlags.internalLogging) {
+        OWSLogInfo(@"");
+    }
+
     _quotedReplyWrapper = [UIView containerView];
     self.quotedReplyWrapper.hidden = YES;
     [self.quotedReplyWrapper setContentHuggingHorizontalLow];
@@ -280,6 +302,23 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     self.linkPreviewWrapper.backgroundColor = Theme.conversationInputBackgroundColor;
     SET_SUBVIEW_ACCESSIBILITY_IDENTIFIER(self, _linkPreviewWrapper);
 
+    _voiceMemoContentView = [UIView containerView];
+    self.voiceMemoContentView.hidden = YES;
+    [self.voiceMemoContentView setContentHuggingHorizontalLow];
+    [self.voiceMemoContentView setCompressionResistanceHorizontalLow];
+    [self.voiceMemoContentView autoSetDimension:ALDimensionHeight toSize:kMinTextViewHeight];
+    self.voiceMemoContentView.backgroundColor = Theme.conversationInputBackgroundColor;
+    SET_SUBVIEW_ACCESSIBILITY_IDENTIFIER(self, _voiceMemoContentView);
+
+    _voiceMemoContentViewLeftSpacer = [UIView containerView];
+    self.voiceMemoContentViewLeftSpacer.hidden = YES;
+    [self.voiceMemoContentViewLeftSpacer autoSetDimension:ALDimensionHeight toSize:kMinToolbarItemHeight];
+    [self.voiceMemoContentViewLeftSpacer autoSetDimension:ALDimensionWidth toSize:16];
+    _voiceMemoContentViewRightSpacer = [UIView containerView];
+    self.voiceMemoContentViewRightSpacer.hidden = YES;
+    [self.voiceMemoContentViewRightSpacer autoSetDimension:ALDimensionHeight toSize:kMinToolbarItemHeight];
+    [self.voiceMemoContentViewRightSpacer autoSetDimension:ALDimensionWidth toSize:16];
+
     // V Stack
     UIStackView *vStack = [[UIStackView alloc]
         initWithArrangedSubviews:@[ self.quotedReplyWrapper, self.linkPreviewWrapper, self.inputTextView ]];
@@ -287,6 +326,10 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     vStack.alignment = UIStackViewAlignmentFill;
     [vStack setContentHuggingHorizontalLow];
     [vStack setCompressionResistanceHorizontalLow];
+
+    [vStack addSubview:self.voiceMemoContentView];
+    [self.voiceMemoContentView autoPinWidthToWidthOf:self.inputTextView];
+    [self.voiceMemoContentView autoAlignAxis:ALAxisHorizontal toSameAxisOfView:self.inputTextView];
 
     for (UIView *button in
         @[ self.cameraButton, self.attachmentButton, self.stickerButton, self.voiceMemoButton, self.sendButton ]) {
@@ -314,6 +357,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
     // Media Stack
     UIStackView *mediaAndSendStack = [[UIStackView alloc] initWithArrangedSubviews:@[
+        self.voiceMemoContentViewRightSpacer,
         self.sendButton,
         self.cameraButton,
         self.voiceMemoButton,
@@ -327,6 +371,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
     // H Stack
     UIStackView *hStack = [[UIStackView alloc] initWithArrangedSubviews:@[
+        self.voiceMemoContentViewLeftSpacer,
         self.attachmentButton,
         vStackRoundingOffsetView,
         mediaAndSendStack,
@@ -347,7 +392,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     const UIEdgeInsets stickerListContentInset
         = UIEdgeInsetsMake(suggestedStickerSpacing, 24, suggestedStickerSpacing, 24);
     self.suggestedStickerView.contentInset = stickerListContentInset;
-    self.suggestedStickerView.hidden = YES;
+    self.suggestedStickerView.isHiddenInStackView = YES;
     [self.suggestedStickerView
         autoSetDimension:ALDimensionHeight
                   toSize:suggestedStickerSize + stickerListContentInset.bottom + stickerListContentInset.top];
@@ -380,19 +425,51 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     [self.stickerButton autoAlignAxis:ALAxisHorizontal toSameAxisOfView:self.inputTextView];
     [self.stickerButton autoPinEdge:ALEdgeTrailing toEdge:ALEdgeTrailing ofView:vStackRoundingView withOffset:-4];
 
-    // Sticker Keyboard Responder
+    [self setMessageBody:messageDraft animated:NO doLayout:NO];
 
-    StickerKeyboard *stickerKeyboard = [StickerKeyboard new];
-    _stickerKeyboard = stickerKeyboard;
-    stickerKeyboard.delegate = self;
-    [stickerKeyboard registerWithView:self];
+    self.isConfigurationComplete = YES;
+}
 
-    AttachmentKeyboard *attachmentKeyboard = [AttachmentKeyboard new];
-    _attachmentKeyboard = attachmentKeyboard;
-    attachmentKeyboard.delegate = self;
-    [attachmentKeyboard registerWithView:self];
+// This getter can be used to access stickerKeyboard without triggering lazy creation.
+- (nullable StickerKeyboard *)stickerKeyboardIfSet
+{
+    return _stickerKeyboard;
+}
 
-    [self ensureButtonVisibilityWithIsAnimated:NO doLayout:NO];
+- (StickerKeyboard *)stickerKeyboard
+{
+    // Lazy-create. This keyboard is expensive to build and can
+    // delay CVC presentation.
+    if (_stickerKeyboard == nil) {
+        StickerKeyboard *stickerKeyboard = [StickerKeyboard new];
+        _stickerKeyboard = stickerKeyboard;
+        stickerKeyboard.delegate = self;
+        [stickerKeyboard registerWithView:self];
+        return stickerKeyboard;
+    } else {
+        return _stickerKeyboard;
+    }
+}
+
+// This getter can be used to access attachmentKeyboard without triggering lazy creation.
+- (nullable AttachmentKeyboard *)attachmentKeyboardIfSet
+{
+    return _attachmentKeyboard;
+}
+
+- (AttachmentKeyboard *)attachmentKeyboard
+{
+    // Lazy-create. This keyboard is expensive to build and can
+    // delay CVC presentation.
+    if (_attachmentKeyboard == nil) {
+        AttachmentKeyboard *attachmentKeyboard = [AttachmentKeyboard new];
+        _attachmentKeyboard = attachmentKeyboard;
+        attachmentKeyboard.delegate = self;
+        [attachmentKeyboard registerWithView:self];
+        return attachmentKeyboard;
+    } else {
+        return _attachmentKeyboard;
+    }
 }
 
 - (void)updateFontSizes
@@ -400,26 +477,23 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     self.inputTextView.font = [UIFont ows_dynamicTypeBodyFont];
 }
 
-- (void)setInputTextViewDelegate:(id<ConversationInputTextViewDelegate>)value
+- (nullable MessageBody *)messageBody
 {
     OWSAssertDebug(self.inputTextView);
-    OWSAssertDebug(value);
 
-    self.inputTextView.inputTextViewDelegate = value;
+    return self.inputTextView.messageBody;
 }
 
-- (NSString *)messageText
+- (void)setMessageBody:(nullable MessageBody *)value animated:(BOOL)isAnimated
 {
-    OWSAssertDebug(self.inputTextView);
-
-    return self.inputTextView.trimmedText;
+    [self setMessageBody:value animated:isAnimated doLayout:YES];
 }
 
-- (void)setMessageText:(NSString *_Nullable)value animated:(BOOL)isAnimated
+- (void)setMessageBody:(nullable MessageBody *)value animated:(BOOL)isAnimated doLayout:(BOOL)doLayout
 {
     OWSAssertDebug(self.inputTextView);
 
-    self.inputTextView.text = value;
+    self.inputTextView.messageBody = value;
 
     // It's important that we set the textViewHeight before
     // doing any animation in `ensureButtonVisibilityWithIsAnimated`
@@ -440,11 +514,11 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     [self ensureTextViewHeight];
     [self updateInputLinkPreview];
 
-    if (value.length > 0) {
+    if (value.text.length > 0) {
         [self clearDesiredKeyboard];
     }
 
-    [self ensureButtonVisibilityWithIsAnimated:isAnimated doLayout:YES];
+    [self ensureButtonVisibilityWithIsAnimated:isAnimated doLayout:doLayout];
 }
 
 - (void)ensureTextViewHeight
@@ -459,7 +533,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
 - (void)clearTextMessageAnimated:(BOOL)isAnimated
 {
-    [self setMessageText:nil animated:isAnimated];
+    [self setMessageBody:nil animated:isAnimated];
     [self.inputTextView.undoManager removeAllActions];
     self.wasLinkPreviewCancelled = NO;
 }
@@ -484,20 +558,40 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     [self.inputTextView reloadInputViews];
 }
 
++ (NSTimeInterval)quotedReplyAnimationDuration
+{
+    return 0.2;
+}
+
 - (void)setQuotedReply:(nullable OWSQuotedReplyModel *)quotedReply
 {
     if (quotedReply == _quotedReply) {
         return;
     }
 
-    [self clearQuotedMessagePreview];
-
+    void (^cleanupSubviewsBlock)(void) = ^{
+        for (UIView *subview in self.quotedReplyWrapper.subviews) {
+            [subview removeFromSuperview];
+        }
+    };
     _quotedReply = quotedReply;
 
+    [self.layer removeAllAnimations];
+
     if (!quotedReply) {
+        self.isAnimatingQuotedReply = YES;
+        [UIView animateWithDuration:[[self class] quotedReplyAnimationDuration]
+            animations:^{ self.quotedReplyWrapper.hidden = YES; }
+            completion:^(BOOL finished) {
+                self.isAnimatingQuotedReply = NO;
+                cleanupSubviewsBlock();
+                [self layoutIfNeeded];
+            }];
         [self ensureButtonVisibilityWithIsAnimated:NO doLayout:YES];
         return;
     }
+
+    cleanupSubviewsBlock();
 
     QuotedReplyPreview *quotedMessagePreview =
         [[QuotedReplyPreview alloc] initWithQuotedReply:quotedReply conversationStyle:self.conversationStyle];
@@ -505,13 +599,20 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     [quotedMessagePreview setContentHuggingHorizontalLow];
     [quotedMessagePreview setCompressionResistanceHorizontalLow];
 
-    self.quotedReplyWrapper.hidden = NO;
     self.quotedReplyWrapper.layoutMargins = UIEdgeInsetsZero;
     [self.quotedReplyWrapper addSubview:quotedMessagePreview];
     [quotedMessagePreview autoPinEdgesToSuperviewMargins];
     SET_SUBVIEW_ACCESSIBILITY_IDENTIFIER(self, quotedMessagePreview);
 
-    self.linkPreviewView.hasAsymmetricalRounding = !self.quotedReply;
+    // hasAsymmetricalRounding may have changed.
+    [self clearLinkPreviewView];
+    [self updateInputLinkPreview];
+    if (self.quotedReplyWrapper.isHidden) {
+        self.isAnimatingQuotedReply = YES;
+        [UIView animateWithDuration:[[self class] quotedReplyAnimationDuration]
+            animations:^{ self.quotedReplyWrapper.hidden = NO; }
+            completion:^(BOOL finished) { self.isAnimatingQuotedReply = NO; }];
+    }
 
     [self clearDesiredKeyboard];
 }
@@ -521,14 +622,6 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     return 5.f;
 }
 
-- (void)clearQuotedMessagePreview
-{
-    self.quotedReplyWrapper.hidden = YES;
-    for (UIView *subview in self.quotedReplyWrapper.subviews) {
-        [subview removeFromSuperview];
-    }
-}
-
 - (void)beginEditingMessage
 {
     if (!self.desiredFirstResponder.isFirstResponder) {
@@ -536,77 +629,20 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     }
 }
 
-- (void)showStickerTooltipIfNecessary
-{
-    if (!StickerManager.shared.shouldShowStickerTooltip) {
-        return;
-    }
-
-    dispatch_block_t markTooltipAsShown = ^{
-        [self.databaseStorage asyncWriteWithBlock:^(SDSAnyWriteTransaction *transaction) {
-            [StickerManager.shared stickerTooltipWasShownWithTransaction:transaction];
-        }];
-    };
-
-    __block StickerPack *_Nullable stickerPack;
-    [self.databaseStorage readWithBlock:^(SDSAnyReadTransaction *transaction) {
-        stickerPack = [StickerManager installedStickerPacksWithTransaction:transaction].firstObject;
-    }];
-    if (stickerPack == nil) {
-        return;
-    }
-    if (self.stickerTooltip != nil) {
-        markTooltipAsShown();
-        return;
-    }
-    if (self.desiredKeyboardType == KeyboardType_Sticker) {
-        // The intent of this tooltip is to prod users to activate the
-        // sticker keyboard.  If it's already active, we can skip the
-        // tooltip.
-        markTooltipAsShown();
-        return;
-    }
-
-    __weak ConversationInputToolbar *weakSelf = self;
-    UIView *tooltip = [StickerTooltip presentFromView:self
-                                   widthReferenceView:self
-                                    tailReferenceView:self.stickerButton
-                                          stickerPack:stickerPack
-                                       wasTappedBlock:^{
-                                           [weakSelf removeStickerTooltip];
-                                           [weakSelf toggleKeyboardType:KeyboardType_Sticker animated:YES];
-                                       }];
-    self.stickerTooltip = tooltip;
-
-    const CGFloat tooltipDurationSeconds = 5.f;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(tooltipDurationSeconds * NSEC_PER_SEC)),
-                   dispatch_get_main_queue(), ^{
-                       [weakSelf removeStickerTooltip];
-                   });
-
-    markTooltipAsShown();
-}
-
-- (void)removeStickerTooltip
-{
-    [self.stickerTooltip removeFromSuperview];
-    self.stickerTooltip = nil;
-}
-
 - (void)endEditingMessage
 {
     [self.inputTextView resignFirstResponder];
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-result"
-    [self.stickerKeyboard resignFirstResponder];
-    [self.attachmentKeyboard resignFirstResponder];
+    [self.stickerKeyboardIfSet resignFirstResponder];
+    [self.attachmentKeyboardIfSet resignFirstResponder];
 #pragma clang diagnostic pop
 }
 
 - (BOOL)isInputViewFirstResponder
 {
-    return (self.inputTextView.isFirstResponder || self.stickerKeyboard.isFirstResponder
-        || self.attachmentKeyboard.isFirstResponder);
+    return (self.inputTextView.isFirstResponder || self.stickerKeyboardIfSet.isFirstResponder
+        || self.attachmentKeyboardIfSet.isFirstResponder);
 }
 
 - (void)ensureButtonVisibilityWithIsAnimated:(BOOL)isAnimated doLayout:(BOOL)doLayout
@@ -622,15 +658,39 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     // NOTE: We use untrimmedText, so that the sticker button disappears
     //       even if the user just enters whitespace.
     BOOL hasTextInput = self.inputTextView.untrimmedText.length > 0;
+    BOOL isShowingVoiceMemoUI = self.isShowingVoiceMemoUI;
+
+    // We used trimmed text for determining all the other button visibility.
+    BOOL hasNonWhitespaceTextInput = self.inputTextView.trimmedText.length > 0;
     ensureViewHiddenState(self.attachmentButton, NO);
-    if (hasTextInput) {
+    if (isShowingVoiceMemoUI) {
+        BOOL hideSendButton = self.voiceMemoRecordingState == VoiceMemoRecordingState_RecordingHeld;
+        ensureViewHiddenState(self.linkPreviewWrapper, YES);
+        ensureViewHiddenState(self.voiceMemoContentView, NO);
+        ensureViewHiddenState(self.voiceMemoContentViewLeftSpacer, NO);
+        ensureViewHiddenState(self.voiceMemoContentViewRightSpacer, !hideSendButton);
+        ensureViewHiddenState(self.cameraButton, YES);
+        ensureViewHiddenState(self.voiceMemoButton, YES);
+        ensureViewHiddenState(self.sendButton, hideSendButton);
+        ensureViewHiddenState(self.attachmentButton, YES);
+    } else if (hasNonWhitespaceTextInput) {
+        ensureViewHiddenState(self.linkPreviewWrapper, NO);
+        ensureViewHiddenState(self.voiceMemoContentView, YES);
+        ensureViewHiddenState(self.voiceMemoContentViewLeftSpacer, YES);
+        ensureViewHiddenState(self.voiceMemoContentViewRightSpacer, YES);
         ensureViewHiddenState(self.cameraButton, YES);
         ensureViewHiddenState(self.voiceMemoButton, YES);
         ensureViewHiddenState(self.sendButton, NO);
+        ensureViewHiddenState(self.attachmentButton, NO);
     } else {
+        ensureViewHiddenState(self.linkPreviewWrapper, NO);
+        ensureViewHiddenState(self.voiceMemoContentView, YES);
+        ensureViewHiddenState(self.voiceMemoContentViewLeftSpacer, YES);
+        ensureViewHiddenState(self.voiceMemoContentViewRightSpacer, YES);
         ensureViewHiddenState(self.cameraButton, NO);
         ensureViewHiddenState(self.voiceMemoButton, NO);
         ensureViewHiddenState(self.sendButton, YES);
+        ensureViewHiddenState(self.attachmentButton, NO);
     }
 
     // If the layout has changed, update the layout
@@ -643,7 +703,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     }
 
     void (^updateBlock)(void) = ^{
-        BOOL hideStickerButton = hasTextInput || self.quotedReply != nil;
+        BOOL hideStickerButton = hasTextInput || isShowingVoiceMemoUI || self.quotedReply != nil;
         ensureViewHiddenState(self.stickerButton, hideStickerButton);
         if (!hideStickerButton) {
             self.stickerButton.imageView.tintColor
@@ -655,10 +715,6 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
         [self updateSuggestedStickers];
 
-        if (self.stickerButton.hidden || self.stickerKeyboard.isFirstResponder) {
-            [self removeStickerTooltip];
-        }
-
         if (doLayout) {
             [self layoutIfNeeded];
         }
@@ -669,8 +725,6 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     } else {
         updateBlock();
     }
-
-    [self showStickerTooltipIfNecessary];
 }
 
 // iOS doesn't always update the safeAreaInsets correctly & in a timely
@@ -695,9 +749,9 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     BOOL didChange = !UIEdgeInsetsEqualToEdgeInsets(self.receivedSafeAreaInsets, safeAreaInsets);
     BOOL hasLayout = self.layoutContraints != nil;
 
-    self.receivedSafeAreaInsets = safeAreaInsets;
-
     if (didChange || !hasLayout) {
+        self.receivedSafeAreaInsets = safeAreaInsets;
+
         [self updateContentLayout];
     }
 }
@@ -708,10 +762,10 @@ const CGFloat kMaxIPadTextViewHeight = 142;
         case UIGestureRecognizerStatePossible:
         case UIGestureRecognizerStateCancelled:
         case UIGestureRecognizerStateFailed:
-            if (self.isRecordingVoiceMemo) {
-                // Cancel voice message if necessary.
+            if (self.voiceMemoRecordingState != VoiceMemoRecordingState_Idle) {
+                // Record a draft if we were actively recording.
                 self.voiceMemoRecordingState = VoiceMemoRecordingState_Idle;
-                [self.inputToolbarDelegate voiceMemoGestureDidCancel];
+                [self.inputToolbarDelegate voiceMemoGestureWasInterrupted];
             }
             break;
         case UIGestureRecognizerStateBegan:
@@ -723,6 +777,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
                     [self.inputToolbarDelegate voiceMemoGestureDidCancel];
                     break;
                 case VoiceMemoRecordingState_RecordingLocked:
+                case VoiceMemoRecordingState_Draft:
                     OWSFailDebug(@"once locked, shouldn't be possible to interact with gesture.");
                     [self.inputToolbarDelegate voiceMemoGestureDidCancel];
                     break;
@@ -733,7 +788,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
             [self.inputToolbarDelegate voiceMemoGestureDidStart];
             break;
         case UIGestureRecognizerStateChanged:
-            if (self.isRecordingVoiceMemo) {
+            if (self.isShowingVoiceMemoUI) {
                 // Check for "slide to cancel" gesture.
                 CGPoint location = [sender locationInView:self];
                 // For LTR/RTL, swiping in either direction will cancel.
@@ -755,9 +810,10 @@ const CGFloat kMaxIPadTextViewHeight = 142;
                         case VoiceMemoRecordingState_RecordingHeld:
                             self.voiceMemoRecordingState = VoiceMemoRecordingState_RecordingLocked;
                             [self.inputToolbarDelegate voiceMemoGestureDidLock];
-                            [self.inputToolbarDelegate voiceMemoGestureDidUpdateCancelWithRatioComplete:0];
+                            [self setVoiceMemoUICancelAlpha:0];
                             break;
                         case VoiceMemoRecordingState_RecordingLocked:
+                        case VoiceMemoRecordingState_Draft:
                             // already locked
                             break;
                         case VoiceMemoRecordingState_Idle:
@@ -778,7 +834,17 @@ const CGFloat kMaxIPadTextViewHeight = 142;
                         [self.inputToolbarDelegate voiceMemoGestureDidCancel];
                         break;
                     } else {
-                        [self.inputToolbarDelegate voiceMemoGestureDidUpdateCancelWithRatioComplete:cancelAlpha];
+                        [self setVoiceMemoUICancelAlpha:cancelAlpha];
+                    }
+
+                    if (xOffset > yOffset) {
+                        self.voiceMemoRedRecordingCircle.transform
+                            = CGAffineTransformMakeTranslation(MIN(-xOffset, 0), 0);
+                    } else if (yOffset > xOffset) {
+                        self.voiceMemoRedRecordingCircle.transform
+                            = CGAffineTransformMakeTranslation(0, MIN(-yOffset, 0));
+                    } else {
+                        self.voiceMemoRedRecordingCircle.transform = CGAffineTransformIdentity;
                     }
                 }
             }
@@ -793,6 +859,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
                     [self.inputToolbarDelegate voiceMemoGestureDidComplete];
                     break;
                 case VoiceMemoRecordingState_RecordingLocked:
+                case VoiceMemoRecordingState_Draft:
                     // Continue recording.
                     break;
             }
@@ -800,54 +867,53 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     }
 }
 
-#pragma mark - Voice Memo
-
-- (BOOL)isRecordingVoiceMemo
+- (void)setVoiceMemoRecordingState:(VoiceMemoRecordingState)voiceMemoRecordingState
 {
-    switch (self.voiceMemoRecordingState) {
-        case VoiceMemoRecordingState_Idle:
-            return NO;
-        case VoiceMemoRecordingState_RecordingHeld:
-        case VoiceMemoRecordingState_RecordingLocked:
-            return YES;
+    OWSAssertIsOnMainThread();
+
+    if (voiceMemoRecordingState != _voiceMemoRecordingState) {
+        _voiceMemoRecordingState = voiceMemoRecordingState;
+        [self ensureButtonVisibilityWithIsAnimated:YES doLayout:YES];
     }
 }
+
+- (void)setIsShowingVoiceMemoUI:(BOOL)isShowingVoiceMemoUI
+{
+    OWSAssertIsOnMainThread();
+
+    if (isShowingVoiceMemoUI != _isShowingVoiceMemoUI) {
+        _isShowingVoiceMemoUI = isShowingVoiceMemoUI;
+        [self ensureButtonVisibilityWithIsAnimated:YES doLayout:YES];
+    }
+}
+
+#pragma mark - Voice Memo
 
 - (void)showVoiceMemoUI
 {
     OWSAssertIsOnMainThread();
 
+    self.isShowingVoiceMemoUI = YES;
+
+    [self removeVoiceMemoTooltip];
+
     self.voiceMemoStartTime = [NSDate date];
 
-    [self.voiceMemoUI removeFromSuperview];
+    [self.voiceMemoRedRecordingCircle removeFromSuperview];
     [self.voiceMemoLockView removeFromSuperview];
 
-    self.voiceMemoUI = [UIView new];
-    self.voiceMemoUI.backgroundColor = Theme.toolbarBackgroundColor;
-    [self addSubview:self.voiceMemoUI];
-    [self.voiceMemoUI autoPinEdgesToSuperviewEdges];
-    SET_SUBVIEW_ACCESSIBILITY_IDENTIFIER(self, _voiceMemoUI);
-
-    self.voiceMemoContentView = [UIView new];
-    [self.voiceMemoUI addSubview:self.voiceMemoContentView];
-    [self.voiceMemoContentView autoPinEdgesToSuperviewMargins];
+    [self.voiceMemoContentView removeAllSubviews];
 
     self.recordingLabel = [UILabel new];
-    self.recordingLabel.textColor = UIColor.ows_accentRedColor;
-    self.recordingLabel.font = [UIFont ows_semiboldFontWithSize:14.f];
+    self.recordingLabel.textAlignment = NSTextAlignmentLeft;
+    self.recordingLabel.textColor = Theme.primaryTextColor;
+    self.recordingLabel.font = UIFont.ows_dynamicTypeBodyClampedFont.ows_medium.ows_monospaced;
     [self.voiceMemoContentView addSubview:self.recordingLabel];
     SET_SUBVIEW_ACCESSIBILITY_IDENTIFIER(self, _recordingLabel);
 
-    VoiceMemoLockView *voiceMemoLockView = [VoiceMemoLockView new];
-    self.voiceMemoLockView = voiceMemoLockView;
-    [self addSubview:voiceMemoLockView];
-    [voiceMemoLockView autoPinEdgeToSuperviewMargin:ALEdgeRight];
-    [voiceMemoLockView autoPinEdge:ALEdgeBottom toEdge:ALEdgeTop ofView:self.voiceMemoContentView];
-    [voiceMemoLockView setCompressionResistanceHigh];
-
     [self updateVoiceMemo];
 
-    UIImage *icon = [UIImage imageNamed:@"mic-outline-24"];
+    UIImage *icon = [UIImage imageNamed:@"mic-solid-24"];
     OWSAssertDebug(icon);
     UIImageView *imageView =
         [[UIImageView alloc] initWithImage:[icon imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]];
@@ -857,80 +923,59 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
     NSMutableAttributedString *cancelString = [NSMutableAttributedString new];
     const CGFloat cancelArrowFontSize = ScaleFromIPhone5To7Plus(18.4, 20.f);
-    const CGFloat cancelFontSize = ScaleFromIPhone5To7Plus(14.f, 16.f);
     NSString *arrowHead = @"\uf104";
+    [cancelString append:arrowHead
+              attributes:@{
+                  NSFontAttributeName : [UIFont ows_fontAwesomeFont:cancelArrowFontSize],
+                  NSForegroundColorAttributeName : Theme.secondaryTextAndIconColor,
+                  NSBaselineOffsetAttributeName : @(-1.f),
+              }];
+    [cancelString append:@"  "
+              attributes:@{
+                  NSFontAttributeName : [UIFont ows_fontAwesomeFont:cancelArrowFontSize],
+                  NSForegroundColorAttributeName : Theme.secondaryTextAndIconColor,
+                  NSBaselineOffsetAttributeName : @(-1.f),
+              }];
     [cancelString
-        appendAttributedString:[[NSAttributedString alloc]
-                                   initWithString:arrowHead
-                                       attributes:@{
-                                           NSFontAttributeName : [UIFont ows_fontAwesomeFont:cancelArrowFontSize],
-                                           NSForegroundColorAttributeName : UIColor.ows_accentRedColor,
-                                           NSBaselineOffsetAttributeName : @(-1.f),
-                                       }]];
-    [cancelString
-        appendAttributedString:[[NSAttributedString alloc]
-                                   initWithString:@"  "
-                                       attributes:@{
-                                           NSFontAttributeName : [UIFont ows_fontAwesomeFont:cancelArrowFontSize],
-                                           NSForegroundColorAttributeName : UIColor.ows_accentRedColor,
-                                           NSBaselineOffsetAttributeName : @(-1.f),
-                                       }]];
-    [cancelString
-        appendAttributedString:[[NSAttributedString alloc]
-                                   initWithString:NSLocalizedString(@"VOICE_MESSAGE_CANCEL_INSTRUCTIONS",
-                                                      @"Indicates how to cancel a voice message.")
-                                       attributes:@{
-                                           NSFontAttributeName : [UIFont ows_semiboldFontWithSize:cancelFontSize],
-                                           NSForegroundColorAttributeName : UIColor.ows_accentRedColor,
-                                       }]];
-    [cancelString
-        appendAttributedString:[[NSAttributedString alloc]
-                                   initWithString:@"  "
-                                       attributes:@{
-                                           NSFontAttributeName : [UIFont ows_fontAwesomeFont:cancelArrowFontSize],
-                                           NSForegroundColorAttributeName : UIColor.ows_accentRedColor,
-                                           NSBaselineOffsetAttributeName : @(-1.f),
-                                       }]];
-    [cancelString
-        appendAttributedString:[[NSAttributedString alloc]
-                                   initWithString:arrowHead
-                                       attributes:@{
-                                           NSFontAttributeName : [UIFont ows_fontAwesomeFont:cancelArrowFontSize],
-                                           NSForegroundColorAttributeName : UIColor.ows_accentRedColor,
-                                           NSBaselineOffsetAttributeName : @(-1.f),
-                                       }]];
+            append:NSLocalizedString(@"VOICE_MESSAGE_CANCEL_INSTRUCTIONS", @"Indicates how to cancel a voice message.")
+        attributes:@{
+            NSFontAttributeName : [UIFont ows_dynamicTypeSubheadlineClampedFont],
+            NSForegroundColorAttributeName : Theme.secondaryTextAndIconColor,
+        }];
     UILabel *cancelLabel = [UILabel new];
+    cancelLabel.textAlignment = NSTextAlignmentRight;
     self.voiceMemoCancelLabel = cancelLabel;
     cancelLabel.attributedText = cancelString;
     [self.voiceMemoContentView addSubview:cancelLabel];
 
-    const CGFloat kRedCircleSize = 100.f;
+    const CGFloat kRedCircleSize = 80.f;
     UIView *redCircleView = [[OWSCircleView alloc] initWithDiameter:kRedCircleSize];
     self.voiceMemoRedRecordingCircle = redCircleView;
     redCircleView.backgroundColor = UIColor.ows_accentRedColor;
-    [self.voiceMemoContentView addSubview:redCircleView];
-    [redCircleView autoAlignAxis:ALAxisHorizontal toSameAxisOfView:self.voiceMemoButton];
-    [redCircleView autoAlignAxis:ALAxisVertical toSameAxisOfView:self.voiceMemoButton];
+    [self addSubview:redCircleView];
+    [redCircleView autoAlignAxis:ALAxisHorizontal toSameAxisOfView:self.voiceMemoContentView];
+    [redCircleView autoPinEdgeToSuperviewEdge:ALEdgeRight withInset:12];
 
-    UIImage *whiteIcon = [UIImage imageNamed:@"mic-outline-64"];
+    UIImage *whiteIcon = [UIImage imageNamed:@"mic-solid-36"];
     OWSAssertDebug(whiteIcon);
     UIImageView *whiteIconView = [[UIImageView alloc] initWithImage:whiteIcon];
     [redCircleView addSubview:whiteIconView];
     [whiteIconView autoCenterInSuperview];
 
     [imageView autoVCenterInSuperview];
-    [imageView autoPinEdgeToSuperviewEdge:ALEdgeLeft withInset:10.f];
+    [imageView autoPinEdgeToSuperviewEdge:ALEdgeLeft withInset:12.f];
     [self.recordingLabel autoVCenterInSuperview];
-    [self.recordingLabel autoPinEdge:ALEdgeLeft toEdge:ALEdgeRight ofView:imageView withOffset:5.f];
+    [self.recordingLabel autoPinEdge:ALEdgeLeft toEdge:ALEdgeRight ofView:imageView withOffset:8.f];
     [cancelLabel autoVCenterInSuperview];
-    [cancelLabel autoHCenterInSuperview];
-    [self.voiceMemoUI layoutIfNeeded];
+    [cancelLabel autoPinEdgeToSuperviewEdge:ALEdgeRight withInset:72.f];
+    [cancelLabel autoPinEdge:ALEdgeLeft toEdge:ALEdgeRight ofView:self.recordingLabel];
 
-    // Slide in the "slide to cancel" label.
-    CGRect cancelLabelStartFrame = cancelLabel.frame;
-    CGRect cancelLabelEndFrame = cancelLabel.frame;
-    cancelLabelStartFrame.origin.x = self.voiceMemoUI.bounds.size.width;
-    cancelLabel.frame = cancelLabelStartFrame;
+    VoiceMemoLockView *voiceMemoLockView = [VoiceMemoLockView new];
+    self.voiceMemoLockView = voiceMemoLockView;
+    [self insertSubview:voiceMemoLockView belowSubview:redCircleView];
+    [voiceMemoLockView autoAlignAxis:ALAxisVertical toSameAxisOfView:redCircleView];
+    [voiceMemoLockView autoPinEdge:ALEdgeBottom toEdge:ALEdgeTop ofView:redCircleView];
+    [voiceMemoLockView setCompressionResistanceHigh];
 
     voiceMemoLockView.transform = CGAffineTransformMakeScale(0.0, 0.0);
     [voiceMemoLockView layoutIfNeeded];
@@ -942,36 +987,18 @@ const CGFloat kMaxIPadTextViewHeight = 142;
                      }
                      completion:nil];
 
-    [UIView animateWithDuration:0.35f
-                          delay:0.f
-                        options:UIViewAnimationOptionCurveEaseOut
-                     animations:^{
-                         cancelLabel.frame = cancelLabelEndFrame;
-                     }
-                     completion:nil];
+    redCircleView.transform = CGAffineTransformMakeScale(0.0, 0.0);
+    [UIView animateWithDuration:0.2f animations:^{ redCircleView.transform = CGAffineTransformIdentity; }];
 
     // Pulse the icon.
-    imageView.layer.opacity = 1.f;
+    imageView.alpha = 1.f;
     [UIView animateWithDuration:0.5f
                           delay:0.2f
                         options:UIViewAnimationOptionRepeat | UIViewAnimationOptionAutoreverse
                         | UIViewAnimationOptionCurveEaseIn
-                     animations:^{
-                         imageView.layer.opacity = 0.f;
-                     }
+                     animations:^{ imageView.alpha = 0.f; }
                      completion:nil];
 
-    // Fade in the view.
-    self.voiceMemoUI.layer.opacity = 0.f;
-    [UIView animateWithDuration:0.2f
-        animations:^{
-            self.voiceMemoUI.layer.opacity = 1.f;
-        }
-        completion:^(BOOL finished) {
-            if (finished) {
-                self.voiceMemoUI.layer.opacity = 1.f;
-            }
-        }];
 
     [self.voiceMemoUpdateTimer invalidate];
     self.voiceMemoUpdateTimer = [NSTimer weakScheduledTimerWithTimeInterval:0.1f
@@ -981,39 +1008,68 @@ const CGFloat kMaxIPadTextViewHeight = 142;
                                                                     repeats:YES];
 }
 
+- (void)showVoiceMemoDraft:(VoiceMessageModel *)voiceMemoDraft
+{
+    OWSAssertIsOnMainThread();
+
+    self.isShowingVoiceMemoUI = YES;
+
+    self.voiceMemoDraft = voiceMemoDraft;
+    self.voiceMemoRecordingState = VoiceMemoRecordingState_Draft;
+
+    [self removeVoiceMemoTooltip];
+
+    [self.voiceMemoRedRecordingCircle removeFromSuperview];
+    [self.voiceMemoLockView removeFromSuperview];
+
+    [self.voiceMemoContentView removeAllSubviews];
+
+    [self.voiceMemoUpdateTimer invalidate];
+    self.voiceMemoUpdateTimer = nil;
+
+    __weak __typeof(self) weakSelf = self;
+    UIView *draftView = [[VoiceMessageDraftView alloc] initWithVoiceMessageModel:voiceMemoDraft
+                                                               didDeleteCallback:^{ [weakSelf hideVoiceMemoUI:YES]; }];
+    [self.voiceMemoContentView addSubview:draftView];
+    [draftView autoPinEdgesToSuperviewEdges];
+}
+
 - (void)hideVoiceMemoUI:(BOOL)animated
 {
     OWSAssertIsOnMainThread();
 
-    self.voiceMemoRecordingState = VoiceMemoRecordingState_Idle;
+    self.isShowingVoiceMemoUI = NO;
 
-    UIView *oldVoiceMemoUI = self.voiceMemoUI;
+    [self.voiceMemoContentView removeAllSubviews];
+
+    self.voiceMemoRecordingState = VoiceMemoRecordingState_Idle;
+    self.voiceMemoDraft = nil;
+
+    UIView *oldVoiceMemoRedRecordingCircle = self.voiceMemoRedRecordingCircle;
     UIView *oldVoiceMemoLockView = self.voiceMemoLockView;
 
-    self.voiceMemoUI = nil;
     self.voiceMemoCancelLabel = nil;
     self.voiceMemoRedRecordingCircle = nil;
-    self.voiceMemoContentView = nil;
     self.voiceMemoLockView = nil;
     self.recordingLabel = nil;
 
     [self.voiceMemoUpdateTimer invalidate];
     self.voiceMemoUpdateTimer = nil;
 
-    [oldVoiceMemoUI.layer removeAllAnimations];
+    self.voiceMemoDraft = nil;
 
     if (animated) {
-        [UIView animateWithDuration:0.35f
+        [UIView animateWithDuration:0.2f
             animations:^{
-                oldVoiceMemoUI.layer.opacity = 0.f;
-                oldVoiceMemoLockView.layer.opacity = 0.f;
+                oldVoiceMemoRedRecordingCircle.alpha = 0.f;
+                oldVoiceMemoLockView.alpha = 0.f;
             }
             completion:^(BOOL finished) {
-                [oldVoiceMemoUI removeFromSuperview];
+                [oldVoiceMemoRedRecordingCircle removeFromSuperview];
                 [oldVoiceMemoLockView removeFromSuperview];
             }];
     } else {
-        [oldVoiceMemoUI removeFromSuperview];
+        [oldVoiceMemoRedRecordingCircle removeFromSuperview];
         [oldVoiceMemoLockView removeFromSuperview];
     }
 }
@@ -1022,26 +1078,19 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 {
     __weak __typeof(self) weakSelf = self;
 
-    UIButton *sendVoiceMemoButton = [[OWSButton alloc] initWithBlock:^{
-        [weakSelf.inputToolbarDelegate voiceMemoGestureDidComplete];
-    }];
-    [sendVoiceMemoButton setTitle:MessageStrings.sendButton forState:UIControlStateNormal];
-    [sendVoiceMemoButton setTitleColor:UIColor.ows_accentBlueColor forState:UIControlStateNormal];
-    sendVoiceMemoButton.alpha = 0;
-    [self.voiceMemoContentView addSubview:sendVoiceMemoButton];
-    [sendVoiceMemoButton autoPinEdgeToSuperviewMargin:ALEdgeRight withInset:10.f];
-    [sendVoiceMemoButton autoVCenterInSuperview];
-    [sendVoiceMemoButton setCompressionResistanceHigh];
-    [sendVoiceMemoButton setContentHuggingHigh];
-    SET_SUBVIEW_ACCESSIBILITY_IDENTIFIER(self, sendVoiceMemoButton);
+    [ImpactHapticFeedback impactOccuredWithStyle:UIImpactFeedbackStyleMedium];
 
     UIButton *cancelButton = [[OWSButton alloc] initWithBlock:^{
         [weakSelf.inputToolbarDelegate voiceMemoGestureDidCancel];
     }];
+
     [cancelButton setTitle:CommonStrings.cancelButton forState:UIControlStateNormal];
     [cancelButton setTitleColor:UIColor.ows_accentRedColor forState:UIControlStateNormal];
+    [cancelButton setTitleColor:[UIColor.ows_accentRedColor colorWithAlphaComponent:0.4]
+                       forState:UIControlStateHighlighted];
     cancelButton.alpha = 0;
-    cancelButton.titleLabel.textAlignment = NSTextAlignmentCenter;
+    cancelButton.titleLabel.textAlignment = NSTextAlignmentRight;
+    cancelButton.titleLabel.font = UIFont.ows_dynamicTypeBodyClampedFont.ows_medium;
     SET_SUBVIEW_ACCESSIBILITY_IDENTIFIER(self, cancelButton);
 
     [self.voiceMemoContentView addSubview:cancelButton];
@@ -1052,29 +1101,23 @@ const CGFloat kMaxIPadTextViewHeight = 142;
                          forConstraints:^{
                              [cancelButton autoHCenterInSuperview];
                          }];
+    [cancelButton autoPinEdgeToSuperviewMargin:ALEdgeRight withInset:20];
     [cancelButton autoPinEdge:ALEdgeLeft
                        toEdge:ALEdgeRight
                        ofView:self.recordingLabel
                    withOffset:4
                      relation:NSLayoutRelationGreaterThanOrEqual];
-    [cancelButton autoPinEdge:ALEdgeLeft
-                       toEdge:ALEdgeRight
-                       ofView:sendVoiceMemoButton
-                   withOffset:-4
-                     relation:NSLayoutRelationLessThanOrEqual];
     [cancelButton autoVCenterInSuperview];
 
+    [self.voiceMemoCancelLabel removeFromSuperview];
     [self.voiceMemoContentView layoutIfNeeded];
-    [UIView animateWithDuration:0.35
+    [UIView animateWithDuration:0.2f
         animations:^{
-            self.voiceMemoCancelLabel.alpha = 0;
             self.voiceMemoRedRecordingCircle.alpha = 0;
-            self.voiceMemoLockView.transform = CGAffineTransformMakeScale(0, 0);
+            self.voiceMemoLockView.alpha = 0;
             cancelButton.alpha = 1.0;
-            sendVoiceMemoButton.alpha = 1.0;
         }
         completion:^(BOOL finished) {
-            [self.voiceMemoCancelLabel removeFromSuperview];
             [self.voiceMemoRedRecordingCircle removeFromSuperview];
             [self.voiceMemoLockView removeFromSuperview];
         }];
@@ -1086,7 +1129,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
     // Fade out the voice message views as the cancel gesture
     // proceeds as feedback.
-    self.voiceMemoContentView.layer.opacity = MAX(0.f, MIN(1.f, 1.f - (float)cancelAlpha));
+    self.voiceMemoCancelLabel.alpha = MAX(0.f, MIN(1.f, 1.f - (float)cancelAlpha));
 }
 
 - (void)updateVoiceMemo
@@ -1098,11 +1141,33 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     [self.recordingLabel sizeToFit];
 }
 
-- (void)cancelVoiceMemoIfNecessary
+- (void)showVoiceMemoTooltip
 {
-    if (self.isRecordingVoiceMemo) {
-        self.voiceMemoRecordingState = VoiceMemoRecordingState_Idle;
+    if (self.voiceMemoTooltip) {
+        return;
     }
+
+    __weak ConversationInputToolbar *weakSelf = self;
+    UIView *tooltip = [VoiceMessageTooltip presentFromView:self
+                                        widthReferenceView:self
+                                         tailReferenceView:self.voiceMemoButton
+                                            wasTappedBlock:^{ [weakSelf removeVoiceMemoTooltip]; }];
+    self.voiceMemoTooltip = tooltip;
+
+    const CGFloat tooltipDurationSeconds = 3.f;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(tooltipDurationSeconds * NSEC_PER_SEC)),
+        dispatch_get_main_queue(),
+        ^{ [weakSelf removeVoiceMemoTooltip]; });
+}
+
+- (void)removeVoiceMemoTooltip
+{
+    UIView *voiceMemoTooltip = self.voiceMemoTooltip;
+    self.voiceMemoTooltip = nil;
+
+    [UIView animateWithDuration:0.2
+        animations:^{ voiceMemoTooltip.alpha = 0; }
+        completion:^(BOOL finished) { [voiceMemoTooltip removeFromSuperview]; }];
 }
 
 #pragma mark - Event Handlers
@@ -1111,7 +1176,17 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 {
     OWSAssertDebug(self.inputToolbarDelegate);
 
-    [self.inputToolbarDelegate sendButtonPressed];
+    if (self.isShowingVoiceMemoUI) {
+        self.voiceMemoRecordingState = VoiceMemoRecordingState_Idle;
+
+        if (self.voiceMemoDraft) {
+            [self.inputToolbarDelegate sendVoiceMemoDraft:self.voiceMemoDraft];
+        } else {
+            [self.inputToolbarDelegate voiceMemoGestureDidComplete];
+        }
+    } else {
+        [self.inputToolbarDelegate sendButtonPressed];
+    }
 }
 
 - (void)cameraButtonPressed
@@ -1139,7 +1214,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     [ImpactHapticFeedback impactOccuredWithStyle:UIImpactFeedbackStyleLight];
 
     __block BOOL hasInstalledStickerPacks;
-    [self.databaseStorage uiReadWithBlock:^(SDSAnyReadTransaction *transaction) {
+    [self.databaseStorage readWithBlock:^(SDSAnyReadTransaction *transaction) {
         hasInstalledStickerPacks = [StickerManager installedStickerPacksWithTransaction:transaction].count > 0;
     }];
     if (!hasInstalledStickerPacks) {
@@ -1243,13 +1318,33 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
 #pragma mark - ConversationTextViewToolbarDelegate
 
+- (void)setFrame:(CGRect)frame
+{
+    BOOL didChange = frame.size.height != self.frame.size.height;
+
+    [super setFrame:frame];
+
+    if (didChange) {
+        [self.inputToolbarDelegate updateToolbarHeight];
+    }
+}
+
 - (void)setBounds:(CGRect)bounds
 {
-    CGFloat oldHeight = self.bounds.size.height;
+    BOOL didChange = bounds.size.height != self.bounds.size.height;
 
     [super setBounds:bounds];
 
-    if (oldHeight != bounds.size.height) {
+    // Compensate for autolayout frame/bounds changes when animating in/out the quoted reply view.
+    // This logic ensures the input toolbar stays pinned to the keyboard visually
+    if (didChange && self.isAnimatingQuotedReply && self.inputTextView.isFirstResponder) {
+        CGRect frame = self.frame;
+        frame.origin.y = 0;
+        // In this conditional, bounds change is captured in an animation block, which we don't want here.
+        [UIView performWithoutAnimation:^{ [self setFrame:frame]; }];
+    }
+
+    if (didChange) {
         [self.inputToolbarDelegate updateToolbarHeight];
     }
 }
@@ -1257,6 +1352,12 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 - (void)textViewDidChange:(UITextView *)textView
 {
     OWSAssertDebug(self.inputToolbarDelegate);
+
+    if (!self.isConfigurationComplete) {
+        // Ignore change events during configuration.
+        return;
+    }
+
     [self ensureButtonVisibilityWithIsAnimated:YES doLayout:YES];
     [self updateHeightWithTextView:textView];
     [self updateInputLinkPreview];
@@ -1299,6 +1400,9 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
 - (void)quotedReplyPreviewDidPressCancel:(QuotedReplyPreview *)preview
 {
+    if (SSKDebugFlags.internalLogging) {
+        OWSLogInfo(@"");
+    }
     self.quotedReply = nil;
 }
 
@@ -1308,9 +1412,9 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 {
     OWSAssertIsOnMainThread();
 
-    NSString *body =
-        [[self messageText] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-    if (body.length < 1) {
+    NSString *bodyText =
+        [[self messageBody].text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (bodyText.length < 1) {
         [self clearLinkPreviewStateAndView];
         self.wasLinkPreviewCancelled = NO;
         return;
@@ -1322,22 +1426,18 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     }
 
     // Don't include link previews for oversize text messages.
-    if ([body lengthOfBytesUsingEncoding:NSUTF8StringEncoding] >= kOversizeTextMessageSizeThreshold) {
+    if ([bodyText lengthOfBytesUsingEncoding:NSUTF8StringEncoding] >= kOversizeTextMessageSizeThreshold) {
         [self clearLinkPreviewStateAndView];
         return;
     }
 
-    // It's key that we use the *raw/unstripped* text, so we can reconcile cursor position with the
-    // selectedRange.
-    NSString *_Nullable previewUrl =
-        [self.linkPreviewManager previewUrlForRawBodyText:self.inputTextView.text
-                                            selectedRange:self.inputTextView.selectedRange];
-    if (previewUrl.length < 1) {
+    NSURL *previewUrl = [self.linkPreviewManager findFirstValidUrlInSearchString:self.inputTextView.text];
+    if (!previewUrl.absoluteString.length) {
         [self clearLinkPreviewStateAndView];
         return;
     }
 
-    if (self.inputLinkPreview && [self.inputLinkPreview.previewUrl isEqualToString:previewUrl]) {
+    if ([self.inputLinkPreview.previewUrl isEqual:previewUrl]) {
         // No need to update.
         return;
     }
@@ -1346,10 +1446,10 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     self.inputLinkPreview = inputLinkPreview;
     self.inputLinkPreview.previewUrl = previewUrl;
 
-    [self ensureLinkPreviewViewWithState:[LinkPreviewLoading new]];
+    [self ensureLinkPreviewViewWithState:[[LinkPreviewLoading alloc] initWithLinkType:LinkPreviewLinkTypePreview]];
 
     __weak ConversationInputToolbar *weakSelf = self;
-    [self.linkPreviewManager tryToBuildPreviewInfoObjcWithPreviewUrl:previewUrl]
+    [self.linkPreviewManager fetchLinkPreviewForUrl:previewUrl]
         .then(^(OWSLinkPreviewDraft *linkPreviewDraft) {
             ConversationInputToolbar *_Nullable strongSelf = weakSelf;
             if (!strongSelf) {
@@ -1373,16 +1473,17 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 {
     OWSAssertIsOnMainThread();
 
+    // TODO: We could re-use LinkPreviewView now.
     [self clearLinkPreviewView];
 
     LinkPreviewView *linkPreviewView = [[LinkPreviewView alloc] initWithDraftDelegate:self];
-    linkPreviewView.state = state;
-    linkPreviewView.hasAsymmetricalRounding = !self.quotedReply;
+    [linkPreviewView configureForNonCVCWithState:state isDraft:YES hasAsymmetricalRounding:!self.quotedReply];
     self.linkPreviewView = linkPreviewView;
 
     self.linkPreviewWrapper.hidden = NO;
     [self.linkPreviewWrapper addSubview:linkPreviewView];
     [linkPreviewView autoPinEdgesToSuperviewMargins];
+    [self.linkPreviewWrapper layoutIfNeeded];
 }
 
 - (void)clearLinkPreviewStateAndView
@@ -1485,7 +1586,8 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 - (void)updateSuggestedStickerView
 {
     if (self.suggestedStickerInfos.count < 1) {
-        self.suggestedStickerView.hidden = YES;
+        self.suggestedStickerView.isHiddenInStackView = YES;
+        [self layoutIfNeeded];
         return;
     }
     __weak __typeof(self) weakSelf = self;
@@ -1494,12 +1596,12 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     for (StickerInfo *stickerInfo in self.suggestedStickerInfos) {
         [items addObject:[[StickerHorizontalListViewItemSticker alloc]
                              initWithStickerInfo:stickerInfo
-                                  didSelectBlock:^{
-                                      [weakSelf didSelectSuggestedSticker:stickerInfo];
-                                  }]];
+                                  didSelectBlock:^{ [weakSelf didSelectSuggestedSticker:stickerInfo]; }
+                                           cache:self.suggestedStickerViewCache]];
     }
     self.suggestedStickerView.items = items;
-    self.suggestedStickerView.hidden = NO;
+    self.suggestedStickerView.isHiddenInStackView = NO;
+    [self layoutIfNeeded];
     if (shouldReset) {
         self.suggestedStickerView.contentOffset
             = CGPointMake(-self.suggestedStickerView.contentInset.left, -self.suggestedStickerView.contentInset.top);
@@ -1514,21 +1616,6 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 
     [self clearTextMessageAnimated:YES];
     [self.inputToolbarDelegate sendSticker:stickerInfo];
-}
-
-// stickerTooltip lies outside this view's bounds, so we
-// need to special-case the hit testing so that it can
-// intercept touches within its bounds.
-- (BOOL)pointInside:(CGPoint)point withEvent:(nullable UIEvent *)event
-{
-    UIView *_Nullable stickerTooltip = self.stickerTooltip;
-    if (stickerTooltip != nil) {
-        CGRect stickerTooltipFrame = [self convertRect:stickerTooltip.bounds fromView:stickerTooltip];
-        if (CGRectContainsPoint(stickerTooltipFrame, point)) {
-            return YES;
-        }
-    }
-    return [super pointInside:point withEvent:event];
 }
 
 - (void)viewDidAppear
@@ -1548,7 +1635,7 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     // We only measure the keyboard if the toolbar isn't hidden.
     // If it's hidden, we're likely here from a peek interaction
     // and don't want to show the keyboard. We'll measure it later.
-    if (!self.inputTextView.isFirstResponder && !self.isHidden) {
+    if (!self.hasMeasuredKeyboardHeight && !self.inputTextView.isFirstResponder && !self.isHidden) {
 
         // Flag that we're measuring the system keyboard's height, so
         // even if though it won't be the first responder by the time
@@ -1556,8 +1643,12 @@ const CGFloat kMaxIPadTextViewHeight = 142;
         self.isMeasuringKeyboardHeight = YES;
 
         [UIView setAnimationsEnabled:NO];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-result"
         [self.inputTextView becomeFirstResponder];
         [self.inputTextView resignFirstResponder];
+#pragma clang diagnostic pop
+        [self.inputTextView reloadMentionState];
         [UIView setAnimationsEnabled:YES];
     }
 }
@@ -1598,7 +1689,10 @@ const CGFloat kMaxIPadTextViewHeight = 142;
         if (newHeight > 0) {
             [self.stickerKeyboard updateSystemKeyboardHeight:newHeight];
             [self.attachmentKeyboard updateSystemKeyboardHeight:newHeight];
-            self.isMeasuringKeyboardHeight = NO;
+            if (self.isMeasuringKeyboardHeight) {
+                self.isMeasuringKeyboardHeight = NO;
+                self.hasMeasuredKeyboardHeight = YES;
+            }
         }
     }
 }
@@ -1615,9 +1709,9 @@ const CGFloat kMaxIPadTextViewHeight = 142;
     [self.inputToolbarDelegate galleryButtonPressed];
 }
 
-- (void)didTapCameraWithPhotoCapture:(nullable PhotoCapture *)photoCapture
+- (void)didTapCamera
 {
-    [self.inputToolbarDelegate cameraButtonPressedWithPhotoCapture:photoCapture];
+    [self.inputToolbarDelegate cameraButtonPressed];
 }
 
 - (void)didTapGif
@@ -1638,6 +1732,23 @@ const CGFloat kMaxIPadTextViewHeight = 142;
 - (void)didTapLocation
 {
     [self.inputToolbarDelegate locationButtonPressed];
+}
+
+- (void)updateConversationStyle:(ConversationStyle *)conversationStyle
+{
+    OWSAssertIsOnMainThread();
+
+    _conversationStyle = conversationStyle;
+}
+
+- (void)didTapPayment
+{
+    [self.inputToolbarDelegate paymentButtonPressed];
+}
+
+- (BOOL)isGroup
+{
+    return self.inputToolbarDelegate.isGroup;
 }
 
 @end

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import <Foundation/Foundation.h>
@@ -11,6 +11,8 @@ typedef NS_CLOSED_ENUM(NSUInteger, RemoteAttestationService) {
     RemoteAttestationServiceKeyBackup,
 };
 
+NSString *NSStringForRemoteAttestationService(RemoteAttestationService value);
+
 extern NSErrorUserInfoKey const RemoteAttestationErrorKey_Reason;
 extern NSErrorDomain const RemoteAttestationErrorDomain;
 typedef NS_ERROR_ENUM(RemoteAttestationErrorDomain, RemoteAttestationError){
@@ -20,6 +22,7 @@ typedef NS_ERROR_ENUM(RemoteAttestationErrorDomain, RemoteAttestationError){
 
 @class ECKeyPair;
 @class OWSAES256Key;
+@class RemoteAttestationKeys;
 @class RemoteAttestationQuote;
 
 @interface RemoteAttestationAuth : NSObject
@@ -27,23 +30,6 @@ typedef NS_ERROR_ENUM(RemoteAttestationErrorDomain, RemoteAttestationError){
 @property (nonatomic, readonly) NSString *username;
 @property (nonatomic, readonly) NSString *password;
 
-@end
-
-#pragma mark -
-
-@interface RemoteAttestationKeys : NSObject
-
-@property (nonatomic, readonly) ECKeyPair *clientEphemeralKeyPair;
-@property (nonatomic, readonly) NSData *serverEphemeralPublic;
-@property (nonatomic, readonly) NSData *serverStaticPublic;
-
-@property (nonatomic, readonly) OWSAES256Key *clientKey;
-@property (nonatomic, readonly) OWSAES256Key *serverKey;
-
-- (nullable RemoteAttestationKeys *)initWithClientEphemeralKeyPair:(ECKeyPair *)clientEphemeralKeyPair
-                                             serverEphemeralPublic:(NSData *)serverEphemeralPublic
-                                                serverStaticPublic:(NSData *)serverStaticPublic
-                                                             error:(NSError **)error;
 @end
 
 #pragma mark -

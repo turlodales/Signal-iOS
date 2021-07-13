@@ -1,8 +1,8 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSAccountManager.h"
+#import <SignalServiceKit/TSAccountManager.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -29,9 +29,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (void)createPreKeysWithSuccess:(void (^)(void))successHandler failure:(void (^)(NSError *error))failureHandler;
 
-+ (void)checkPreKeys;
-
 + (void)checkPreKeysIfNecessary;
+
+#if TESTABLE_BUILD
++ (void)checkPreKeysImmediately;
+#endif
 
 @end
 

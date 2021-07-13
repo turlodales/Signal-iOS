@@ -1,12 +1,12 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import MultipeerConnectivity
 import PromiseKit
 
-protocol DeviceTransferServiceObserver: class {
+protocol DeviceTransferServiceObserver: AnyObject {
     func deviceTransferServiceDiscoveredNewDevice(peerId: MCPeerID, discoveryInfo: [String: String]?)
 
     func deviceTransferServiceDidStartTransfer(progress: Progress)
@@ -65,14 +65,6 @@ protocol DeviceTransferServiceObserver: class {
 ///
 @objc
 class DeviceTransferService: NSObject {
-    var tsAccountManager: TSAccountManager { .sharedInstance() }
-    var databaseStorage: SDSDatabaseStorage { .shared }
-    var sleepManager: DeviceSleepManager { .sharedInstance }
-
-    @objc
-    static var shared: DeviceTransferService {
-        return AppEnvironment.shared.deviceTransferService
-    }
 
     static let appSharedDataDirectory = URL(fileURLWithPath: OWSFileSystem.appSharedDataDirectoryPath())
     static let pendingTransferDirectory = URL(fileURLWithPath: "transfer", isDirectory: true, relativeTo: appSharedDataDirectory)
@@ -82,6 +74,10 @@ class DeviceTransferService: NSObject {
     static let databaseIdentifier = "database"
     static let databaseWALIdentifier = "database-wal"
 
+    static let missingFileData = "Missing File".data(using: .utf8)!
+    static let missingFileHash = Cryptography.computeSHA256Digest(missingFileData)!
+
+    // This must also be updated in the info.plist
     private static let newDeviceServiceIdentifier = "sgnl-new-device"
 
     private let serialQueue = DispatchQueue(label: "DeviceTransferService")
@@ -95,11 +91,11 @@ class DeviceTransferService: NSObject {
     private(set) var session: MCSession? {
         didSet {
             if let oldValue = oldValue {
-                sleepManager.removeBlock(blockObject: oldValue)
+                deviceSleepManager.removeBlock(blockObject: oldValue)
             }
 
             if let session = session {
-                sleepManager.addBlock(blockObject: session)
+                deviceSleepManager.addBlock(blockObject: session)
             }
         }
     }
@@ -273,7 +269,10 @@ class DeviceTransferService: NSObject {
     // MARK: -
 
     @objc func didEnterBackground() {
-        if transferState != .idle {
+        switch transferState {
+        case .idle:
+            break
+        default:
             notifyObservers { $0.deviceTransferServiceDidEndTransfer(error: .cancel) }
         }
 
@@ -352,7 +351,7 @@ class DeviceTransferService: NSObject {
 
         guard let progress: Progress = {
             switch transferState {
-            case .incoming(_, _, _, let progress):
+            case .incoming(_, _, _, _, let progress):
                 return progress
             case .outgoing(_, _, _, _, let progress):
                 return progress

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -23,6 +23,7 @@ public class TSOutgoingMessageBuilder: TSMessageBuilder {
     public required init(thread: TSThread,
                          timestamp: UInt64? = nil,
                          messageBody: String? = nil,
+                         bodyRanges: MessageBodyRanges? = nil,
                          attachmentIds: [String]? = nil,
                          expiresInSeconds: UInt32 = 0,
                          expireStartedAt: UInt64 = 0,
@@ -39,6 +40,7 @@ public class TSOutgoingMessageBuilder: TSMessageBuilder {
         super.init(thread: thread,
                    timestamp: timestamp,
                    messageBody: messageBody,
+                   bodyRanges: bodyRanges,
                    attachmentIds: attachmentIds,
                    expiresInSeconds: expiresInSeconds,
                    expireStartedAt: expireStartedAt,
@@ -73,6 +75,7 @@ public class TSOutgoingMessageBuilder: TSMessageBuilder {
     public class func builder(thread: TSThread,
                               timestamp: UInt64,
                               messageBody: String?,
+                              bodyRanges: MessageBodyRanges?,
                               attachmentIds: [String]?,
                               expiresInSeconds: UInt32,
                               expireStartedAt: UInt64,
@@ -88,6 +91,7 @@ public class TSOutgoingMessageBuilder: TSMessageBuilder {
         return TSOutgoingMessageBuilder(thread: thread,
                                         timestamp: timestamp,
                                         messageBody: messageBody,
+                                        bodyRanges: bodyRanges,
                                         attachmentIds: attachmentIds,
                                         expiresInSeconds: expiresInSeconds,
                                         expireStartedAt: expireStartedAt,
@@ -111,5 +115,15 @@ public class TSOutgoingMessageBuilder: TSMessageBuilder {
         }
         hasBuilt = true
         return TSOutgoingMessage(outgoingMessageWithBuilder: self)
+    }
+}
+
+public extension TSOutgoingMessage {
+    @objc func failedRecipientAddresses(errorCode: OWSErrorCode) -> [SignalServiceAddress] {
+        guard let states = recipientAddressStates else { return [] }
+
+        return states.filter { _, state in
+            return state.state == .failed && state.errorCode?.intValue == errorCode.rawValue
+        }.map { $0.key }
     }
 }

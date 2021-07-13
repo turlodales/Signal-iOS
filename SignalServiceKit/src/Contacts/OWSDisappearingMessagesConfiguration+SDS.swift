@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -137,6 +137,34 @@ extension OWSDisappearingMessagesConfiguration: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension OWSDisappearingMessagesConfiguration: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == OWSDisappearingMessagesConfiguration.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let durationSeconds: UInt32 = modelToCopy.durationSeconds
+            let enabled: Bool = modelToCopy.isEnabled
+
+            return OWSDisappearingMessagesConfiguration(grdbId: id,
+                                                        uniqueId: uniqueId,
+                                                        durationSeconds: durationSeconds,
+                                                        enabled: enabled)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension OWSDisappearingMessagesConfigurationSerializer {
@@ -269,9 +297,11 @@ public extension OWSDisappearingMessagesConfiguration {
 
 @objc
 public class OWSDisappearingMessagesConfigurationCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<DisappearingMessagesConfigurationRecord>?
 
-    init(cursor: RecordCursor<DisappearingMessagesConfigurationRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<DisappearingMessagesConfigurationRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -313,10 +343,10 @@ public extension OWSDisappearingMessagesConfiguration {
         let database = transaction.database
         do {
             let cursor = try DisappearingMessagesConfigurationRecord.fetchCursor(database)
-            return OWSDisappearingMessagesConfigurationCursor(cursor: cursor)
+            return OWSDisappearingMessagesConfigurationCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return OWSDisappearingMessagesConfigurationCursor(cursor: nil)
+            return OWSDisappearingMessagesConfigurationCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -326,8 +356,6 @@ public extension OWSDisappearingMessagesConfiguration {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return OWSDisappearingMessagesConfiguration.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(DisappearingMessagesConfigurationRecord.databaseTableName) WHERE \(disappearingMessagesConfigurationColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -358,28 +386,20 @@ public extension OWSDisappearingMessagesConfiguration {
                             batchSize: UInt,
                             block: @escaping (OWSDisappearingMessagesConfiguration, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            OWSDisappearingMessagesConfiguration.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? OWSDisappearingMessagesConfiguration else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = OWSDisappearingMessagesConfiguration.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = OWSDisappearingMessagesConfiguration.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -407,10 +427,6 @@ public extension OWSDisappearingMessagesConfiguration {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: OWSDisappearingMessagesConfiguration.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -442,8 +458,6 @@ public extension OWSDisappearingMessagesConfiguration {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: OWSDisappearingMessagesConfiguration.collection())
         case .grdbRead(let grdbTransaction):
             return DisappearingMessagesConfigurationRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -453,8 +467,6 @@ public extension OWSDisappearingMessagesConfiguration {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: OWSDisappearingMessagesConfiguration.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try DisappearingMessagesConfigurationRecord.deleteAll(grdbTransaction.database)
@@ -503,8 +515,6 @@ public extension OWSDisappearingMessagesConfiguration {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: OWSDisappearingMessagesConfiguration.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(DisappearingMessagesConfigurationRecord.databaseTableName) WHERE \(disappearingMessagesConfigurationColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -522,11 +532,11 @@ public extension OWSDisappearingMessagesConfiguration {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try DisappearingMessagesConfigurationRecord.fetchCursor(transaction.database, sqlRequest)
-            return OWSDisappearingMessagesConfigurationCursor(cursor: cursor)
+            return OWSDisappearingMessagesConfigurationCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return OWSDisappearingMessagesConfigurationCursor(cursor: nil)
+            return OWSDisappearingMessagesConfigurationCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -575,3 +585,20 @@ class OWSDisappearingMessagesConfigurationSerializer: SDSSerializer {
         return DisappearingMessagesConfigurationRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, durationSeconds: durationSeconds, enabled: enabled)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension OWSDisappearingMessagesConfiguration {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> OWSDisappearingMessagesConfiguration {
+        guard let record = try asRecord() as? DisappearingMessagesConfigurationRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try OWSDisappearingMessagesConfiguration.fromRecord(record)
+    }
+}
+#endif

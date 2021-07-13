@@ -1,17 +1,17 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "SSKBaseTestObjC.h"
-#import "TSAccountManager.h"
-#import "TSContactThread.h"
-#import "TSGroupThread.h"
-#import "TSIncomingMessage.h"
-#import "TSMessage.h"
-#import "TSOutgoingMessage.h"
-#import "TSThread.h"
 #import <SignalCoreKit/Cryptography.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSAccountManager.h>
+#import <SignalServiceKit/TSContactThread.h>
+#import <SignalServiceKit/TSGroupThread.h>
+#import <SignalServiceKit/TSIncomingMessage.h>
+#import <SignalServiceKit/TSMessage.h>
+#import <SignalServiceKit/TSOutgoingMessage.h>
+#import <SignalServiceKit/TSThread.h>
 
 @interface TSMessageStorageTests : SSKBaseTestObjC
 
@@ -22,15 +22,6 @@
 #pragma mark -
 
 @implementation TSMessageStorageTests
-
-// MARK: - Dependencies
-
-- (TSAccountManager *)tsAccountManager
-{
-    return SSKEnvironment.shared.tsAccountManager;
-}
-
-// MARK: -
 
 - (SignalServiceAddress *)localAddress
 {
@@ -155,7 +146,8 @@
 
         NSMutableArray<TSIncomingMessage *> *messages = [NSMutableArray new];
         for (uint64_t i = 0; i < 10; i++) {
-            SignalServiceAddress *authorAddress = [[SignalServiceAddress alloc] initWithPhoneNumber:@"+fakephone"];
+            NSUInteger memberIdx = (i % thread.groupModel.groupMembers.count);
+            SignalServiceAddress *authorAddress = thread.groupModel.groupMembers[memberIdx];
             TSIncomingMessageBuilder *incomingMessageBuilder =
                 [TSIncomingMessageBuilder incomingMessageBuilderWithThread:thread messageBody:body];
             incomingMessageBuilder.timestamp = i + 1;

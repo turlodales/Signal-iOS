@@ -1,22 +1,22 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSUploadOperation.h"
-#import "MIMETypeUtil.h"
 #import "NSError+OWSOperation.h"
 #import "NSNotificationCenter+OWS.h"
-#import "OWSDispatch.h"
-#import "OWSError.h"
-#import "OWSOperation.h"
-#import "OWSRequestFactory.h"
-#import "OWSUploadV2.h"
-#import "SSKEnvironment.h"
-#import "TSAttachmentStream.h"
-#import "TSNetworkManager.h"
 #import <PromiseKit/AnyPromise.h>
 #import <SignalCoreKit/Cryptography.h>
+#import <SignalServiceKit/MIMETypeUtil.h>
+#import <SignalServiceKit/OWSDispatch.h>
+#import <SignalServiceKit/OWSError.h>
+#import <SignalServiceKit/OWSOperation.h>
+#import <SignalServiceKit/OWSRequestFactory.h>
+#import <SignalServiceKit/OWSUpload.h>
+#import <SignalServiceKit/OWSUploadOperation.h>
+#import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSAttachmentStream.h>
+#import <SignalServiceKit/TSNetworkManager.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -24,13 +24,12 @@ NSString *const kAttachmentUploadProgressNotification = @"kAttachmentUploadProgr
 NSString *const kAttachmentUploadProgressKey = @"kAttachmentUploadProgressKey";
 NSString *const kAttachmentUploadAttachmentIDKey = @"kAttachmentUploadAttachmentIDKey";
 
-// Use a slightly non-zero value to ensure that the progress
-// indicator shows up as quickly as possible.
-static const CGFloat kAttachmentUploadProgressTheta = 0.001f;
-
 @interface OWSUploadOperation ()
 
 @property (readonly, nonatomic) NSString *attachmentId;
+@property (readonly, nonatomic) BOOL canUseV3;
+@property (readonly, nonatomic) NSArray<NSString *> *messageIds;
+
 @property (nonatomic, nullable) TSAttachmentStream *completedUpload;
 
 @end
@@ -38,13 +37,6 @@ static const CGFloat kAttachmentUploadProgressTheta = 0.001f;
 #pragma mark -
 
 @implementation OWSUploadOperation
-
-#pragma mark - Dependencies
-
-- (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
 
 + (NSOperationQueue *)uploadQueue
 {
@@ -54,8 +46,8 @@ static const CGFloat kAttachmentUploadProgressTheta = 0.001f;
         operationQueue = [NSOperationQueue new];
         operationQueue.name = @"Uploads";
 
-        // TODO - stream uploads from file and raise this limit.
-        operationQueue.maxConcurrentOperationCount = 1;
+        // TODO: Tune this limit.
+        operationQueue.maxConcurrentOperationCount = 8;
     });
 
     return operationQueue;
@@ -64,6 +56,8 @@ static const CGFloat kAttachmentUploadProgressTheta = 0.001f;
 #pragma mark -
 
 - (instancetype)initWithAttachmentId:(NSString *)attachmentId
+                          messageIds:(NSArray<NSString *> *)messageIds
+                            canUseV3:(BOOL)canUseV3
 {
     self = [super init];
     if (!self) {
@@ -73,6 +67,8 @@ static const CGFloat kAttachmentUploadProgressTheta = 0.001f;
     self.remainingRetries = 4;
 
     _attachmentId = attachmentId;
+    _canUseV3 = canUseV3;
+    _messageIds = messageIds;
 
     return self;
 }
@@ -113,36 +109,47 @@ static const CGFloat kAttachmentUploadProgressTheta = 0.001f;
     
     [self fireNotificationWithProgress:0];
 
-    // TODO: Use attachment v3 if enabled by feature flag and fill in cdnKey and cdnNumber below.
-    OWSAttachmentUploadV2 *upload = [OWSAttachmentUploadV2 new];
+    OWSAttachmentUploadV2 *upload = [[OWSAttachmentUploadV2 alloc] initWithAttachmentStream:attachmentStream
+                                                                                   canUseV3:self.canUseV3];
     [BlurHash ensureBlurHashForAttachmentStream:attachmentStream]
         .catchInBackground(^{
             // Swallow these errors; blurHashes are strictly optional.
             OWSLogWarn(@"Error generating blurHash.");
         })
         .thenInBackground(^{
-            return [upload uploadAttachmentToService:attachmentStream
-                                       progressBlock:^(NSProgress *uploadProgress) {
-                                           [self fireNotificationWithProgress:uploadProgress.fractionCompleted];
-                                       }];
+            return [upload uploadWithProgressBlock:^(
+                NSProgress *uploadProgress) { [self fireNotificationWithProgress:uploadProgress.fractionCompleted]; }];
         })
         .thenInBackground(^{
-            [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+            DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
                 [attachmentStream updateAsUploadedWithEncryptionKey:upload.encryptionKey
                                                              digest:upload.digest
                                                            serverId:upload.serverId
-                                                             cdnKey:@""
-                                                          cdnNumber:0
+                                                             cdnKey:upload.cdnKey
+                                                          cdnNumber:upload.cdnNumber
                                                     uploadTimestamp:upload.uploadTimestamp
                                                         transaction:transaction];
-            }];
+
+                for (NSString *messageId in self.messageIds) {
+                    TSInteraction *_Nullable interaction = [TSInteraction anyFetchWithUniqueId:messageId
+                                                                                   transaction:transaction];
+                    if (interaction == nil) {
+                        OWSLogWarn(@"Missing interaction.");
+                        continue;
+                    }
+                    [self.databaseStorage touchInteraction:interaction shouldReindex:false transaction:transaction];
+                }
+            });
             self.completedUpload = attachmentStream;
             [self reportSuccess];
         })
         .catchInBackground(^(NSError *error) {
             OWSLogError(@"Failed: %@", error);
 
-            if (error.code == kCFURLErrorSecureConnectionFailed) {
+            if (HTTPStatusCodeForError(error).intValue == 413) {
+                OWSFailDebug(@"Request entity too large: %@.", @(attachmentStream.byteCount));
+                error.isRetryable = NO;
+            } else if (error.code == kCFURLErrorSecureConnectionFailed) {
                 error.isRetryable = NO;
             } else {
                 error.isRetryable = YES;
@@ -152,11 +159,10 @@ static const CGFloat kAttachmentUploadProgressTheta = 0.001f;
         });
 }
 
-- (void)fireNotificationWithProgress:(CGFloat)aProgress
+- (void)fireNotificationWithProgress:(CGFloat)progress
 {
     NSNotificationCenter *notificationCenter = [NSNotificationCenter defaultCenter];
 
-    CGFloat progress = MAX(kAttachmentUploadProgressTheta, aProgress);
     [notificationCenter postNotificationNameAsync:kAttachmentUploadProgressNotification
                                            object:nil
                                          userInfo:@{

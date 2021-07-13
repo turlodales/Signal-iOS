@@ -1,16 +1,36 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 @class AnyPromise;
 @class OWSAES256Key;
+@class OWSUserProfile;
 @class SDSAnyReadTransaction;
 @class SDSAnyWriteTransaction;
 @class SignalServiceAddress;
 @class TSThread;
-@class UserProfileReadCache;
 
 NS_ASSUME_NONNULL_BEGIN
+
+// This enum is serialized.
+typedef NS_ENUM(NSUInteger, UserProfileWriter) {
+    UserProfileWriter_LocalUser = 0,
+    UserProfileWriter_ProfileFetch,
+    UserProfileWriter_StorageService,
+    UserProfileWriter_SyncMessage,
+    UserProfileWriter_Registration,
+    UserProfileWriter_Linking,
+    UserProfileWriter_GroupState,
+    UserProfileWriter_Reupload,
+    UserProfileWriter_AvatarDownload,
+    UserProfileWriter_MetadataUpdate,
+    UserProfileWriter_Debugging,
+    UserProfileWriter_Tests,
+    UserProfileWriter_Unknown,
+    UserProfileWriter_SystemContactsFetch,
+};
+
+#pragma mark -
 
 @protocol ProfileManagerProtocol <NSObject>
 
@@ -31,25 +51,34 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (nullable NSData *)profileKeyDataForAddress:(SignalServiceAddress *)address
                                   transaction:(SDSAnyReadTransaction *)transaction;
+- (nullable OWSAES256Key *)profileKeyForAddress:(SignalServiceAddress *)address
+                                    transaction:(SDSAnyReadTransaction *)transaction;
 - (void)setProfileKeyData:(NSData *)profileKeyData
                forAddress:(SignalServiceAddress *)address
-      wasLocallyInitiated:(BOOL)wasLocallyInitiated
+        userProfileWriter:(UserProfileWriter)userProfileWriter
               transaction:(SDSAnyWriteTransaction *)transaction;
 
+- (BOOL)hasProfileAvatarData:(SignalServiceAddress *)address transaction:(SDSAnyReadTransaction *)transaction;
+- (nullable NSData *)profileAvatarDataForAddress:(SignalServiceAddress *)address
+                                     transaction:(SDSAnyReadTransaction *)transaction;
+- (nullable NSString *)profileAvatarURLPathForAddress:(SignalServiceAddress *)address
+                                          transaction:(SDSAnyReadTransaction *)transaction;
+
 - (void)fillInMissingProfileKeys:(NSDictionary<SignalServiceAddress *, NSData *> *)profileKeys
-    NS_SWIFT_NAME(fillInMissingProfileKeys(_:));
+               userProfileWriter:(UserProfileWriter)userProfileWriter
+    NS_SWIFT_NAME(fillInMissingProfileKeys(_:userProfileWriter:));
 
 - (void)setProfileGivenName:(nullable NSString *)firstName
                  familyName:(nullable NSString *)lastName
                  forAddress:(SignalServiceAddress *)address
-        wasLocallyInitiated:(BOOL)wasLocallyInitiated
+          userProfileWriter:(UserProfileWriter)userProfileWriter
                 transaction:(SDSAnyWriteTransaction *)transaction;
 
 - (void)setProfileGivenName:(nullable NSString *)firstName
                  familyName:(nullable NSString *)lastName
               avatarUrlPath:(nullable NSString *)avatarUrlPath
                  forAddress:(SignalServiceAddress *)address
-        wasLocallyInitiated:(BOOL)wasLocallyInitiated
+          userProfileWriter:(UserProfileWriter)userProfileWriter
                 transaction:(SDSAnyWriteTransaction *)transaction;
 
 - (BOOL)isUserInProfileWhitelist:(SignalServiceAddress *)address transaction:(SDSAnyReadTransaction *)transaction;
@@ -61,49 +90,74 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)addUserToProfileWhitelist:(SignalServiceAddress *)address;
 - (void)addUserToProfileWhitelist:(SignalServiceAddress *)address
-              wasLocallyInitiated:(BOOL)wasLocallyInitiated
+                userProfileWriter:(UserProfileWriter)userProfileWriter
                       transaction:(SDSAnyWriteTransaction *)transaction;
 
 - (void)addUsersToProfileWhitelist:(NSArray<SignalServiceAddress *> *)addresses;
+- (void)addUsersToProfileWhitelist:(NSArray<SignalServiceAddress *> *)addresses
+                 userProfileWriter:(UserProfileWriter)userProfileWriter
+                       transaction:(SDSAnyWriteTransaction *)transaction;
 
 - (void)removeUserFromProfileWhitelist:(SignalServiceAddress *)address;
 - (void)removeUserFromProfileWhitelist:(SignalServiceAddress *)address
-                   wasLocallyInitiated:(BOOL)wasLocallyInitiated
+                     userProfileWriter:(UserProfileWriter)userProfileWriter
                            transaction:(SDSAnyWriteTransaction *)transaction;
 
 - (BOOL)isGroupIdInProfileWhitelist:(NSData *)groupId transaction:(SDSAnyReadTransaction *)transaction;
 - (void)addGroupIdToProfileWhitelist:(NSData *)groupId;
 - (void)addGroupIdToProfileWhitelist:(NSData *)groupId
-                 wasLocallyInitiated:(BOOL)wasLocallyInitiated
+                   userProfileWriter:(UserProfileWriter)userProfileWriter
                          transaction:(SDSAnyWriteTransaction *)transaction;
 - (void)removeGroupIdFromProfileWhitelist:(NSData *)groupId;
 - (void)removeGroupIdFromProfileWhitelist:(NSData *)groupId
-                      wasLocallyInitiated:(BOOL)wasLocallyInitiated
+                        userProfileWriter:(UserProfileWriter)userProfileWriter
                               transaction:(SDSAnyWriteTransaction *)transaction;
 
-- (void)fetchAndUpdateLocalUsersProfile;
+- (void)fetchLocalUsersProfile;
 
 - (AnyPromise *)fetchLocalUsersProfilePromise;
 
-- (void)updateProfileForAddress:(SignalServiceAddress *)address;
+- (void)fetchProfileForAddress:(SignalServiceAddress *)address;
 
-- (AnyPromise *)updateProfileForAddressPromise:(SignalServiceAddress *)address;
-- (AnyPromise *)updateProfileForAddressPromise:(SignalServiceAddress *)address
-                                   mainAppOnly:(BOOL)mainAppOnly
-                              ignoreThrottling:(BOOL)ignoreThrottling;
+- (AnyPromise *)fetchProfileForAddressPromise:(SignalServiceAddress *)address;
+- (AnyPromise *)fetchProfileForAddressPromise:(SignalServiceAddress *)address
+                                  mainAppOnly:(BOOL)mainAppOnly
+                             ignoreThrottling:(BOOL)ignoreThrottling;
 
+// Profile fetches will make a best effort
+// to download and decrypt avatar data,
+// but optionalDecryptedAvatarData may
+// not be populated due to network failures,
+// decryption errors, service issues, etc.
 - (void)updateProfileForAddress:(SignalServiceAddress *)address
-           profileNameEncrypted:(nullable NSData *)profileNameEncrypted
+                      givenName:(nullable NSString *)givenName
+                     familyName:(nullable NSString *)familyName
+                            bio:(nullable NSString *)bio
+                       bioEmoji:(nullable NSString *)bioEmoji
                        username:(nullable NSString *)username
                   isUuidCapable:(BOOL)isUuidCapable
-                  avatarUrlPath:(nullable NSString *)avatarUrlPath;
+                  avatarUrlPath:(nullable NSString *)avatarUrlPath
+    optionalDecryptedAvatarData:(nullable NSData *)optionalDecryptedAvatarData
+                  lastFetchDate:(NSDate *)lastFetchDate
+              userProfileWriter:(UserProfileWriter)userProfileWriter;
 
 - (BOOL)recipientAddressIsUuidCapable:(SignalServiceAddress *)address transaction:(SDSAnyReadTransaction *)transaction;
 
 - (void)warmCaches;
 
-@property (nonatomic, readonly) UserProfileReadCache *userProfileReadCache;
 @property (nonatomic, readonly) BOOL hasProfileName;
+
+// This is an internal implementation detail and should only be used by OWSUserProfile.
+- (void)localProfileWasUpdated:(OWSUserProfile *)localUserProfile;
+
+- (AnyPromise *)downloadAndDecryptProfileAvatarForProfileAddress:(SignalServiceAddress *)profileAddress
+                                                   avatarUrlPath:(NSString *)avatarUrlPath
+                                                      profileKey:(OWSAES256Key *)profileKey;
+
+- (void)didSendOrReceiveMessageFromAddress:(SignalServiceAddress *)address
+                               transaction:(SDSAnyWriteTransaction *)transaction;
+
+- (void)reuploadLocalProfile;
 
 @end
 

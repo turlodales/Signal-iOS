@@ -1,20 +1,18 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "AppDelegate.h"
 #import "ConversationListViewController.h"
 #import "DebugLogger.h"
 #import "MainAppContext.h"
-#import "OWS2FASettingsViewController.h"
-#import "OWSBackup.h"
+#import "OWSDeviceProvisioningURLParser.h"
 #import "OWSOrphanDataCleaner.h"
 #import "OWSScreenLockUI.h"
 #import "Pastelog.h"
 #import "Signal-Swift.h"
 #import "SignalApp.h"
 #import "ViewControllerUtils.h"
-#import "YDBLegacyMigration.h"
 #import <Intents/Intents.h>
 #import <PromiseKit/AnyPromise.h>
 #import <SignalCoreKit/iOSVersions.h>
@@ -29,13 +27,12 @@
 #import <SignalServiceKit/AppReadiness.h>
 #import <SignalServiceKit/CallKitIdStore.h>
 #import <SignalServiceKit/DarwinNotificationCenter.h>
+#import <SignalServiceKit/MessageSender.h>
 #import <SignalServiceKit/OWS2FAManager.h>
-#import <SignalServiceKit/OWSBatchMessageProcessor.h>
 #import <SignalServiceKit/OWSDisappearingMessagesJob.h>
 #import <SignalServiceKit/OWSMath.h>
 #import <SignalServiceKit/OWSMessageManager.h>
-#import <SignalServiceKit/OWSMessageSender.h>
-#import <SignalServiceKit/OWSReadReceiptManager.h>
+#import <SignalServiceKit/OWSReceiptManager.h>
 #import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/StickerInfo.h>
@@ -52,6 +49,7 @@ NSString *const kURLSchemeSGNLKey = @"sgnl";
 static NSString *const kURLHostVerifyPrefix             = @"verify";
 static NSString *const kURLHostAddStickersPrefix = @"addstickers";
 NSString *const kURLHostTransferPrefix = @"transfer";
+NSString *const kURLHostLinkDevicePrefix = @"linkdevice";
 
 static NSTimeInterval launchStartedAt;
 
@@ -59,7 +57,8 @@ typedef NS_ENUM(NSUInteger, LaunchFailure) {
     LaunchFailure_None,
     LaunchFailure_CouldNotLoadDatabase,
     LaunchFailure_UnknownDatabaseVersion,
-    LaunchFailure_CouldNotRestoreTransferredData
+    LaunchFailure_CouldNotRestoreTransferredData,
+    LaunchFailure_DatabaseUnrecoverablyCorrupted
 };
 
 NSString *NSStringForLaunchFailure(LaunchFailure launchFailure);
@@ -74,6 +73,8 @@ NSString *NSStringForLaunchFailure(LaunchFailure launchFailure)
             return @"LaunchFailure_UnknownDatabaseVersion";
         case LaunchFailure_CouldNotRestoreTransferredData:
             return @"LaunchFailure_CouldNotRestoreTransferredData";
+        case LaunchFailure_DatabaseUnrecoverablyCorrupted:
+            return @"LaunchFailure_DatabaseUnrecoverablyCorrupted";
     }
 }
 
@@ -86,7 +87,7 @@ void uncaughtExceptionHandler(NSException *exception)
     OWSLogError(@"name: %@", exception.name);
     OWSLogError(@"reason: %@", exception.reason);
     OWSLogError(@"userInfo: %@", exception.userInfo);
-    OWSLogError(@"exception.callStackSymbols: %@", exception.callStackSymbols);
+    OWSLogError(@"callStackSymbols: %@", exception.callStackSymbols);
     OWSLogFlush();
 }
 #endif
@@ -103,117 +104,6 @@ void uncaughtExceptionHandler(NSException *exception)
 @implementation AppDelegate
 
 @synthesize window = _window;
-
-#pragma mark - Dependencies
-
-- (OWSProfileManager *)profileManager
-{
-    return [OWSProfileManager sharedManager];
-}
-
-- (OWSReadReceiptManager *)readReceiptManager
-{
-    return [OWSReadReceiptManager sharedManager];
-}
-
-- (id<OWSUDManager>)udManager
-{
-    OWSAssertDebug(SSKEnvironment.shared.udManager);
-
-    return SSKEnvironment.shared.udManager;
-}
-
-- (nullable OWSPrimaryStorage *)primaryStorage
-{
-    return SSKEnvironment.shared.primaryStorage;
-}
-
-- (PushRegistrationManager *)pushRegistrationManager
-{
-    OWSAssertDebug(AppEnvironment.shared.pushRegistrationManager);
-
-    return AppEnvironment.shared.pushRegistrationManager;
-}
-
-- (TSAccountManager *)tsAccountManager
-{
-    OWSAssertDebug(SSKEnvironment.shared.tsAccountManager);
-
-    return SSKEnvironment.shared.tsAccountManager;
-}
-
-- (OWSDisappearingMessagesJob *)disappearingMessagesJob
-{
-    OWSAssertDebug(SSKEnvironment.shared.disappearingMessagesJob);
-
-    return SSKEnvironment.shared.disappearingMessagesJob;
-}
-
-- (TSSocketManager *)socketManager
-{
-    OWSAssertDebug(SSKEnvironment.shared.socketManager);
-
-    return SSKEnvironment.shared.socketManager;
-}
-
-- (OWSMessageManager *)messageManager
-{
-    OWSAssertDebug(SSKEnvironment.shared.messageManager);
-
-    return SSKEnvironment.shared.messageManager;
-}
-
-- (OWSWindowManager *)windowManager
-{
-    return Environment.shared.windowManager;
-}
-
-- (OWSBackup *)backup
-{
-    return AppEnvironment.shared.backup;
-}
-
-- (OWSNotificationPresenter *)notificationPresenter
-{
-    return AppEnvironment.shared.notificationPresenter;
-}
-
-- (OWSUserNotificationActionHandler *)userNotificationActionHandler
-{
-    return AppEnvironment.shared.userNotificationActionHandler;
-}
-
-- (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
-
-- (id<SyncManagerProtocol>)syncManager
-{
-    OWSAssertDebug(SSKEnvironment.shared.syncManager);
-
-    return SSKEnvironment.shared.syncManager;
-}
-
-- (StorageCoordinator *)storageCoordinator
-{
-    return SSKEnvironment.shared.storageCoordinator;
-}
-
-- (LaunchJobs *)launchJobs
-{
-    return Environment.shared.launchJobs;
-}
-
-- (nullable MessageFetcherJob *)messageFetcherJob
-{
-    return SSKEnvironment.shared.messageFetcherJob;
-}
-
-- (DeviceService *)deviceService
-{
-    return DeviceService.shared;
-}
 
 #pragma mark -
 
@@ -237,6 +127,8 @@ void uncaughtExceptionHandler(NSException *exception)
 - (void)applicationWillTerminate:(UIApplication *)application
 {
     OWSLogInfo(@"applicationWillTerminate.");
+
+    [SignalApp.shared applicationWillTerminate];
 
     [DDLog flushLog];
 }
@@ -266,6 +158,12 @@ void uncaughtExceptionHandler(NSException *exception)
     if (SSKDebugFlags.audibleErrorLogging) {
         [DebugLogger.sharedLogger enableErrorReporting];
     }
+    [DebugLogger configureSwiftLogging];
+
+#ifdef DEBUG
+    [SSKFeatureFlags logFlags];
+    [SSKDebugFlags logFlags];
+#endif
 
     OWSLogWarn(@"application: didFinishLaunchingWithOptions.");
     [Cryptography seedRandom];
@@ -281,24 +179,24 @@ void uncaughtExceptionHandler(NSException *exception)
                                deviceTransferRestoreFailed = ![DeviceTransferService.shared launchCleanup];
                            }];
 
-    // XXX - careful when moving this. It must happen before we load YDB and/or GRDB.
+    // XXX - careful when moving this. It must happen before we load GRDB.
     [self verifyDBKeysAvailableBeforeBackgroundLaunch];
 
     // We need to do this _after_ we set up logging, when the keychain is unlocked,
-    // but before we access YapDatabase, files on disk, or NSUserDefaults
+    // but before we access the database, files on disk, or NSUserDefaults.
     NSError *_Nullable launchError = nil;
     LaunchFailure launchFailure = LaunchFailure_None;
 
-    BOOL isYdbNotReady = ![YDBLegacyMigration ensureIsYDBReadyForAppExtensions:&launchError];
     if (deviceTransferRestoreFailed) {
         launchFailure = LaunchFailure_CouldNotRestoreTransferredData;
-    } else if (isYdbNotReady || launchError != nil) {
+    } else if (launchError != nil) {
         launchFailure = LaunchFailure_CouldNotLoadDatabase;
     } else if (StorageCoordinator.hasInvalidDatabaseVersion) {
         // Prevent:
-        // * Users who have used GRDB revert to using YDB.
         // * Users with an unknown GRDB schema revert to using an earlier GRDB schema.
         launchFailure = LaunchFailure_UnknownDatabaseVersion;
+    } else if ([SSKPreferences hasGrdbDatabaseCorruption]) {
+        launchFailure = LaunchFailure_DatabaseUnrecoverablyCorrupted;
     }
     if (launchFailure != LaunchFailure_None) {
         OWSLogInfo(@"application: didFinishLaunchingWithOptions failed.");
@@ -307,24 +205,9 @@ void uncaughtExceptionHandler(NSException *exception)
         return YES;
     }
 
-#if RELEASE
-    // ensureIsYDBReadyForAppExtensions may change the state of the logging
-    // preference (due to [NSUserDefaults migrateToSharedUserDefaults]), so honor
-    // that change if necessary.
-    if (isLoggingEnabled && !OWSPreferences.isLoggingEnabled) {
-        [DebugLogger.sharedLogger disableFileLogging];
-    }
-#endif
-
-    [AppVersion sharedInstance];
+    [AppVersion shared];
 
     [self setupNSEInteroperation];
-
-    // Prevent the device from sleeping during database view async registration
-    // (e.g. long database upgrades).
-    //
-    // This block will be cleared in storageIsReady.
-    [DeviceSleepManager.sharedInstance addBlockWithBlockObject:self];
 
     if (CurrentAppContext().isRunningTests) {
         return YES;
@@ -334,12 +217,17 @@ void uncaughtExceptionHandler(NSException *exception)
         setupEnvironmentWithAppSpecificSingletonBlock:^{
             // Create AppEnvironment.
             [AppEnvironment.shared setup];
-            [SignalApp.sharedApp setup];
+            [SignalApp.shared setup];
         }
-        migrationCompletion:^{
+        migrationCompletion:^(NSError *_Nullable error) {
             OWSAssertIsOnMainThread();
 
-            [self versionMigrationsDidComplete];
+            if (error != nil) {
+                OWSFailDebug(@"Error: %@", error);
+                [self showUIForLaunchFailure:LaunchFailure_DatabaseUnrecoverablyCorrupted];
+            } else {
+                [self versionMigrationsDidComplete];
+            }
         }];
 
     [UIUtil setupSignalAppearence];
@@ -364,10 +252,10 @@ void uncaughtExceptionHandler(NSException *exception)
         [self processRemoteNotification:remoteNotification completion:nil];
     }
 
-    [OWSScreenLockUI.sharedManager setupWithRootWindow:self.window];
-    [[OWSWindowManager sharedManager] setupWithRootWindow:self.window
-                                     screenBlockingWindow:OWSScreenLockUI.sharedManager.screenBlockingWindow];
-    [OWSScreenLockUI.sharedManager startObserving];
+    [OWSScreenLockUI.shared setupWithRootWindow:self.window];
+    [[OWSWindowManager shared] setupWithRootWindow:self.window
+                              screenBlockingWindow:OWSScreenLockUI.shared.screenBlockingWindow];
+    [OWSScreenLockUI.shared startObserving];
 
     [[NSNotificationCenter defaultCenter] addObserver:self
                                              selector:@selector(storageIsReady)
@@ -382,6 +270,11 @@ void uncaughtExceptionHandler(NSException *exception)
                                                  name:NSNotificationName_2FAStateDidChange
                                                object:nil];
 
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(spamChallenge:)
+                                                 name:SpamChallengeResolver.NeedsCaptchaNotification
+                                               object:nil];
+
     OWSLogInfo(@"application: didFinishLaunchingWithOptions completed.");
 
     OWSLogInfo(@"launchOptions: %@.", launchOptions);
@@ -389,6 +282,12 @@ void uncaughtExceptionHandler(NSException *exception)
     [OWSAnalytics appLaunchDidBegin];
 
     return YES;
+}
+
+- (void)spamChallenge:(NSNotification *)notification
+{
+    UIViewController *fromVC = UIApplication.sharedApplication.frontmostViewController;
+    [SpamCaptchaViewController presentActionSheetFrom:fromVC];
 }
 
 /**
@@ -400,20 +299,7 @@ void uncaughtExceptionHandler(NSException *exception)
         return;
     }
 
-    // someone currently using yap
-    if (StorageCoordinator.hasYdbFile && !SSKPreferences.isYdbMigrated
-        && OWSPrimaryStorage.isDatabasePasswordAccessible) {
-        return;
-    }
-
-    // someone who migrated from yap to grdb needs the GRDB spec
-    if (SSKPreferences.isYdbMigrated && GRDBDatabaseStorageAdapter.isKeyAccessible) {
-        return;
-    }
-
-    // someone who never used yap needs the GRDB spec
-    if (!StorageCoordinator.hasYdbFile && StorageCoordinator.hasGrdbFile
-        && GRDBDatabaseStorageAdapter.isKeyAccessible) {
+    if (StorageCoordinator.hasGrdbFile && GRDBDatabaseStorageAdapter.isKeyAccessible) {
         return;
     }
 
@@ -445,9 +331,12 @@ void uncaughtExceptionHandler(NSException *exception)
     self.didAppLaunchFail = YES;
 
     // We perform a subset of the [application:didFinishLaunchingWithOptions:].
-    [AppVersion sharedInstance];
+    [AppVersion shared];
 
-    self.window = [OWSWindow new];
+    if (self.window == nil) {
+        self.window = [OWSWindow new];
+        CurrentAppContext().mainWindow = self.window;
+    }
 
     // Show the launch screen
     UIViewController *viewController = [[UIStoryboard storyboardWithName:@"Launch Screen"
@@ -460,6 +349,8 @@ void uncaughtExceptionHandler(NSException *exception)
     NSString *alertMessage
         = NSLocalizedString(@"APP_LAUNCH_FAILURE_ALERT_MESSAGE", @"Message for the 'app launch failed' alert.");
     switch (launchFailure) {
+        case LaunchFailure_DatabaseUnrecoverablyCorrupted:
+            // Fallthrough
         case LaunchFailure_CouldNotLoadDatabase:
             alertTitle = NSLocalizedString(@"APP_LAUNCH_FAILURE_COULD_NOT_LOAD_DATABASE",
                 @"Error indicating that the app could not launch because the database could not be loaded.");
@@ -553,13 +444,15 @@ void uncaughtExceptionHandler(NSException *exception)
             return NO;
         }
         return [self tryToShowStickerPackView:stickerPackInfo];
+    } else if ([GroupManager isPossibleGroupInviteLink:url]) {
+        return [self tryToShowGroupInviteLinkUI:url];
     } else if ([url.scheme isEqualToString:kURLSchemeSGNLKey]) {
         if ([url.host hasPrefix:kURLHostVerifyPrefix] && ![self.tsAccountManager isRegistered]) {
             if (!AppReadiness.isAppReady) {
                 OWSFailDebug(@"Ignoring URL; app is not ready.");
                 return NO;
             }
-            return [SignalApp.sharedApp receivedVerificationCode:[url.path substringFromIndex:1]];
+            return [SignalApp.shared receivedVerificationCode:[url.path substringFromIndex:1]];
         } else if ([url.host hasPrefix:kURLHostAddStickersPrefix] && [self.tsAccountManager isRegistered]) {
             StickerPackInfo *_Nullable stickerPackInfo = [self parseAddStickersUrl:url];
             if (stickerPackInfo == nil) {
@@ -567,6 +460,14 @@ void uncaughtExceptionHandler(NSException *exception)
                 return NO;
             }
             return [self tryToShowStickerPackView:stickerPackInfo];
+        } else if ([url.host hasPrefix:kURLHostLinkDevicePrefix] && [self.tsAccountManager isRegistered]) {
+            OWSDeviceProvisioningURLParser *parser =
+                [[OWSDeviceProvisioningURLParser alloc] initWithProvisioningURL:url.absoluteString];
+            if (!parser.isValid) {
+                OWSFailDebug(@"Invalid URL: %@", url);
+                return NO;
+            }
+            return [self tryToShowLinkDeviceViewWithParser:parser];
         } else {
             OWSLogVerbose(@"Invalid URL: %@", url);
             OWSFailDebug(@"Unknown URL host: %@", url.host);
@@ -601,7 +502,7 @@ void uncaughtExceptionHandler(NSException *exception)
 - (BOOL)tryToShowStickerPackView:(StickerPackInfo *)stickerPackInfo
 {
     OWSAssertDebug(!self.didAppLaunchFail);
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
         if (!self.tsAccountManager.isRegistered) {
             OWSFailDebug(@"Ignoring sticker pack URL; not registered.");
             return;
@@ -611,14 +512,81 @@ void uncaughtExceptionHandler(NSException *exception)
             [[StickerPackViewController alloc] initWithStickerPackInfo:stickerPackInfo];
         UIViewController *rootViewController = self.window.rootViewController;
         if (rootViewController.presentedViewController) {
-            [rootViewController dismissViewControllerAnimated:NO
-                                                   completion:^{
-                                                       [packView presentFrom:rootViewController animated:NO];
-                                                   }];
+            [rootViewController
+                dismissViewControllerAnimated:NO
+                                   completion:^{ [packView presentFrom:rootViewController animated:NO]; }];
         } else {
             [packView presentFrom:rootViewController animated:NO];
         }
-    }];
+    });
+    return YES;
+}
+
+- (BOOL)tryToShowLinkDeviceViewWithParser:(OWSDeviceProvisioningURLParser *)parser
+{
+    OWSAssertDebug(!self.didAppLaunchFail);
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
+        if (!self.tsAccountManager.isRegistered) {
+            OWSFailDebug(@"Ignoring linked device URL; not registered.");
+            return;
+        }
+
+        UINavigationController *navController = [AppSettingsViewController inModalNavigationController];
+        NSMutableArray<UIViewController *> *viewControllers = [navController.viewControllers mutableCopy];
+
+        LinkedDevicesTableViewController *linkedDevicesVC = [LinkedDevicesTableViewController new];
+        [viewControllers addObject:linkedDevicesVC];
+
+        OWSLinkDeviceViewController *linkDeviceVC = [OWSLinkDeviceViewController new];
+        [viewControllers addObject:linkDeviceVC];
+
+        linkDeviceVC.delegate = linkedDevicesVC;
+
+        [navController setViewControllers:viewControllers animated:NO];
+
+        UIViewController *rootViewController = self.window.rootViewController;
+        if (rootViewController.presentedViewController) {
+            [rootViewController dismissViewControllerAnimated:NO
+                                                   completion:^{
+                                                       [rootViewController presentFormSheetViewController:navController
+                                                                                                 animated:NO
+                                                                                               completion:^ {}];
+                                                   }];
+        } else {
+            [rootViewController presentFormSheetViewController:navController animated:NO completion:^ {}];
+        }
+
+        [linkDeviceVC provisionWithConfirmationWithParser:parser];
+    });
+    return YES;
+}
+
+- (BOOL)tryToShowGroupInviteLinkUI:(NSURL *)url
+{
+    OWSAssertDebug(!self.didAppLaunchFail);
+
+    if (AppReadiness.isAppReady && !self.tsAccountManager.isRegistered) {
+        OWSFailDebug(@"Ignoring URL; not registered.");
+        return NO;
+    }
+
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
+        if (!self.tsAccountManager.isRegistered) {
+            OWSFailDebug(@"Ignoring sticker pack URL; not registered.");
+            return;
+        }
+
+        UIViewController *rootViewController = self.window.rootViewController;
+        if (rootViewController.presentedViewController) {
+            [rootViewController dismissViewControllerAnimated:NO
+                                                   completion:^{
+                                                       [GroupInviteLinksUI openGroupInviteLink:url
+                                                                            fromViewController:rootViewController];
+                                                   }];
+        } else {
+            [GroupInviteLinksUI openGroupInviteLink:url fromViewController:rootViewController];
+        }
+    });
     return YES;
 }
 
@@ -635,11 +603,7 @@ void uncaughtExceptionHandler(NSException *exception)
         return;
     }
 
-    [SignalApp.sharedApp ensureRootViewController:launchStartedAt];
-
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
-        [self handleActivation];
-    }];
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{ [self handleActivation]; });
 
     // Clear all notifications whenever we become active.
     // When opening the app from a notification,
@@ -658,16 +622,16 @@ void uncaughtExceptionHandler(NSException *exception)
 
 - (void)enableBackgroundRefreshIfNecessary
 {
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
-        if (OWS2FAManager.sharedManager.is2FAEnabled && [self.tsAccountManager isRegisteredAndReady]) {
-            // Ping server once a day to keep-alive 2FA clients.
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
+        if (OWS2FAManager.shared.isRegistrationLockEnabled && [self.tsAccountManager isRegisteredAndReady]) {
+            // Ping server once a day to keep-alive reglock clients.
             const NSTimeInterval kBackgroundRefreshInterval = 24 * 60 * 60;
             [[UIApplication sharedApplication] setMinimumBackgroundFetchInterval:kBackgroundRefreshInterval];
         } else {
             [[UIApplication sharedApplication]
                 setMinimumBackgroundFetchInterval:UIApplicationBackgroundFetchIntervalNever];
         }
-    }];
+    });
 }
 
 - (void)handleActivation
@@ -712,7 +676,7 @@ void uncaughtExceptionHandler(NSException *exception)
         // Avoid blocking app launch by putting all further possible DB access in async block
         dispatch_async(dispatch_get_main_queue(), ^{
             [self.socketManager requestSocketOpen];
-            [Environment.shared.contactsManager fetchSystemContactsOnceIfAlreadyAuthorized];
+            [Environment.shared.contactsManagerImpl fetchSystemContactsOnceIfAlreadyAuthorized];
             [self.messageFetcherJob runObjc];
 
             if (![UIApplication sharedApplication].isRegisteredForRemoteNotifications) {
@@ -721,24 +685,7 @@ void uncaughtExceptionHandler(NSException *exception)
                 // usually sufficient, but e.g. on iOS11, users who have disabled "Allow Notifications" and disabled
                 // "Background App Refresh" will not be able to obtain an APN token. Enabling those settings does not
                 // restart the app, so we check every activation for users who haven't yet registered.
-                [OWSSyncPushTokensJob runWithAccountManager:AppEnvironment.shared.accountManager
-                                                preferences:Environment.shared.preferences];
-            }
-
-            OnboardingController *onboardingController = [OnboardingController new];
-            if (onboardingController.isComplete && [OWS2FAManager sharedManager].isDueForV1Reminder) {
-                UIViewController *frontmostViewController = UIApplication.sharedApplication.frontmostViewController;
-                OWSAssertDebug(frontmostViewController);
-
-                UIViewController *reminderVC = [OWS2FAReminderViewController wrappedInNavController];
-                reminderVC.modalPresentationStyle = UIModalPresentationFullScreen;
-
-                if ([frontmostViewController isKindOfClass:[OWS2FAReminderViewController class]]) {
-                    // We're already presenting this
-                    return;
-                }
-
-                [frontmostViewController presentViewController:reminderVC animated:YES completion:nil];
+                [OWSSyncPushTokensJob run];
             }
         });
     }
@@ -766,10 +713,10 @@ void uncaughtExceptionHandler(NSException *exception)
 {
     OWSAssertIsOnMainThread();
 
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
         [AppEnvironment.shared.notificationPresenter clearAllNotifications];
-        [OWSMessageUtils.sharedManager updateApplicationBadgeCount];
-    }];
+        [OWSMessageUtils.shared updateApplicationBadgeCount];
+    });
 }
 
 - (void)application:(UIApplication *)application
@@ -783,13 +730,13 @@ void uncaughtExceptionHandler(NSException *exception)
         return;
     }
 
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
         if (![self.tsAccountManager isRegisteredAndReady]) {
             ActionSheetController *controller = [[ActionSheetController alloc]
                 initWithTitle:NSLocalizedString(@"REGISTER_CONTACTS_WELCOME", nil)
                       message:NSLocalizedString(@"REGISTRATION_RESTRICTED_MESSAGE", nil)];
 
-            [controller addAction:[[ActionSheetAction alloc] initWithTitle:NSLocalizedString(@"OK", nil)
+            [controller addAction:[[ActionSheetAction alloc] initWithTitle:CommonStrings.okButton
                                                                      style:ActionSheetActionStyleDefault
                                                                    handler:^(ActionSheetAction *_Nonnull action) {
 
@@ -803,10 +750,10 @@ void uncaughtExceptionHandler(NSException *exception)
             return;
         }
 
-        [SignalApp.sharedApp showNewConversationView];
+        [SignalApp.shared showNewConversationView];
 
         completionHandler(YES);
-    }];
+    });
 }
 
 /**
@@ -831,7 +778,33 @@ void uncaughtExceptionHandler(NSException *exception)
         return NO;
     }
 
-    if ([userActivity.activityType isEqualToString:@"INStartVideoCallIntent"]) {
+    if ([userActivity.activityType isEqualToString:@"INSendMessageIntent"]) {
+        OWSLogInfo(@"got send message intent");
+
+        INInteraction *interaction = [userActivity interaction];
+        INIntent *intent = interaction.intent;
+
+        if (![intent isKindOfClass:[INSendMessageIntent class]]) {
+            OWSFailDebug(@"unexpected class for send message intent: %@", intent);
+            return NO;
+        }
+        INSendMessageIntent *sendMessageIntent = (INSendMessageIntent *)intent;
+        NSString *_Nullable threadUniqueId = sendMessageIntent.conversationIdentifier;
+        if (!threadUniqueId) {
+            OWSFailDebug(@"Missing thread id for INSendMessageIntent");
+            return NO;
+        }
+
+        AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
+            if (![self.tsAccountManager isRegisteredAndReady]) {
+                OWSLogInfo(@"Ignoring user activity; app not ready.");
+                return;
+            }
+
+            [SignalApp.shared presentConversationAndScrollToFirstUnreadMessageForThreadId:threadUniqueId animated:NO];
+        });
+        return YES;
+    } else if ([userActivity.activityType isEqualToString:@"INStartVideoCallIntent"]) {
         OWSLogInfo(@"got start video call intent");
 
         INInteraction *interaction = [userActivity interaction];
@@ -848,14 +821,9 @@ void uncaughtExceptionHandler(NSException *exception)
             return NO;
         }
 
-        [AppReadiness runNowOrWhenAppDidBecomeReady:^{
+        AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
             if (![self.tsAccountManager isRegisteredAndReady]) {
                 OWSLogInfo(@"Ignoring user activity; app not ready.");
-                return;
-            }
-
-            if (!SSKFeatureFlags.calling) {
-                OWSLogInfo(@"Ignoring unsupported activity.");
                 return;
             }
 
@@ -873,10 +841,12 @@ void uncaughtExceptionHandler(NSException *exception)
             // * It can be received if the user taps the "video" button for a contact in the
             //   contacts app.  If so, the correct response is to try to initiate a new call
             //   to that user - unless there already is another call in progress.
-            if (AppEnvironment.shared.callService.currentCall != nil) {
-                if ([address isEqualToAddress:AppEnvironment.shared.callService.currentCall.remoteAddress]) {
+            SignalCall *_Nullable currentCall = AppEnvironment.shared.callService.currentCall;
+            if (currentCall != nil) {
+                if (currentCall.isIndividualCall &&
+                    [address isEqualToAddress:currentCall.individualCall.remoteAddress]) {
                     OWSLogWarn(@"trying to upgrade ongoing call to video.");
-                    [AppEnvironment.shared.callService handleCallKitStartVideo];
+                    [AppEnvironment.shared.callService.individualCallService handleCallKitStartVideo];
                     return;
                 } else {
                     OWSLogWarn(@"ignoring INStartVideoCallIntent due to ongoing WebRTC call with another party.");
@@ -884,10 +854,11 @@ void uncaughtExceptionHandler(NSException *exception)
                 }
             }
 
-            OutboundCallInitiator *outboundCallInitiator = AppEnvironment.shared.outboundCallInitiator;
-            OWSAssertDebug(outboundCallInitiator);
-            [outboundCallInitiator initiateCallWithAddress:address];
-        }];
+            OutboundIndividualCallInitiator *outboundIndividualCallInitiator
+                = AppEnvironment.shared.outboundIndividualCallInitiator;
+            OWSAssertDebug(outboundIndividualCallInitiator);
+            [outboundIndividualCallInitiator initiateCallWithAddress:address];
+        });
         return YES;
     } else if ([userActivity.activityType isEqualToString:@"INStartAudioCallIntent"]) {
         OWSLogInfo(@"got start audio call intent");
@@ -906,14 +877,9 @@ void uncaughtExceptionHandler(NSException *exception)
             return NO;
         }
 
-        [AppReadiness runNowOrWhenAppDidBecomeReady:^{
+        AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
             if (![self.tsAccountManager isRegisteredAndReady]) {
                 OWSLogInfo(@"Ignoring user activity; app not ready.");
-                return;
-            }
-
-            if (!SSKFeatureFlags.calling) {
-                OWSLogInfo(@"Ignoring unsupported activity.");
                 return;
             }
 
@@ -928,10 +894,11 @@ void uncaughtExceptionHandler(NSException *exception)
                 return;
             }
 
-            OutboundCallInitiator *outboundCallInitiator = AppEnvironment.shared.outboundCallInitiator;
-            OWSAssertDebug(outboundCallInitiator);
-            [outboundCallInitiator initiateCallWithAddress:address];
-        }];
+            OutboundIndividualCallInitiator *outboundIndividualCallInitiator
+                = AppEnvironment.shared.outboundIndividualCallInitiator;
+            OWSAssertDebug(outboundIndividualCallInitiator);
+            [outboundIndividualCallInitiator initiateCallWithAddress:address];
+        });
         return YES;
 
     // On iOS 13, all calls triggered from contacts use this intent
@@ -958,14 +925,9 @@ void uncaughtExceptionHandler(NSException *exception)
             return NO;
         }
 
-        [AppReadiness runNowOrWhenAppDidBecomeReady:^{
+        AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
             if (![self.tsAccountManager isRegisteredAndReady]) {
                 OWSLogInfo(@"Ignoring user activity; app not ready.");
-                return;
-            }
-
-            if (!SSKFeatureFlags.calling) {
-                OWSLogInfo(@"Ignoring unsupported activity.");
                 return;
             }
 
@@ -980,10 +942,11 @@ void uncaughtExceptionHandler(NSException *exception)
                 return;
             }
 
-            OutboundCallInitiator *outboundCallInitiator = AppEnvironment.shared.outboundCallInitiator;
-            OWSAssertDebug(outboundCallInitiator);
-            [outboundCallInitiator initiateCallWithAddress:address];
-        }];
+            OutboundIndividualCallInitiator *outboundIndividualCallInitiator
+                = AppEnvironment.shared.outboundIndividualCallInitiator;
+            OWSAssertDebug(outboundIndividualCallInitiator);
+            [outboundIndividualCallInitiator initiateCallWithAddress:address];
+        });
         return YES;
     } else if ([userActivity.activityType isEqualToString:NSUserActivityTypeBrowsingWeb]) {
         if (userActivity.webpageURL == nil) {
@@ -1076,16 +1039,6 @@ void uncaughtExceptionHandler(NSException *exception)
 
 #pragma mark Push Notifications Delegate Methods
 
-- (void)application:(UIApplication *)application didReceiveRemoteNotification:(NSDictionary *)userInfo {
-    OWSAssertIsOnMainThread();
-
-    if (SSKDebugFlags.verboseNotificationLogging) {
-        OWSLogInfo(@"didReceiveRemoteNotification w/o. completion.");
-    }
-
-    [self processRemoteNotification:userInfo completion:nil];
-}
-
 - (void)application:(UIApplication *)application
     didReceiveRemoteNotification:(NSDictionary *)userInfo
           fetchCompletionHandler:(void (^)(UIBackgroundFetchResult))completionHandler {
@@ -1117,20 +1070,22 @@ void uncaughtExceptionHandler(NSException *exception)
         return;
     }
 
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
-        [self.messageFetcherJob runObjc];
-
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
+        BOOL isSilentPush = [self handleSilentPushContent:userInfo];
+        if (!isSilentPush) {
+            [self.messageFetcherJob runObjc];
+        }
         if (completion != nil) {
             completion();
         }
-    }];
+    });
 }
 
 - (void)application:(UIApplication *)application
     performFetchWithCompletionHandler:(void (^)(UIBackgroundFetchResult result))completionHandler
 {
     OWSLogInfo(@"performing background fetch");
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
         [self.messageFetcherJob runObjc].then(^{
             // HACK: Call completion handler after n seconds.
             //
@@ -1144,7 +1099,7 @@ void uncaughtExceptionHandler(NSException *exception)
                 completionHandler(UIBackgroundFetchResultNewData);
             });
         });
-    }];
+    });
 }
 
 - (void)versionMigrationsDidComplete
@@ -1169,6 +1124,11 @@ void uncaughtExceptionHandler(NSException *exception)
 - (void)checkIfAppIsReady
 {
     OWSAssertIsOnMainThread();
+
+    // If launch failed, the app will never be ready.
+    if (self.didAppLaunchFail) {
+        return;
+    }
 
     // App isn't ready until storage is ready AND all version migrations are complete.
     if (!self.areVersionMigrationsComplete) {
@@ -1202,24 +1162,21 @@ void uncaughtExceptionHandler(NSException *exception)
         return;
     }
 
+    // If user is missing profile name, redirect to onboarding flow.
+    if (!SSKEnvironment.shared.profileManager.hasProfileName) {
+        DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
+            [self.tsAccountManager setIsOnboarded:NO transaction:transaction];
+        });
+    }
+
     if ([self.tsAccountManager isRegistered]) {
         OWSLogInfo(@"localAddress: %@", TSAccountManager.localAddress);
 
-        // Fetch messages as soon as possible after launching. In particular, when
-        // launching from the background, without this, we end up waiting some extra
-        // seconds before receiving an actionable push notification.
-        [self.messageFetcherJob runObjc];
-
         // This should happen at any launch, background or foreground.
-        [OWSSyncPushTokensJob runWithAccountManager:AppEnvironment.shared.accountManager
-                                        preferences:Environment.shared.preferences];
+        [OWSSyncPushTokensJob run];
     }
 
-    [DeviceSleepManager.sharedInstance removeBlockWithBlockObject:self];
-
-    [AppVersion.sharedInstance mainAppLaunchDidComplete];
-
-    [Environment.shared.audioSession setup];
+    [AppVersion.shared mainAppLaunchDidComplete];
 
     if (!Environment.shared.preferences.hasGeneratedThumbnails) {
         [self.databaseStorage
@@ -1235,26 +1192,7 @@ void uncaughtExceptionHandler(NSException *exception)
             }];
     }
 
-#ifdef DEBUG
-    // A bug in orphan cleanup could be disastrous so let's only
-    // run it in DEBUG builds for a few releases.
-    //
-    // TODO: Release to production once we have analytics.
-    // TODO: Orphan cleanup is somewhat expensive - not least in doing a bunch
-    //       of disk access.  We might want to only run it "once per version"
-    //       or something like that in production.
-    [OWSOrphanDataCleaner auditOnLaunchIfNecessary];
-#endif
-
-    [self.profileManager fetchAndUpdateLocalUsersProfile];
-
-    [SignalApp.sharedApp ensureRootViewController:launchStartedAt];
-
-    [self.messageManager startObserving];
-
-    [self.udManager setup];
-
-    [ViewOnceMessages appDidBecomeReady];
+    [SignalApp.shared ensureRootViewController:launchStartedAt];
 }
 
 - (void)registrationStateDidChange
@@ -1265,23 +1203,18 @@ void uncaughtExceptionHandler(NSException *exception)
 
     [self enableBackgroundRefreshIfNecessary];
 
-    if ([self.tsAccountManager isRegistered]) {
-        OWSLogInfo(@"localAddress: %@", [self.tsAccountManager localAddress]);
+    if ([self.tsAccountManager isRegisteredAndReady]) {
+        AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
+            OWSLogInfo(@"localAddress: %@", [self.tsAccountManager localAddress]);
 
-        [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
-            [ExperienceUpgradeFinder markAllCompleteForNewUserWithTransaction:transaction.unwrapGrdbWrite];
-        }];
+            DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
+                [ExperienceUpgradeFinder markAllCompleteForNewUserWithTransaction:transaction.unwrapGrdbWrite];
+            });
 
-        // Start running the disappearing messages job in case the newly registered user
-        // enables this feature
-        [self.disappearingMessagesJob startIfNecessary];
-
-        if (!SSKFeatureFlags.answerCallsOnSecondaryDevice) {
-            // Currently, we only build the CallUIAdapter for the primary device, which we can't determine
-            // until *after* the user has registered. Once we create calling on all devices, we can
-            // create the callUIAdapter unconditionally, on all devices, and get rid of this.
-            [AppEnvironment.shared.callService createCallUIAdapter];
-        }
+            // Start running the disappearing messages job in case the newly registered user
+            // enables this feature
+            [self.disappearingMessagesJob startIfNecessary];
+        });
     }
 }
 
@@ -1305,6 +1238,22 @@ void uncaughtExceptionHandler(NSException *exception)
 
 #pragma mark - UNUserNotificationsDelegate
 
+- (BOOL)handleSilentPushContent:(NSDictionary *)userInfo
+{
+    NSString *_Nullable spamChallengeToken = userInfo[@"rateLimitChallenge"];
+    NSString *_Nullable preAuthChallengeToken = userInfo[@"challenge"];
+
+    if (spamChallengeToken) {
+        SpamChallengeResolver *spamResolver = self.spamChallengeResolver;
+        [spamResolver handleIncomingPushChallengeToken:spamChallengeToken];
+        return YES;
+    } else if (preAuthChallengeToken) {
+        [self.pushRegistrationManager didReceiveVanillaPreAuthChallengeToken:preAuthChallengeToken];
+        return YES;
+    }
+    return NO;
+}
+
 // The method will be called on the delegate only if the application is in the foreground. If the method is not
 // implemented or the handler is not called in a timely manner then the notification will not be presented. The
 // application can choose to have the notification presented as a sound, badge, alert and/or in the notification list.
@@ -1312,19 +1261,26 @@ void uncaughtExceptionHandler(NSException *exception)
 - (void)userNotificationCenter:(UNUserNotificationCenter *)center
        willPresentNotification:(UNNotification *)notification
          withCompletionHandler:(void (^)(UNNotificationPresentationOptions options))completionHandler
-    __IOS_AVAILABLE(10.0)__TVOS_AVAILABLE(10.0)__WATCHOS_AVAILABLE(3.0)__OSX_AVAILABLE(10.14)
 {
     OWSLogInfo(@"");
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^() {
-        // We need to respect the in-app notification sound preference. This method, which is called
-        // for modern UNUserNotification users, could be a place to do that, but since we'd still
-        // need to handle this behavior for legacy UINotification users anyway, we "allow" all
-        // notification options here, and rely on the shared logic in NotificationPresenter to
-        // honor notification sound preferences for both modern and legacy users.
-        UNNotificationPresentationOptions options = UNNotificationPresentationOptionAlert
-            | UNNotificationPresentationOptionBadge | UNNotificationPresentationOptionSound;
+    // Capture just userInfo; we don't want to retain notification.
+    NSDictionary *userInfo = notification.request.content.userInfo;
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
+        UNNotificationPresentationOptions options = 0;
+        BOOL isSilent = [self handleSilentPushContent:userInfo];
+
+        if (!isSilent) {
+            // We need to respect the in-app notification sound preference. This method, which is called
+            // for modern UNUserNotification users, could be a place to do that, but since we'd still
+            // need to handle this behavior for legacy UINotification users anyway, we "allow" all
+            // notification options here, and rely on the shared logic in NotificationPresenter to
+            // honor notification sound preferences for both modern and legacy users.
+            options |= UNNotificationPresentationOptionAlert;
+            options |= UNNotificationPresentationOptionBadge;
+            options |= UNNotificationPresentationOptionSound;
+        }
         completionHandler(options);
-    }];
+    });
 }
 
 // The method will be called on the delegate when the user responded to the notification by opening the application,
@@ -1332,24 +1288,11 @@ void uncaughtExceptionHandler(NSException *exception)
 // returns from application:didFinishLaunchingWithOptions:.
 - (void)userNotificationCenter:(UNUserNotificationCenter *)center
     didReceiveNotificationResponse:(UNNotificationResponse *)response
-             withCompletionHandler:(void (^)(void))completionHandler __IOS_AVAILABLE(10.0)__WATCHOS_AVAILABLE(3.0)
-                                       __OSX_AVAILABLE(10.14)__TVOS_PROHIBITED
+             withCompletionHandler:(void (^)(void))completionHandler
 {
     OWSLogInfo(@"");
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^() {
-        [self.userNotificationActionHandler handleNotificationResponse:response completionHandler:completionHandler];
-    }];
-}
-
-// The method will be called on the delegate when the application is launched in response to the user's request to view
-// in-app notification settings. Add UNAuthorizationOptionProvidesAppNotificationSettings as an option in
-// requestAuthorizationWithOptions:completionHandler: to add a button to inline notification settings view and the
-// notification settings view in Settings. The notification will be nil when opened from Settings.
-- (void)userNotificationCenter:(UNUserNotificationCenter *)center
-    openSettingsForNotification:(nullable UNNotification *)notification __IOS_AVAILABLE(12.0)
-                                    __OSX_AVAILABLE(10.14)__WATCHOS_PROHIBITED __TVOS_PROHIBITED
-{
-    OWSLogInfo(@"");
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(
+        ^{ [NotificationActionHandler handleNotificationResponse:response completionHandler:completionHandler]; });
 }
 
 - (void)setupNSEInteroperation
@@ -1371,9 +1314,7 @@ void uncaughtExceptionHandler(NSException *exception)
                     // does not attempt to process messages while we are active.
                     [DarwinNotificationCenter postNotificationName:DarwinNotificationName.mainAppHandledNotification];
 
-                    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
-                        [self.messageFetcherJob runObjc];
-                    }];
+                    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{ [self.messageFetcherJob runObjc]; });
                 }];
 }
 

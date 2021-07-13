@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -111,7 +111,7 @@ extension SignalAccount {
             let contactSerialized: Data? = record.contact
             let contact: Contact? = try SDSDeserialization.optionalUnarchive(contactSerialized, name: "contact")
             let contactAvatarHash: Data? = SDSDeserialization.optionalData(record.contactAvatarHash, name: "contactAvatarHash")
-            let contactAvatarJpegData: Data? = SDSDeserialization.optionalData(record.contactAvatarJpegData, name: "contactAvatarJpegData")
+            let contactAvatarJpegDataObsolete: Data? = SDSDeserialization.optionalData(record.contactAvatarJpegData, name: "contactAvatarJpegDataObsolete")
             let multipleAccountLabelText: String = record.multipleAccountLabelText
             let recipientPhoneNumber: String? = record.recipientPhoneNumber
             let recipientUUID: String? = record.recipientUUID
@@ -120,7 +120,7 @@ extension SignalAccount {
                                  uniqueId: uniqueId,
                                  contact: contact,
                                  contactAvatarHash: contactAvatarHash,
-                                 contactAvatarJpegData: contactAvatarJpegData,
+                                 contactAvatarJpegDataObsolete: contactAvatarJpegDataObsolete,
                                  multipleAccountLabelText: multipleAccountLabelText,
                                  recipientPhoneNumber: recipientPhoneNumber,
                                  recipientUUID: recipientUUID)
@@ -158,6 +158,54 @@ extension SignalAccount: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension SignalAccount: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == SignalAccount.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            // NOTE: If this generates build errors, you made need to
+            // modify DeepCopy.swift to support this type.
+            //
+            // That might mean:
+            //
+            // * Implement DeepCopyable for this type (e.g. a model).
+            // * Modify DeepCopies.deepCopy() to support this type (e.g. a collection).
+            let contact: Contact?
+            if let contactForCopy = modelToCopy.contact {
+               contact = try DeepCopies.deepCopy(contactForCopy)
+            } else {
+               contact = nil
+            }
+            let contactAvatarHash: Data? = modelToCopy.contactAvatarHash
+            let contactAvatarJpegDataObsolete: Data? = modelToCopy.contactAvatarJpegDataObsolete
+            let multipleAccountLabelText: String = modelToCopy.multipleAccountLabelText
+            let recipientPhoneNumber: String? = modelToCopy.recipientPhoneNumber
+            let recipientUUID: String? = modelToCopy.recipientUUID
+
+            return SignalAccount(grdbId: id,
+                                 uniqueId: uniqueId,
+                                 contact: contact,
+                                 contactAvatarHash: contactAvatarHash,
+                                 contactAvatarJpegDataObsolete: contactAvatarJpegDataObsolete,
+                                 multipleAccountLabelText: multipleAccountLabelText,
+                                 recipientPhoneNumber: recipientPhoneNumber,
+                                 recipientUUID: recipientUUID)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension SignalAccountSerializer {
@@ -170,7 +218,7 @@ extension SignalAccountSerializer {
     // Properties
     static let contactColumn = SDSColumnMetadata(columnName: "contact", columnType: .blob, isOptional: true)
     static let contactAvatarHashColumn = SDSColumnMetadata(columnName: "contactAvatarHash", columnType: .blob, isOptional: true)
-    static let contactAvatarJpegDataColumn = SDSColumnMetadata(columnName: "contactAvatarJpegData", columnType: .blob, isOptional: true)
+    static let contactAvatarJpegDataObsoleteColumn = SDSColumnMetadata(columnName: "contactAvatarJpegDataObsolete", columnType: .blob, isOptional: true)
     static let multipleAccountLabelTextColumn = SDSColumnMetadata(columnName: "multipleAccountLabelText", columnType: .unicodeString)
     static let recipientPhoneNumberColumn = SDSColumnMetadata(columnName: "recipientPhoneNumber", columnType: .unicodeString, isOptional: true)
     static let recipientUUIDColumn = SDSColumnMetadata(columnName: "recipientUUID", columnType: .unicodeString, isOptional: true)
@@ -185,7 +233,7 @@ extension SignalAccountSerializer {
         uniqueIdColumn,
         contactColumn,
         contactAvatarHashColumn,
-        contactAvatarJpegDataColumn,
+        contactAvatarJpegDataObsoleteColumn,
         multipleAccountLabelTextColumn,
         recipientPhoneNumberColumn,
         recipientUUIDColumn
@@ -298,9 +346,11 @@ public extension SignalAccount {
 
 @objc
 public class SignalAccountCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<SignalAccountRecord>?
 
-    init(cursor: RecordCursor<SignalAccountRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<SignalAccountRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -311,7 +361,9 @@ public class SignalAccountCursor: NSObject {
         guard let record = try cursor.next() else {
             return nil
         }
-        return try SignalAccount.fromRecord(record)
+        let value = try SignalAccount.fromRecord(record)
+        Self.modelReadCaches.signalAccountReadCache.didReadSignalAccount(value, transaction: transaction.asAnyRead)
+        return value
     }
 
     public func all() throws -> [SignalAccount] {
@@ -342,10 +394,10 @@ public extension SignalAccount {
         let database = transaction.database
         do {
             let cursor = try SignalAccountRecord.fetchCursor(database)
-            return SignalAccountCursor(cursor: cursor)
+            return SignalAccountCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return SignalAccountCursor(cursor: nil)
+            return SignalAccountCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -355,8 +407,6 @@ public extension SignalAccount {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return SignalAccount.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(SignalAccountRecord.databaseTableName) WHERE \(signalAccountColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -387,28 +437,20 @@ public extension SignalAccount {
                             batchSize: UInt,
                             block: @escaping (SignalAccount, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            SignalAccount.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? SignalAccount else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = SignalAccount.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = SignalAccount.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -436,10 +478,6 @@ public extension SignalAccount {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: SignalAccount.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -471,8 +509,6 @@ public extension SignalAccount {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: SignalAccount.collection())
         case .grdbRead(let grdbTransaction):
             return SignalAccountRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -482,8 +518,6 @@ public extension SignalAccount {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: SignalAccount.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try SignalAccountRecord.deleteAll(grdbTransaction.database)
@@ -532,8 +566,6 @@ public extension SignalAccount {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: SignalAccount.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(SignalAccountRecord.databaseTableName) WHERE \(signalAccountColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -551,11 +583,11 @@ public extension SignalAccount {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try SignalAccountRecord.fetchCursor(transaction.database, sqlRequest)
-            return SignalAccountCursor(cursor: cursor)
+            return SignalAccountCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return SignalAccountCursor(cursor: nil)
+            return SignalAccountCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -570,7 +602,9 @@ public extension SignalAccount {
                 return nil
             }
 
-            return try SignalAccount.fromRecord(record)
+            let value = try SignalAccount.fromRecord(record)
+            Self.modelReadCaches.signalAccountReadCache.didReadSignalAccount(value, transaction: transaction.asAnyRead)
+            return value
         } catch {
             owsFailDebug("error: \(error)")
             return nil
@@ -600,7 +634,7 @@ class SignalAccountSerializer: SDSSerializer {
         // Properties
         let contact: Data? = optionalArchive(model.contact)
         let contactAvatarHash: Data? = model.contactAvatarHash
-        let contactAvatarJpegData: Data? = model.contactAvatarJpegData
+        let contactAvatarJpegData: Data? = model.contactAvatarJpegDataObsolete
         let multipleAccountLabelText: String = model.multipleAccountLabelText
         let recipientPhoneNumber: String? = model.recipientPhoneNumber
         let recipientUUID: String? = model.recipientUUID
@@ -608,3 +642,20 @@ class SignalAccountSerializer: SDSSerializer {
         return SignalAccountRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, contact: contact, contactAvatarHash: contactAvatarHash, contactAvatarJpegData: contactAvatarJpegData, multipleAccountLabelText: multipleAccountLabelText, recipientPhoneNumber: recipientPhoneNumber, recipientUUID: recipientUUID)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension SignalAccount {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> SignalAccount {
+        guard let record = try asRecord() as? SignalAccountRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try SignalAccount.fromRecord(record)
+    }
+}
+#endif

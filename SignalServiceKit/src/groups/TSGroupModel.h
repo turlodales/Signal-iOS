@@ -1,9 +1,9 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "ContactsManagerProtocol.h"
 #import <Mantle/MTLModel+NSCoding.h>
+#import <SignalServiceKit/ContactsManagerProtocol.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -19,6 +19,11 @@ typedef NS_CLOSED_ENUM(uint32_t, GroupsVersion) { GroupsVersionV1 = 0, GroupsVer
 typedef NS_CLOSED_ENUM(
     NSUInteger, TSGroupMemberRole) { TSGroupMemberRole_Normal = 0, TSGroupMemberRole_Administrator = 1 };
 
+typedef NS_CLOSED_ENUM(NSUInteger, TSGroupModelComparisonMode) {
+    TSGroupModelComparisonMode_CompareAll,
+    TSGroupModelComparisonMode_UserFacingOnly,
+};
+
 // NOTE: This class is tightly coupled to TSGroupModelBuilder.
 //       If you modify this class - especially if you
 //       add any new properties - make sure to update
@@ -31,7 +36,7 @@ typedef NS_CLOSED_ENUM(
 @property (nonatomic, readonly) NSArray<SignalServiceAddress *> *nonLocalGroupMembers;
 @property (nonatomic, readonly, nullable) NSString *groupName;
 @property (nonatomic, readonly) NSData *groupId;
-@property (nonatomic, nullable) SignalServiceAddress *addedByAddress;
+@property (nonatomic, readonly, nullable) SignalServiceAddress *addedByAddress;
 
 #if TARGET_OS_IOS
 @property (nonatomic, readonly, nullable) UIImage *groupAvatarImage;
@@ -41,6 +46,7 @@ typedef NS_CLOSED_ENUM(
 @property (nonatomic, readonly) GroupsVersion groupsVersion;
 @property (nonatomic, readonly) GroupMembership *groupMembership;
 
++ (BOOL)isValidGroupAvatarData:(nullable NSData *)imageData;
 + (nullable NSData *)dataForGroupAvatar:(nullable UIImage *)image;
 
 + (instancetype)new NS_UNAVAILABLE;
@@ -50,15 +56,19 @@ typedef NS_CLOSED_ENUM(
 - (instancetype)initWithGroupId:(NSData *)groupId
                            name:(nullable NSString *)name
                      avatarData:(nullable NSData *)avatarData
-                        members:(NSArray<SignalServiceAddress *> *)members NS_DESIGNATED_INITIALIZER;
+                        members:(NSArray<SignalServiceAddress *> *)members
+                 addedByAddress:(nullable SignalServiceAddress *)addedByAddress NS_DESIGNATED_INITIALIZER;
 
 - (BOOL)isEqual:(id)other;
-- (BOOL)isEqualToGroupModel:(TSGroupModel *)model ignoreRevision:(BOOL)ignoreRevision;
+- (BOOL)isEqualToGroupModel:(TSGroupModel *)model comparisonMode:(TSGroupModelComparisonMode)comparisonMode;
 #endif
 
 @property (nonatomic, readonly) NSString *groupNameOrDefault;
 
 + (NSData *)generateRandomV1GroupId;
+
+// This method should only be used by the blocking manager.
+- (void)discardGroupAvatarForBlockingManager;
 
 @end
 

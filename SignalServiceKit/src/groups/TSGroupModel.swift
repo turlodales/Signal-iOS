@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -24,28 +24,60 @@ public class TSGroupModelV2: TSGroupModel {
     public var revision: UInt32 = 0
     @objc
     public var avatarUrlPath: String?
+    @objc
+    public var inviteLinkPassword: Data?
+    // We sometimes create "placeholder" models to reflect
+    // groups that we don't have access to on the service.
+    @objc
+    public var isPlaceholderModel: Bool = false
+    @objc
+    public var wasJustMigrated: Bool = false
+    @objc
+    public var wasJustCreatedByLocalUser: Bool = false
+    @objc
+    public var didJustAddSelfViaGroupLink: Bool = false
+    @objc
+    public var droppedMembers = [SignalServiceAddress]()
+    @objc
+    public var descriptionText: String?
 
     @objc
     public required init(groupId: Data,
                          name: String?,
+                         descriptionText: String?,
                          avatarData: Data?,
                          groupMembership: GroupMembership,
                          groupAccess: GroupAccess,
                          revision: UInt32,
                          secretParamsData: Data,
-                         avatarUrlPath: String?) {
+                         avatarUrlPath: String?,
+                         inviteLinkPassword: Data?,
+                         isPlaceholderModel: Bool,
+                         wasJustMigrated: Bool,
+                         wasJustCreatedByLocalUser: Bool,
+                         didJustAddSelfViaGroupLink: Bool,
+                         addedByAddress: SignalServiceAddress?,
+                         droppedMembers: [SignalServiceAddress]) {
         assert(secretParamsData.count > 0)
 
+        self.descriptionText = descriptionText
         self.membership = groupMembership
         self.secretParamsData = secretParamsData
         self.access = groupAccess
         self.revision = revision
         self.avatarUrlPath = avatarUrlPath
+        self.inviteLinkPassword = inviteLinkPassword
+        self.isPlaceholderModel = isPlaceholderModel
+        self.wasJustMigrated = wasJustMigrated
+        self.wasJustCreatedByLocalUser = wasJustCreatedByLocalUser
+        self.didJustAddSelfViaGroupLink = didJustAddSelfViaGroupLink
+        self.droppedMembers = droppedMembers
 
         super.init(groupId: groupId,
                    name: name,
                    avatarData: avatarData,
-                   members: Array(groupMembership.nonPendingMembers))
+                   members: Array(groupMembership.fullMembers),
+                   addedBy: addedByAddress)
     }
 
     // MARK: - MTLModel
@@ -74,15 +106,23 @@ public class TSGroupModelV2: TSGroupModel {
 
     @objc
     public override var groupMembers: [SignalServiceAddress] {
-        return Array(groupMembership.nonPendingMembers)
+        return Array(groupMembership.fullMembers)
     }
 
     public override func isEqual(to model: TSGroupModel,
-                                 ignoreRevision: Bool) -> Bool {
-        guard super.isEqual(to: model, ignoreRevision: ignoreRevision) else {
+                                 comparisonMode: TSGroupModelComparisonMode) -> Bool {
+        guard super.isEqual(to: model, comparisonMode: comparisonMode) else {
             return false
         }
         guard let other = model as? TSGroupModelV2 else {
+            switch comparisonMode {
+            case .compareAll:
+                return false
+            case .userFacingOnly:
+                return descriptionText == nil
+            }
+        }
+        guard other.descriptionText == descriptionText else {
             return false
         }
         guard other.membership == membership else {
@@ -94,12 +134,24 @@ public class TSGroupModelV2: TSGroupModel {
         guard other.secretParamsData == secretParamsData else {
             return false
         }
-        guard ignoreRevision || other.revision == revision else {
+        guard comparisonMode != .compareAll || other.revision == revision else {
             return false
         }
         guard other.avatarUrlPath == avatarUrlPath else {
             return false
         }
+        guard other.inviteLinkPassword == inviteLinkPassword else {
+            return false
+        }
+        guard other.droppedMembers.stableSort() == droppedMembers.stableSort() else {
+            return false
+        }
+        // Ignore transient properties:
+        //
+        // * isPlaceholderModel
+        // * wasJustMigrated
+        // * wasJustCreatedByLocalUser
+        // * didJustAddSelfViaGroupLink
         return true
     }
 
@@ -115,7 +167,84 @@ public class TSGroupModelV2: TSGroupModel {
         result += "secretParamsData: \(secretParamsData.hexadecimalString.prefix(32)),\n"
         result += "revision: \(revision),\n"
         result += "avatarUrlPath: \(String(describing: avatarUrlPath)),\n"
+        result += "inviteLinkPassword: \(inviteLinkPassword?.hexadecimalString ?? "None"),\n"
+        result += "addedByAddress: \(addedByAddress?.debugDescription ?? "None"),\n"
+        result += "isPlaceholderModel: \(isPlaceholderModel),\n"
+        result += "wasJustMigrated: \(wasJustMigrated),\n"
+        result += "wasJustCreatedByLocalUser: \(wasJustCreatedByLocalUser),\n"
+        result += "didJustAddSelfViaGroupLink: \(didJustAddSelfViaGroupLink),\n"
+        result += "droppedMembers: \(droppedMembers),\n"
         result += "]"
         return result
+    }
+}
+
+// MARK: -
+
+@objc
+public extension TSGroupModelV2 {
+    var groupInviteLinkMode: GroupsV2LinkMode {
+        guard let inviteLinkPassword = inviteLinkPassword,
+            !inviteLinkPassword.isEmpty else {
+                return .disabled
+        }
+
+        switch access.addFromInviteLink {
+        case .any:
+            return .enabledWithoutApproval
+        case .administrator:
+            return .enabledWithApproval
+        default:
+            return .disabled
+        }
+    }
+
+    var isGroupInviteLinkEnabled: Bool {
+        if let inviteLinkPassword = inviteLinkPassword,
+            !inviteLinkPassword.isEmpty,
+            access.canJoinFromInviteLink {
+            return true
+        }
+        return false
+    }
+}
+
+// MARK: -
+
+@objc
+public extension TSGroupModel {
+    var isPlaceholder: Bool {
+        guard let groupModelV2 = self as? TSGroupModelV2 else {
+            return false
+        }
+        return groupModelV2.isPlaceholderModel
+    }
+
+    var wasJustMigratedToV2: Bool {
+        guard let groupModelV2 = self as? TSGroupModelV2 else {
+            return false
+        }
+        return groupModelV2.wasJustMigrated
+    }
+
+    var wasJustCreatedByLocalUserV2: Bool {
+        guard let groupModelV2 = self as? TSGroupModelV2 else {
+            return false
+        }
+        return groupModelV2.wasJustCreatedByLocalUser
+    }
+
+    var didJustAddSelfViaGroupLinkV2: Bool {
+        guard let groupModelV2 = self as? TSGroupModelV2 else {
+            return false
+        }
+        return groupModelV2.didJustAddSelfViaGroupLink
+    }
+
+    var getDroppedMembers: [SignalServiceAddress] {
+        guard let groupModelV2 = self as? TSGroupModelV2 else {
+            return []
+        }
+        return groupModelV2.droppedMembers
     }
 }

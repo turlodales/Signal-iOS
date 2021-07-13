@@ -8,6 +8,7 @@
 #import <SignalServiceKit/AppContext.h>
 #import <SignalServiceKit/FunctionalUtil.h>
 #import <SignalServiceKit/TSAttachmentStream.h>
+#import <YYImage/YYImage.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -171,7 +172,30 @@ NS_ASSUME_NONNULL_BEGIN
 - (nullable id)activityViewController:(UIActivityViewController *)activityViewController
                   itemForActivityType:(nullable UIActivityType)activityType
 {
+    if ([self.contentType isEqualToString:OWSMimeTypeImageWebp]) {
+        return self.originalImage;
+    }
+    if (self.isAnimated) {
+        return self.originalMediaURL;
+    }
     return self.isImage ? self.originalImage : self.originalMediaURL;
+}
+
+@end
+
+// YYImage does not specify that the sublcass still supports secure coding,
+// this is required for anything that subclasses a class that supports secure
+// coding. We do so here, otherwise copy / save will not work for YYImages
+
+@interface YYImage (SecureCoding)
+
+@end
+
+@implementation YYImage (SecureCoding)
+
++ (BOOL)supportsSecureCoding
+{
+    return YES;
 }
 
 @end

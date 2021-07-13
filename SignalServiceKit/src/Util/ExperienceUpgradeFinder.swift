@@ -1,32 +1,75 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
+import PromiseKit
+import Contacts
 
-public enum ExperienceUpgradeId: String, CaseIterable {
+public enum ExperienceUpgradeId: String, CaseIterable, Dependencies {
     case introducingPins = "009"
-    case reactions = "010"
-    case profileNameReminder = "011"
-    case messageRequests = "012"
     case pinReminder // Never saved, used to periodically prompt the user for their PIN
+    case notificationPermissionReminder
+    case contactPermissionReminder
+    case linkPreviews
+    case researchMegaphone1
+    case groupsV2AndMentionsSplash2
+    case groupCallsMegaphone
+    case sharingSuggestions
+    case donateMegaphone
+    case chatColors
 
     // Until this flag is true the upgrade won't display to users.
     func hasLaunched(transaction: GRDBReadTransaction) -> Bool {
+        AssertIsOnMainThread()
+
         switch self {
         case .introducingPins:
             // The PIN setup flow requires an internet connection and you to not already have a PIN
-            return RemoteConfig.pinsForEveryone &&
-                SSKEnvironment.shared.reachabilityManager.isReachable &&
+            return RemoteConfig.kbs &&
+                Self.reachabilityManager.isReachable &&
                 !KeyBackupService.hasMasterKey(transaction: transaction.asAnyRead)
-        case .reactions:
-            return true
-        case .profileNameReminder:
-            return RemoteConfig.profileNameReminder && !RemoteConfig.messageRequests
-        case .messageRequests:
-            return FeatureFlags.messageRequest
         case .pinReminder:
-            return OWS2FAManager.shared().isDueForV2Reminder(transaction: transaction.asAnyRead)
+            return OWS2FAManager.shared.isDueForV2Reminder(transaction: transaction.asAnyRead)
+        case .notificationPermissionReminder:
+            let (promise, resolver) = Promise<Bool>.pending()
+
+            Logger.info("Checking notification authorization")
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                UNUserNotificationCenter.current().getNotificationSettings { settings in
+                    Logger.info("Checked notification authorization \(settings.authorizationStatus)")
+                    resolver.fulfill(settings.authorizationStatus == .authorized)
+                }
+            }
+
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+                guard promise.result == nil else { return }
+                resolver.reject(OWSGenericError("timeout fetching notification permissions"))
+            }
+
+            do {
+                return !(try promise.wait())
+            } catch {
+                Logger.warn("failed to query notification permission")
+                return false
+            }
+        case .contactPermissionReminder:
+            return CNContactStore.authorizationStatus(for: CNEntityType.contacts) != .authorized
+        case .linkPreviews:
+            return true
+        case .researchMegaphone1:
+            return RemoteConfig.researchMegaphone
+        case .groupsV2AndMentionsSplash2:
+            return FeatureFlags.groupsV2showSplash
+        case .groupCallsMegaphone:
+            return RemoteConfig.groupCalling
+        case .sharingSuggestions:
+            return true
+        case .donateMegaphone:
+            return RemoteConfig.donateMegaphone
+        case .chatColors:
+            return true
         }
     }
 
@@ -36,9 +79,6 @@ public enum ExperienceUpgradeId: String, CaseIterable {
         let expirationDate: TimeInterval
 
         switch self {
-        case .reactions:
-            // March 5, 2020 @ 12am UTC
-            expirationDate = 1583366400
         default:
             expirationDate = Date.distantFuture.timeIntervalSince1970
         }
@@ -49,8 +89,9 @@ public enum ExperienceUpgradeId: String, CaseIterable {
     // If false, this will not be marked complete after registration.
     var skipForNewUsers: Bool {
         switch self {
-        case .messageRequests,
-             .introducingPins:
+        case .introducingPins,
+             .researchMegaphone1,
+             .donateMegaphone:
             return false
         default:
             return true
@@ -70,16 +111,26 @@ public enum ExperienceUpgradeId: String, CaseIterable {
         switch self {
         case .introducingPins:
             return .high
-        case .messageRequests:
-            // If the user already has a profile name, this is just a simple
-            // notice of a new feature. If they don't have a profile name,
-            // this is a high priority mandatory flow for them to create one.
-            return SSKEnvironment.shared.profileManager.hasProfileName ? .low : .high
-        case .profileNameReminder,
-             .reactions:
-            return .low
+        case .linkPreviews:
+            return .medium
         case .pinReminder:
             return .medium
+        case .notificationPermissionReminder:
+            return .medium
+        case .contactPermissionReminder:
+            return .medium
+        case .researchMegaphone1:
+            return .low
+        case .groupsV2AndMentionsSplash2:
+            return .medium
+        case .groupCallsMegaphone:
+            return .medium
+        case .sharingSuggestions:
+            return .medium
+        case .donateMegaphone:
+            return .low
+        case .chatColors:
+            return .low
         }
     }
 
@@ -91,6 +142,51 @@ public enum ExperienceUpgradeId: String, CaseIterable {
             return false
         default:
             return true
+        }
+    }
+
+    // Some experience upgrades are dynamic, but still track state (like
+    // snooze duration), but can never be permanently completed.
+    var canBeCompleted: Bool {
+        switch self {
+        case .pinReminder:
+            return false
+        case .notificationPermissionReminder:
+            return false
+        case .contactPermissionReminder:
+            return false
+        case .donateMegaphone:
+            return false
+        default:
+            return true
+        }
+    }
+
+    var snoozeDuration: TimeInterval {
+        switch self {
+        case .notificationPermissionReminder:
+            return kDayInterval * 30
+        case .contactPermissionReminder:
+            return kDayInterval * 30
+        case .donateMegaphone:
+            return RemoteConfig.donateMegaphoneSnoozeInterval
+        default:
+            return kDayInterval * 2
+        }
+    }
+
+    var showOnLinkedDevices: Bool {
+        switch self {
+        case .notificationPermissionReminder:
+            return true
+        case .contactPermissionReminder:
+            return true
+        case .sharingSuggestions:
+            return true
+        case .donateMegaphone:
+            return true
+        default:
+            return false
         }
     }
 }
@@ -121,18 +217,30 @@ public class ExperienceUpgradeFinder: NSObject {
         }
     }
 
+    public class func hasUnsnoozed(experienceUpgradeId: ExperienceUpgradeId, transaction: GRDBReadTransaction) -> Bool {
+        return allIncomplete(transaction: transaction).first { experienceUpgradeId.rawValue == $0.uniqueId }?.isSnoozed == false
+    }
+
+    public class func markAsSnoozed(experienceUpgradeId: ExperienceUpgradeId, transaction: GRDBWriteTransaction) {
+        markAsSnoozed(experienceUpgrade: ExperienceUpgrade(uniqueId: experienceUpgradeId.rawValue), transaction: transaction)
+    }
+
     public class func markAsSnoozed(experienceUpgrade: ExperienceUpgrade, transaction: GRDBWriteTransaction) {
         Logger.info("marking experience upgrade as snoozed \(experienceUpgrade.uniqueId)")
         experienceUpgrade.upsertWith(transaction: transaction.asAnyWrite) { $0.lastSnoozedTimestamp = Date().timeIntervalSince1970 }
     }
 
     public class func markAsComplete(experienceUpgradeId: ExperienceUpgradeId, transaction: GRDBWriteTransaction) {
-        Logger.info("marking experience upgrade as complete \(experienceUpgradeId)")
         markAsComplete(experienceUpgrade: ExperienceUpgrade(uniqueId: experienceUpgradeId.rawValue), transaction: transaction)
     }
 
     public class func markAsComplete(experienceUpgrade: ExperienceUpgrade, transaction: GRDBWriteTransaction) {
+        guard experienceUpgrade.id.canBeCompleted else {
+            return Logger.info("skipping marking experience upgrade as complete for experience upgrade \(experienceUpgrade.uniqueId)")
+        }
+
         Logger.info("marking experience upgrade as complete \(experienceUpgrade.uniqueId)")
+
         experienceUpgrade.upsertWith(transaction: transaction.asAnyWrite) { $0.isComplete = true }
     }
 
@@ -149,13 +257,11 @@ public class ExperienceUpgradeFinder: NSObject {
     /// yet to be completed. Sorted by priority from highest to lowest. For equal
     /// priority upgrades follows the order of the `ExperienceUpgradeId` enumeration
     private class func allActiveExperienceUpgrades(transaction: GRDBReadTransaction) -> [ExperienceUpgrade] {
-        // Only the primary device will ever see experience upgrades.
-        // TODO: We may eventually sync these and show them on linked devices.
-        guard SSKEnvironment.shared.tsAccountManager.isRegisteredPrimaryDevice else { return [] }
+        let isPrimaryDevice = Self.tsAccountManager.isRegisteredPrimaryDevice
 
         let activeIds = ExperienceUpgradeId
             .allCases
-            .filter { $0.hasLaunched(transaction: transaction) && !$0.hasExpired }
+            .filter { $0.hasLaunched(transaction: transaction) && !$0.hasExpired && ($0.showOnLinkedDevices || isPrimaryDevice) }
             .map { $0.rawValue }
 
         // We don't include `isComplete` in the query as we want to initialize
@@ -173,7 +279,14 @@ public class ExperienceUpgradeFinder: NSObject {
 
         while true {
             guard let experienceUpgrade = try? cursor.next() else { break }
-            if !experienceUpgrade.isComplete { experienceUpgrades.append(experienceUpgrade) }
+            guard experienceUpgrade.id.shouldSave else {
+                // Ignore saved upgrades that we don't currently save.
+                continue
+            }
+            if !experienceUpgrade.isComplete && !experienceUpgrade.hasCompletedVisibleDuration {
+                experienceUpgrades.append(experienceUpgrade)
+            }
+
             unsavedIds.removeAll { $0 == experienceUpgrade.uniqueId }
         }
 
@@ -205,13 +318,20 @@ public extension ExperienceUpgrade {
     var isSnoozed: Bool {
         guard lastSnoozedTimestamp > 0 else { return false }
         // If it hasn't been two days since we were snoozed, wait to show again.
-        return -Date(timeIntervalSince1970: lastSnoozedTimestamp).timeIntervalSinceNow <= kDayInterval * 2
+        return -Date(timeIntervalSince1970: lastSnoozedTimestamp).timeIntervalSinceNow <= id.snoozeDuration
     }
 
     var daysSinceFirstViewed: Int {
         guard firstViewedTimestamp > 0 else { return 0 }
         let secondsSinceFirstView = -Date(timeIntervalSince1970: firstViewedTimestamp).timeIntervalSinceNow
         return Int(secondsSinceFirstView / kDayInterval)
+    }
+
+    var hasCompletedVisibleDuration: Bool {
+        switch id {
+        case .researchMegaphone1: return daysSinceFirstViewed >= 7
+        default: return false
+        }
     }
 
     var hasViewed: Bool { firstViewedTimestamp > 0 }

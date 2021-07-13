@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -15,7 +15,7 @@ public class Batching: NSObject {
     // If batchSize == 0, no batching is done and no
     // autoreleasepool is used.
     public static func loop(batchSize: UInt,
-                            loopBlock: (UnsafeMutablePointer<ObjCBool>) throws -> Void) throws {
+                            loopBlock: (UnsafeMutablePointer<ObjCBool>) throws -> Void) rethrows {
         var stop: ObjCBool = false
         guard batchSize > 0 else {
             // No batching.
@@ -65,6 +65,37 @@ public class Batching: NSObject {
                 }
             }
             batchIndex += 1
+        }
+    }
+}
+
+// MARK: -
+
+extension Batching {
+    @objc(enumerateArray:batchSize:itemBlock:)
+    @available(swift, obsoleted: 1.0)
+    public static func enumerate(array: [AnyObject],
+                                 batchSize: UInt,
+                                 itemBlock: (AnyObject) -> Void) {
+        Self.enumerate(array, batchSize: batchSize, itemBlock: itemBlock)
+    }
+
+    public static func enumerate<T>(_ array: [T],
+                                    batchSize: UInt,
+                                    itemBlock: (T) throws -> Void) rethrows {
+        var index: Int = 0
+        try Self.loop(batchSize: batchSize) { stop in
+            guard index < array.count else {
+                stop.pointee = true
+                return
+            }
+            guard let item = array[safe: index] else {
+                owsFailDebug("Missing item.")
+                stop.pointee = true
+                return
+            }
+            try itemBlock(item)
+            index = index + 1
         }
     }
 }

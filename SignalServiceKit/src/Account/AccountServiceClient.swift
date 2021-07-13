@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -16,16 +16,10 @@ public enum AccountServiceClientError: Error {
 @objc
 public class AccountServiceClient: NSObject {
 
-    private let serviceClient: SignalServiceClient
-
-    override init() {
-        self.serviceClient = SignalServiceRestClient()
-    }
-
     // MARK: - Public
 
-    public func requestPreauthChallenge(recipientId: String, pushToken: String) -> Promise<Void> {
-        return serviceClient.requestPreauthChallenge(recipientId: recipientId, pushToken: pushToken)
+    public func requestPreauthChallenge(recipientId: String, pushToken: String, isVoipToken: Bool) -> Promise<Void> {
+        return serviceClient.requestPreauthChallenge(recipientId: recipientId, pushToken: pushToken, isVoipToken: isVoipToken)
     }
 
     public func requestVerificationCode(recipientId: String, preauthChallenge: String?, captchaToken: String?, transport: TSVerificationTransport) -> Promise<Void> {

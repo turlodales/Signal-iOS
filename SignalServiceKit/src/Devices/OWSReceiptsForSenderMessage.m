@@ -1,10 +1,10 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSReceiptsForSenderMessage.h"
-#import "SignalRecipient.h"
 #import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalServiceKit/OWSReceiptsForSenderMessage.h>
+#import <SignalServiceKit/SignalRecipient.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -37,6 +37,14 @@ NS_ASSUME_NONNULL_BEGIN
                                                    receiptType:SSKProtoReceiptMessageTypeRead];
 }
 
++ (OWSReceiptsForSenderMessage *)viewedReceiptsForSenderMessageWithThread:(TSThread *)thread
+                                                        messageTimestamps:(NSArray<NSNumber *> *)messageTimestamps
+{
+    return [[OWSReceiptsForSenderMessage alloc] initWithThread:thread
+                                             messageTimestamps:messageTimestamps
+                                                   receiptType:SSKProtoReceiptMessageTypeViewed];
+}
+
 - (instancetype)initWithThread:(TSThread *)thread
              messageTimestamps:(NSArray<NSNumber *> *)messageTimestamps
                    receiptType:(SSKProtoReceiptMessageType)receiptType
@@ -60,18 +68,11 @@ NS_ASSUME_NONNULL_BEGIN
     return NO;
 }
 
-- (BOOL)isSilent
-{
-    // Avoid "phantom messages" for "recipient read receipts".
-
-    return YES;
-}
-
-- (nullable NSData *)buildPlainTextData:(SignalRecipient *)recipient
+- (nullable NSData *)buildPlainTextData:(SignalServiceAddress *)address
                                  thread:(TSThread *)thread
                             transaction:(SDSAnyReadTransaction *)transaction
 {
-    OWSAssertDebug(recipient);
+    OWSAssertDebug(address.isValid);
 
     SSKProtoReceiptMessage *_Nullable receiptMessage = [self buildReceiptMessage];
     if (!receiptMessage) {

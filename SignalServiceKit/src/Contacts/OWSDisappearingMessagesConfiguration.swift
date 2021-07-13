@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -55,12 +55,43 @@ public class DisappearingMessageToken: MTLModel {
             return .disabledToken
         }
     }
+
+    @objc
+    public var durationString: String {
+        // This might be zero if DMs are not enabled.
+        NSString.formatDurationLossless(durationSeconds: durationSeconds)
+    }
 }
 
 // MARK: -
 
 public extension OWSDisappearingMessagesConfiguration {
+    @objc
     var asToken: DisappearingMessageToken {
         return DisappearingMessageToken(isEnabled: isEnabled, durationSeconds: durationSeconds)
+    }
+
+    @objc
+    @discardableResult
+    static func applyToken(_ token: DisappearingMessageToken,
+                           toThread thread: TSThread,
+                           transaction: SDSAnyWriteTransaction) -> OWSDisappearingMessagesConfiguration {
+        let oldConfiguration = OWSDisappearingMessagesConfiguration.fetchOrBuildDefault(with: thread,
+                                                                                        transaction: transaction)
+        return oldConfiguration.applyToken(token, transaction: transaction)
+    }
+
+    @objc
+    @discardableResult
+    func applyToken(_ token: DisappearingMessageToken,
+                    transaction: SDSAnyWriteTransaction) -> OWSDisappearingMessagesConfiguration {
+        let newConfiguration: OWSDisappearingMessagesConfiguration
+        if token.isEnabled {
+            newConfiguration = self.copyAsEnabled(withDurationSeconds: token.durationSeconds)
+        } else {
+            newConfiguration = self.copy(withIsEnabled: false)
+        }
+        newConfiguration.anyUpsert(transaction: transaction)
+        return newConfiguration
     }
 }

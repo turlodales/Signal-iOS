@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -153,6 +153,40 @@ extension OWSRecipientIdentity: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension OWSRecipientIdentity: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == OWSRecipientIdentity.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let accountId: String = modelToCopy.accountId
+            let createdAt: Date = modelToCopy.createdAt
+            let identityKey: Data = modelToCopy.identityKey
+            let isFirstKnownKey: Bool = modelToCopy.isFirstKnownKey
+            let verificationState: OWSVerificationState = modelToCopy.verificationState
+
+            return OWSRecipientIdentity(grdbId: id,
+                                        uniqueId: uniqueId,
+                                        accountId: accountId,
+                                        createdAt: createdAt,
+                                        identityKey: identityKey,
+                                        isFirstKnownKey: isFirstKnownKey,
+                                        verificationState: verificationState)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension OWSRecipientIdentitySerializer {
@@ -291,9 +325,11 @@ public extension OWSRecipientIdentity {
 
 @objc
 public class OWSRecipientIdentityCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<RecipientIdentityRecord>?
 
-    init(cursor: RecordCursor<RecipientIdentityRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<RecipientIdentityRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -335,10 +371,10 @@ public extension OWSRecipientIdentity {
         let database = transaction.database
         do {
             let cursor = try RecipientIdentityRecord.fetchCursor(database)
-            return OWSRecipientIdentityCursor(cursor: cursor)
+            return OWSRecipientIdentityCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return OWSRecipientIdentityCursor(cursor: nil)
+            return OWSRecipientIdentityCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -348,8 +384,6 @@ public extension OWSRecipientIdentity {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return OWSRecipientIdentity.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(RecipientIdentityRecord.databaseTableName) WHERE \(recipientIdentityColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -380,28 +414,20 @@ public extension OWSRecipientIdentity {
                             batchSize: UInt,
                             block: @escaping (OWSRecipientIdentity, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            OWSRecipientIdentity.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? OWSRecipientIdentity else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = OWSRecipientIdentity.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = OWSRecipientIdentity.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -429,10 +455,6 @@ public extension OWSRecipientIdentity {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: OWSRecipientIdentity.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -464,8 +486,6 @@ public extension OWSRecipientIdentity {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: OWSRecipientIdentity.collection())
         case .grdbRead(let grdbTransaction):
             return RecipientIdentityRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -475,8 +495,6 @@ public extension OWSRecipientIdentity {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: OWSRecipientIdentity.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try RecipientIdentityRecord.deleteAll(grdbTransaction.database)
@@ -525,8 +543,6 @@ public extension OWSRecipientIdentity {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: OWSRecipientIdentity.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(RecipientIdentityRecord.databaseTableName) WHERE \(recipientIdentityColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -544,11 +560,11 @@ public extension OWSRecipientIdentity {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try RecipientIdentityRecord.fetchCursor(transaction.database, sqlRequest)
-            return OWSRecipientIdentityCursor(cursor: cursor)
+            return OWSRecipientIdentityCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return OWSRecipientIdentityCursor(cursor: nil)
+            return OWSRecipientIdentityCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -600,3 +616,20 @@ class OWSRecipientIdentitySerializer: SDSSerializer {
         return RecipientIdentityRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, accountId: accountId, createdAt: createdAt, identityKey: identityKey, isFirstKnownKey: isFirstKnownKey, verificationState: verificationState)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension OWSRecipientIdentity {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> OWSRecipientIdentity {
+        guard let record = try asRecord() as? RecipientIdentityRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try OWSRecipientIdentity.fromRecord(record)
+    }
+}
+#endif

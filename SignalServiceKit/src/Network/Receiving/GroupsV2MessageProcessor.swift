@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -14,46 +14,9 @@ private struct IncomingGroupsV2MessageJobInfo {
 
 // MARK: -
 
-class IncomingGroupsV2MessageQueue: NSObject {
-
-    // MARK: - Dependencies
-
-    private var messageManager: OWSMessageManager {
-        return SSKEnvironment.shared.messageManager
-    }
-
-    private var tsAccountManager: TSAccountManager {
-        return SSKEnvironment.shared.tsAccountManager
-    }
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    private var groupsV2: GroupsV2Swift {
-        return SSKEnvironment.shared.groupsV2 as! GroupsV2Swift
-    }
-
-    private var groupV2Updates: GroupV2UpdatesSwift {
-        return SSKEnvironment.shared.groupV2Updates as! GroupV2UpdatesSwift
-    }
-
-    private var blockingManager: OWSBlockingManager {
-        return SSKEnvironment.shared.blockingManager
-    }
-
-    private var notificationsManager: NotificationsProtocol {
-        return SSKEnvironment.shared.notificationsManager
-    }
-
-    // MARK: -
+class IncomingGroupsV2MessageQueue: NSObject, MessageProcessingPipelineStage {
 
     private let finder = GRDBGroupsV2MessageJobFinder()
-    // This property should only be accessed on serialQueue.
-    private var isDrainingQueue = false
-    private var isAppInBackground = AtomicBool(false)
-
-    private typealias BatchCompletionBlock = ([IncomingGroupsV2MessageJob], Bool, SDSAnyWriteTransaction) -> Void
 
     override init() {
         super.init()
@@ -87,6 +50,10 @@ class IncomingGroupsV2MessageQueue: NSObject {
                                                selector: #selector(reachabilityChanged),
                                                name: SSKReachability.owsReachabilityDidChange,
                                                object: nil)
+
+        AppReadiness.runNowOrWhenAppDidBecomeReadySync {
+            self.messagePipelineSupervisor.register(pipelineStage: self)
+        }
     }
 
     // MARK: - Notifications
@@ -94,13 +61,13 @@ class IncomingGroupsV2MessageQueue: NSObject {
     @objc func applicationWillEnterForeground() {
         AssertIsOnMainThread()
 
-        isAppInBackground.set(false)
+        drainQueueWhenReady()
     }
 
     @objc func applicationDidEnterBackground() {
         AssertIsOnMainThread()
 
-        isAppInBackground.set(true)
+        drainQueueWhenReady()
     }
 
     @objc func registrationStateDidChange() {
@@ -121,14 +88,19 @@ class IncomingGroupsV2MessageQueue: NSObject {
         drainQueueWhenReady()
     }
 
-    // MARK: -
+    func supervisorDidResumeMessageProcessing(_ supervisor: MessagePipelineSupervisor) {
+        DispatchQueue.main.async {
+            self.drainQueueWhenReady()
+        }
+    }
 
-    private let serialQueue: DispatchQueue = DispatchQueue(label: "org.whispersystems.message.groupv2")
+    // MARK: -
 
     fileprivate func enqueue(envelopeData: Data,
                              plaintextData: Data?,
                              groupId: Data,
                              wasReceivedByUD: Bool,
+                             serverDeliveryTimestamp: UInt64,
                              transaction: SDSAnyWriteTransaction) {
 
         // We need to persist the decrypted envelope data ASAP to prevent data loss.
@@ -136,6 +108,7 @@ class IncomingGroupsV2MessageQueue: NSObject {
                       plaintextData: plaintextData,
                       groupId: groupId,
                       wasReceivedByUD: wasReceivedByUD,
+                      serverDeliveryTimestamp: serverDeliveryTimestamp,
                       transaction: transaction.unwrapGrdbWrite)
     }
 
@@ -143,63 +116,209 @@ class IncomingGroupsV2MessageQueue: NSObject {
         guard CurrentAppContext().shouldProcessIncomingMessages else {
             return
         }
-        AppReadiness.runNowOrWhenAppDidBecomeReadyPolite {
-            self.drainQueue()
+        AppReadiness.runNowOrWhenAppDidBecomeReadySync {
+            DispatchQueue.global().async {
+                self.drainQueues()
+            }
         }
     }
 
-    private func drainQueue(retryDelayAfterFailure: TimeInterval = 1.0) {
-        guard AppReadiness.isAppReady() || CurrentAppContext().isRunningTests else {
+    private let unfairLock = UnfairLock()
+    private var groupsMessageProcessors = [Data: GroupsMessageProcessor]()
+
+    // At any given time, we need to ensure that there is exactly
+    // one GroupsMessageProcessor for each group that needs to
+    // process incoming messages.
+    private func drainQueues() {
+        owsAssertDebug(!Thread.isMainThread)
+
+        guard AppReadiness.isAppReady || CurrentAppContext().isRunningTests else {
             owsFailDebug("App is not ready.")
             return
         }
-        guard CurrentAppContext().shouldProcessIncomingMessages else {
-            return
-        }
-        guard tsAccountManager.isRegisteredAndReady else {
-            return
-        }
-
-        serialQueue.async {
-            guard !self.isDrainingQueue else {
-                return
-            }
-            self.isDrainingQueue = true
-            self.drainQueueWorkStep(retryDelayAfterFailure: retryDelayAfterFailure)
-        }
-    }
-
-    private func drainQueueWorkStep(retryDelayAfterFailure: TimeInterval = 1.0) {
-        assertOnQueue(serialQueue)
-
-        guard !DebugFlags.suppressBackgroundActivity else {
+        let canProcess = (messagePipelineSupervisor.isMessageProcessingPermitted &&
+                            tsAccountManager.isRegisteredAndReady &&
+                            !DebugFlags.suppressBackgroundActivity)
+        guard canProcess else {
             // Don't process queues.
             return
         }
-        guard RemoteConfig.groupsV2IncomingMessages else {
-            // Don't process this queue.
-            return
-        }
 
-        // We want a value that is just high enough to yield perf benefits.
-        let kIncomingMessageBatchSize: UInt = 32
-        // If the app is in the background, use batch size of 1.
-        // This reduces the cost of being interrupted and rolled back if
-        // app is suspended.
-        let batchSize: UInt = isAppInBackground.get() ? 1 : kIncomingMessageBatchSize
+        // Obtain the list of groups that currently need processing.
+        let groupIdsWithJobs = Set(databaseStorage.read { transaction in
+            self.finder.allEnqueuedGroupIds(transaction: transaction.unwrapGrdbRead)
+        })
 
-        let batchJobs = databaseStorage.read { transaction in
-            return self.finder.nextJobs(batchSize: batchSize, transaction: transaction.unwrapGrdbRead)
-        }
-        guard batchJobs.count > 0 else {
-            self.isDrainingQueue = false
+        guard !groupIdsWithJobs.isEmpty else {
             Logger.verbose("Queue is drained")
             NotificationCenter.default.postNotificationNameAsync(GroupsV2MessageProcessor.didFlushGroupsV2MessageQueue, object: nil)
             return
         }
 
-        var backgroundTask: OWSBackgroundTask? = OWSBackgroundTask(label: "\(#function)")
+        var groupIdsToProcess = Set<Data>()
+        unfairLock.withLock {
+            groupIdsToProcess = groupIdsWithJobs.subtracting(groupsMessageProcessors.keys)
 
+            for groupId in groupIdsToProcess {
+                let groupsMessageProcessor = GroupsMessageProcessor(groupId: groupId)
+                groupsMessageProcessors[groupId] = groupsMessageProcessor
+
+                firstly(on: .global()) { () -> Promise<Void> in
+                    groupsMessageProcessor.promise
+                }.ensure(on: .global()) {
+                    self.unfairLock.withLock {
+                        _ = self.groupsMessageProcessors.removeValue(forKey: groupId)
+                    }
+                    self.drainQueues()
+                }.catch(on: .global()) { error in
+                    owsFailDebug("Error: \(error)")
+                }
+            }
+        }
+
+        guard !groupIdsToProcess.isEmpty else {
+            return
+        }
+    }
+
+    func hasPendingJobs(transaction: SDSAnyReadTransaction) -> Bool {
+        return self.finder.jobCount(transaction: transaction) > 0
+    }
+}
+
+// MARK: -
+
+// The entity tries to process all pending jobs for a given group.
+//
+// * It retries with exponential backoff.
+// * It retries immediately if reachability, etc. change.
+//
+// It's promise is fulfilled when all jobs are processed _or_
+// we give up.
+private class GroupsMessageProcessor: MessageProcessingPipelineStage, Dependencies {
+
+    private let groupId: Data
+    private let finder = GRDBGroupsV2MessageJobFinder()
+
+    fileprivate let promise: Promise<Void>
+    private let resolver: Resolver<Void>
+
+    fileprivate required init(groupId: Data) {
+        self.groupId = groupId
+
+        let (promise, resolver) = Promise<Void>.pending()
+        self.promise = promise
+        self.resolver = resolver
+
+        observeNotifications()
+
+        tryToProcess()
+    }
+
+    private func observeNotifications() {
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(applicationWillEnterForeground),
+                                               name: .OWSApplicationWillEnterForeground,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(applicationDidEnterBackground),
+                                               name: .OWSApplicationDidEnterBackground,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(registrationStateDidChange),
+                                               name: .registrationStateDidChange,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(webSocketStateDidChange),
+                                               name: .webSocketStateDidChange,
+                                               object: nil)
+        NotificationCenter.default.addObserver(self,
+                                               selector: #selector(reachabilityChanged),
+                                               name: SSKReachability.owsReachabilityDidChange,
+                                               object: nil)
+
+        AppReadiness.runNowOrWhenAppDidBecomeReadySync {
+            self.messagePipelineSupervisor.register(pipelineStage: self)
+        }
+    }
+
+    // MARK: - Notifications
+
+    @objc func applicationWillEnterForeground() {
+        AssertIsOnMainThread()
+
+        tryToProcess()
+    }
+
+    @objc func applicationDidEnterBackground() {
+        AssertIsOnMainThread()
+
+        tryToProcess()
+    }
+
+    @objc func registrationStateDidChange() {
+        AssertIsOnMainThread()
+
+        tryToProcess()
+    }
+
+    @objc func webSocketStateDidChange() {
+        AssertIsOnMainThread()
+
+        tryToProcess()
+    }
+
+    @objc func reachabilityChanged() {
+        AssertIsOnMainThread()
+
+        tryToProcess()
+    }
+
+    // MARK: -
+
+    private let isDrainingQueue = AtomicBool(false)
+
+    private func tryToProcess(retryDelayAfterFailure: TimeInterval = 1.0) {
+        guard isDrainingQueue.tryToSetFlag() else {
+            // Batch already in flight.
+            return
+        }
+        processWorkStep(retryDelayAfterFailure: retryDelayAfterFailure)
+    }
+
+    private typealias BatchCompletionBlock = ([IncomingGroupsV2MessageJob], Bool, SDSAnyWriteTransaction) -> Void
+
+    private func processWorkStep(retryDelayAfterFailure: TimeInterval = 1.0) {
+        owsAssertDebug(isDrainingQueue.get())
+
+        let canProcess = (messagePipelineSupervisor.isMessageProcessingPermitted &&
+                            tsAccountManager.isRegisteredAndReady &&
+                            !DebugFlags.suppressBackgroundActivity)
+        guard canProcess else {
+            Logger.warn("Cannot process.")
+            resolver.fulfill(())
+            return
+        }
+
+        // We want a value that is just high enough to yield perf benefits.
+        let kIncomingMessageBatchSize: UInt = 16
+        // If the app is in the background, use batch size of 1.
+        // This reduces the cost of being interrupted and rolled back if
+        // app is suspended.
+        let batchSize: UInt = CurrentAppContext().isInBackground() ? 1 : kIncomingMessageBatchSize
+
+        let batchJobs = databaseStorage.read { transaction in
+            self.finder.nextJobs(forGroupId: self.groupId, batchSize: batchSize, transaction: transaction.unwrapGrdbRead)
+        }
+        guard !batchJobs.isEmpty else {
+            Logger.verbose("No jobs for \(groupId.hexadecimalString).")
+            resolver.fulfill(())
+            return
+        }
+
+        Logger.verbose("Processing \(batchJobs.count) jobs for \(groupId.hexadecimalString)")
+
+        var backgroundTask: OWSBackgroundTask? = OWSBackgroundTask(label: "\(#function)")
         let completion: BatchCompletionBlock = { (processedJobs, shouldWaitBeforeRetrying, transaction) in
             // NOTE: This transaction is the same transaction as the transaction
             //       passed to processJobs() in the "sync" case but is a different
@@ -209,34 +328,33 @@ class IncomingGroupsV2MessageQueue: NSObject {
                 Logger.warn("shouldWaitBeforeRetrying")
             }
 
-            let uniqueIds = processedJobs.map { $0.uniqueId }
-            self.finder.removeJobs(withUniqueIds: uniqueIds,
-                                   transaction: transaction.unwrapGrdbWrite)
+            let processedUniqueIds = processedJobs.map { $0.uniqueId }
+            self.finder.removeJobs(withUniqueIds: processedUniqueIds, transaction: transaction.unwrapGrdbWrite)
 
-            let jobCount: UInt = self.finder.jobCount(transaction: transaction)
+            let jobCount: UInt = self.finder.jobCount(forGroupId: self.groupId, transaction: transaction.unwrapGrdbRead)
 
-            Logger.verbose("completed \(processedJobs.count)/\(batchJobs.count) jobs. \(jobCount) jobs left.")
+            Logger.verbose("Completed \(processedJobs.count)/\(batchJobs.count) jobs. \(jobCount) jobs left.")
 
-            transaction.addAsyncCompletion {
+            transaction.addAsyncCompletionOffMain {
                 assert(backgroundTask != nil)
                 backgroundTask = nil
 
                 if shouldWaitBeforeRetrying {
-                    // Retry with exponential backoff.
-                    self.serialQueue.async {
-                        // After successfully processing a batch drainQueueWorkStep()
-                        // calls itself to process the next batch, if any.
-                        // The isDrainingQueue flag is cleared when all batches have
-                        // been processed.
-                        //
-                        // After failures, we clear isDrainingQueue immediately and
-                        // call drainQueue(), not drainQueueWorkStep() after a delay.
-                        // That allows us to kick off another batch immediately if
-                        // reachability changes, etc.
-                        self.isDrainingQueue = false
-                        self.serialQueue.asyncAfter(deadline: DispatchTime.now() + retryDelayAfterFailure) {
-                            self.drainQueue(retryDelayAfterFailure: retryDelayAfterFailure * 2)
-                        }
+                    // After successfully processing a batch drainQueueWorkStep()
+                    // calls itself to process the next batch, if any.
+                    // The isDrainingQueue flag is cleared when all batches have
+                    // been processed.
+                    //
+                    // After failures, we clear isDrainingQueue immediately and
+                    // call drainQueue(), not drainQueueWorkStep() after a delay.
+                    // That allows us to kick off another batch immediately if
+                    // reachability changes, etc.
+                    if !self.isDrainingQueue.tryToClearFlag() {
+                        self.resolver.reject(OWSAssertionError("Couldn't clear flag."))
+                        return
+                    }
+                    DispatchQueue.global().asyncAfter(deadline: DispatchTime.now() + retryDelayAfterFailure) {
+                        self.tryToProcess(retryDelayAfterFailure: retryDelayAfterFailure * 2)
                     }
                 } else {
                     // Wait always a bit in hopes of increasing the size of the next batch.
@@ -244,8 +362,8 @@ class IncomingGroupsV2MessageQueue: NSObject {
                     // so by definition we're receiving more than one message and can benefit from
                     // batching.
                     let batchSpacingSeconds: TimeInterval = 0.5
-                    self.serialQueue.asyncAfter(deadline: DispatchTime.now() + batchSpacingSeconds) {
-                        self.drainQueueWorkStep()
+                    DispatchQueue.global().asyncAfter(deadline: DispatchTime.now() + batchSpacingSeconds) {
+                        self.processWorkStep()
                     }
                 }
             }
@@ -270,7 +388,7 @@ class IncomingGroupsV2MessageQueue: NSObject {
         }
         jobInfo.groupContext = groupContext
         do {
-            jobInfo.groupContextInfo = try groupsV2.groupV2ContextInfo(forMasterKeyData: groupContext.masterKey)
+            jobInfo.groupContextInfo = try groupsV2Swift.groupV2ContextInfo(forMasterKeyData: groupContext.masterKey)
         } catch {
             owsFailDebug("Invalid group context: \(error).")
             return jobInfo
@@ -329,14 +447,14 @@ class IncomingGroupsV2MessageQueue: NSObject {
                                                             owsFailDebug("Missing thread.")
                                                             return true
             }
-            guard groupThread.groupModel.groupMembership.isNonPendingMember(localAddress) else {
+            guard groupThread.groupModel.groupMembership.isFullMember(localAddress) else {
                 // * Local user might have just left the group.
                 // * Local user may have just learned that we were removed from the group.
                 // * Local user might be a pending member with an invite.
                 Logger.warn("Discarding envelope; local user is not an active group member.")
                 return true
             }
-            guard groupThread.groupModel.groupMembership.isNonPendingMember(sourceAddress) else {
+            guard groupThread.groupModel.groupMembership.isFullMember(sourceAddress) else {
                 // * The sender might have just left the group.
                 Logger.warn("Discarding envelope; sender is not an active group member.")
                 return true
@@ -373,24 +491,11 @@ class IncomingGroupsV2MessageQueue: NSObject {
             owsFailDebug("Missing groupContextInfo.")
             return true
         }
-        let groupId = groupContextInfo.groupId
-        guard let groupThread = TSGroupThread.fetch(groupId: groupId, transaction: transaction) else {
-            return false
-        }
-        guard let groupModel = groupThread.groupModel as? TSGroupModelV2 else {
-            owsFailDebug("Invalid group model.")
-            return false
-        }
-        let messageRevision = groupContext.revision
-        let modelRevision = groupModel.revision
-        if messageRevision <= modelRevision {
-            return true
-        }
-        // The incoming message indicates that there is a new group revision.
-        // We'll update our group model in a standalone batch using either
-        // the change proto embedded in the group context or by fetching
-        // latest state from the service.
-        return false
+        return GroupsV2MessageProcessor.canContextBeProcessedWithoutUpdate(
+            groupContext: groupContext,
+            groupContextInfo: groupContextInfo,
+            transaction: transaction
+        )
     }
 
     // NOTE: This method might do its work synchronously (in the "no update" case)
@@ -449,7 +554,7 @@ class IncomingGroupsV2MessageQueue: NSObject {
         let reportFailure = { (transaction: SDSAnyWriteTransaction) in
             // TODO: Add analytics.
             let errorMessage = ThreadlessErrorMessage.corruptedMessageInUnknownThread()
-            self.notificationsManager.notifyUser(for: errorMessage, transaction: transaction)
+            self.notificationsManager?.notifyUser(for: errorMessage, transaction: transaction)
         }
 
         var processedJobs = [IncomingGroupsV2MessageJob]()
@@ -470,13 +575,14 @@ class IncomingGroupsV2MessageQueue: NSObject {
                 if !self.messageManager.processEnvelope(envelope,
                                                         plaintextData: job.plaintextData,
                                                         wasReceivedByUD: job.wasReceivedByUD,
+                                                        serverDeliveryTimestamp: job.serverDeliveryTimestamp,
                                                         transaction: transaction) {
                     reportFailure(transaction)
                 }
             }
             processedJobs.append(job)
 
-            if isAppInBackground.get() {
+            if CurrentAppContext().isInBackground() {
                 // If the app is in the background, stop processing this batch.
                 //
                 // Since this check is done after processing jobs, we'll continue
@@ -524,7 +630,10 @@ class IncomingGroupsV2MessageQueue: NSObject {
                     // _Do_ wait before retrying.
                     completion([], true, transaction)
                 } else {
-                    owsFailDebug("Discarding unprocess-able message: \(error)")
+                    // This should only occur if we no longer have access to group state,
+                    // e.g. a) we were kicked out of the group. b) our invite was revoked.
+                    // c) our request to join via group invite link was denied.
+                    Logger.warn("Discarding unprocess-able message: \(error)")
 
                     // Do not retry
                     // _Do_ include the job in the processed jobs.
@@ -539,12 +648,23 @@ class IncomingGroupsV2MessageQueue: NSObject {
     private func updateGroupPromise(jobInfo: IncomingGroupsV2MessageJobInfo) -> Promise<UpdateOutcome> {
         // First, we try to update the group locally using changes embedded in
         // the group context (if any).
-        firstly {
-            return self.tryToUpdateUsingEmbeddedGroupUpdate(jobInfo: jobInfo)
+        firstly(on: .global()) { () -> Promise<Void> in
+            guard let groupContextInfo = jobInfo.groupContextInfo else {
+                owsFailDebug("Missing groupContextInfo.")
+                return Promise.value(())
+            }
+            return firstly(on: .global()) { () -> Promise<Void> in
+                self.groupsV2Swift.updateAlreadyMigratedGroupIfNecessary(v2GroupId: groupContextInfo.groupId)
+            }.recover(on: .global()) {error -> Promise<Void> in
+                owsFailDebug("Error: \(error)")
+                throw GroupsV2Error.shouldRetry
+            }
+        }.then(on: .global()) { () -> Promise<UpdateOutcome> in
+            self.tryToUpdateUsingEmbeddedGroupUpdate(jobInfo: jobInfo)
         }.recover(on: .global()) { _ in
             owsFailDebug("tryToUpdateUsingEmbeddedGroupUpdate should never fail.")
             return Guarantee.value(UpdateOutcome.failureShouldFailoverToService)
-        }.then(on: DispatchQueue.global()) { (embeddedUpdateOutcome: UpdateOutcome) -> Promise<UpdateOutcome> in
+        }.then(on: .global()) { (embeddedUpdateOutcome: UpdateOutcome) -> Promise<UpdateOutcome> in
             if embeddedUpdateOutcome == .failureShouldFailoverToService {
                 return self.tryToUpdateUsingService(jobInfo: jobInfo)
             } else {
@@ -622,16 +742,16 @@ class IncomingGroupsV2MessageQueue: NSObject {
             DispatchQueue.global().async(.promise) {
                 // We need to verify the signatures because these protos came from
                 // another client, not the service.
-                return try self.groupsV2.parseAndVerifyChangeActionsProto(changeActionsProtoData,
-                                                                          ignoreSignature: false)
+                return try self.groupsV2Swift.parseAndVerifyChangeActionsProto(changeActionsProtoData,
+                                                                               ignoreSignature: false)
             }.then(on: .global()) { (changeActionsProto: GroupsProtoGroupChangeActions) throws -> Promise<TSGroupThread> in
                 guard changeActionsProto.revision == contextRevision else {
                     throw OWSAssertionError("Embedded change proto revision doesn't match context revision.")
                 }
-                return try self.groupsV2.updateGroupWithChangeActions(groupId: oldGroupModel.groupId,
-                                                                      changeActionsProto: changeActionsProto,
-                                                                      ignoreSignature: false,
-                                                                      groupSecretParamsData: oldGroupModel.secretParamsData)
+                return try self.groupsV2Swift.updateGroupWithChangeActions(groupId: oldGroupModel.groupId,
+                                                                           changeActionsProto: changeActionsProto,
+                                                                           ignoreSignature: false,
+                                                                           groupSecretParamsData: oldGroupModel.secretParamsData)
             }.map(on: .global()) { (updatedGroupThread: TSGroupThread) throws -> Void in
                 guard let updatedGroupModel = updatedGroupThread.groupModel as? TSGroupModelV2 else {
                     owsFailDebug("Invalid group model.")
@@ -654,7 +774,11 @@ class IncomingGroupsV2MessageQueue: NSObject {
                     Logger.warn("Error: \(error)")
                     return resolver.fulfill(.failureShouldRetry)
                 } else {
-                    owsFailDebug("Error: \(error)")
+                    if case GroupsV2Error.cantApplyChangesToPlaceholder = error {
+                        Logger.warn("Error: \(error)")
+                    } else {
+                        owsFailDebug("Error: \(error)")
+                    }
                     return resolver.fulfill(.failureShouldFailoverToService)
                 }
             }
@@ -685,7 +809,15 @@ class IncomingGroupsV2MessageQueue: NSObject {
                 return Guarantee.value(UpdateOutcome.failureShouldRetry)
             }
 
-            owsFailDebug("error: \(type(of: error)) \(error)")
+            if case GroupsV2Error.localUserNotInGroup = error {
+                // This should only occur if we no longer have access to group state,
+                // e.g. a) we were kicked out of the group. b) our invite was revoked.
+                // c) our request to join via group invite link was denied.
+                Logger.warn("Error: \(type(of: error)) \(error)")
+            } else {
+                owsFailDebug("Error: \(type(of: error)) \(error)")
+            }
+
             return Guarantee.value(UpdateOutcome.failureShouldDiscard)
         }
     }
@@ -707,24 +839,12 @@ class IncomingGroupsV2MessageQueue: NSObject {
             return false
         }
     }
-
-    func hasPendingJobs(transaction: SDSAnyReadTransaction) -> Bool {
-        return self.finder.jobCount(transaction: transaction) > 0
-    }
 }
 
 // MARK: -
 
 @objc
 public class GroupsV2MessageProcessor: NSObject {
-
-    // MARK: - Dependencies
-
-    private var groupsV2: GroupsV2Swift {
-        return SSKEnvironment.shared.groupsV2 as! GroupsV2Swift
-    }
-
-    // MARK: - 
 
     @objc
     public static let didFlushGroupsV2MessageQueue = Notification.Name("didFlushGroupsV2MessageQueue")
@@ -747,14 +867,10 @@ public class GroupsV2MessageProcessor: NSObject {
                         plaintextData: Data?,
                         envelope: SSKProtoEnvelope,
                         wasReceivedByUD: Bool,
+                        serverDeliveryTimestamp: UInt64,
                         transaction: SDSAnyWriteTransaction) {
         guard envelopeData.count > 0 else {
             owsFailDebug("Empty envelope.")
-            return
-        }
-
-        guard RemoteConfig.groupsV2IncomingMessages else {
-            // Discard envelope.
             return
         }
 
@@ -768,11 +884,12 @@ public class GroupsV2MessageProcessor: NSObject {
                                 plaintextData: plaintextData,
                                 groupId: groupId,
                                 wasReceivedByUD: wasReceivedByUD,
+                                serverDeliveryTimestamp: serverDeliveryTimestamp,
                                 transaction: transaction)
 
         // The new envelope won't be visible to the finder until this transaction commits,
         // so drainQueue in the transaction completion.
-        transaction.addAsyncCompletion {
+        transaction.addAsyncCompletionOffMain {
             self.processingQueue.drainQueueWhenReady()
         }
     }
@@ -801,6 +918,59 @@ public class GroupsV2MessageProcessor: NSObject {
     }
 
     @objc
+    public class func canContextBeProcessedImmediately(
+        groupContext: SSKProtoGroupContextV2,
+        transaction: SDSAnyReadTransaction
+    ) -> Bool {
+        let groupContextInfo: GroupV2ContextInfo
+        do {
+            groupContextInfo = try groupsV2.groupV2ContextInfo(forMasterKeyData: groupContext.masterKey)
+        } catch {
+            owsFailDebug("Invalid group context: \(error).")
+            return false
+        }
+
+        // We can only process GV2 messages immediately if:
+        // 1. We don't have any other messages queued for this thread
+        // 2. The message can be processed without updates
+
+        guard !GRDBGroupsV2MessageJobFinder().existsJob(forGroupId: groupContextInfo.groupId, transaction: transaction.unwrapGrdbRead) else {
+            Logger.warn("Cannot immediately process GV2 message because there are messages queued")
+            return false
+        }
+
+        return canContextBeProcessedWithoutUpdate(
+            groupContext: groupContext,
+            groupContextInfo: groupContextInfo,
+            transaction: transaction
+        )
+    }
+
+    fileprivate class func canContextBeProcessedWithoutUpdate(
+        groupContext: SSKProtoGroupContextV2,
+        groupContextInfo: GroupV2ContextInfo,
+        transaction: SDSAnyReadTransaction
+    ) -> Bool {
+        guard let groupThread = TSGroupThread.fetch(groupId: groupContextInfo.groupId, transaction: transaction) else {
+            return false
+        }
+        guard let groupModel = groupThread.groupModel as? TSGroupModelV2 else {
+            Logger.warn("Invalid group model; possibly needs to be migrated.")
+            return false
+        }
+        let messageRevision = groupContext.revision
+        let modelRevision = groupModel.revision
+        if messageRevision <= modelRevision {
+            return true
+        }
+        // The incoming message indicates that there is a new group revision.
+        // We'll update our group model in a standalone batch using either
+        // the change proto embedded in the group context or by fetching
+        // latest state from the service.
+        return false
+    }
+
+    @objc
     public class func groupContextV2(forEnvelope envelope: SSKProtoEnvelope?,
                                      plaintextData: Data?) -> SSKProtoGroupContextV2? {
         guard let envelope = envelope else {
@@ -816,7 +986,7 @@ public class GroupsV2MessageProcessor: NSObject {
 
         let contentProto: SSKProtoContent
         do {
-            contentProto = try SSKProtoContent.parseData(plaintextData)
+            contentProto = try SSKProtoContent(serializedData: plaintextData)
         } catch {
             owsFailDebug("could not parse proto: \(error)")
             return nil

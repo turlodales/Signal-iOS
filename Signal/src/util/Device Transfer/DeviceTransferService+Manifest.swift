@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -8,7 +8,7 @@ import MultipeerConnectivity
 
 extension DeviceTransferService {
     func buildManifest() throws -> DeviceTransferProtoManifest {
-        let manifestBuilder = DeviceTransferProtoManifest.builder(grdbSchemaVersion: UInt64(GRDBSchemaMigrator.grdbSchemaVersionLatest))
+        var manifestBuilder = DeviceTransferProtoManifest.builder(grdbSchemaVersion: UInt64(GRDBSchemaMigrator.grdbSchemaVersionLatest))
         var estimatedTotalSize: UInt64 = 0
 
         // Database
@@ -54,26 +54,11 @@ extension DeviceTransferService {
 
         // Attachments, Avatars, and Stickers
 
-        var filesToTransfer = [String]()
-
-        filesToTransfer += try OWSFileSystem.allFiles(
-            inDirectoryRecursive: URL(
-                fileURLWithPath: "Attachments/",
-                relativeTo: DeviceTransferService.appSharedDataDirectory
-            ).path
-        )
-        filesToTransfer += try OWSFileSystem.allFiles(
-            inDirectoryRecursive: URL(
-                fileURLWithPath: "ProfileAvatars/",
-                relativeTo: DeviceTransferService.appSharedDataDirectory
-            ).path
-        )
-        filesToTransfer += try OWSFileSystem.allFiles(
-            inDirectoryRecursive: URL(
-                fileURLWithPath: "StickerManager/",
-                relativeTo: DeviceTransferService.appSharedDataDirectory
-            ).path
-        )
+        let foldersToTransfer = ["Attachments/", "ProfileAvatars/", "StickerManager/", "Wallpapers/", "Library/Sounds/"]
+        let filesToTransfer = try foldersToTransfer.flatMap { folder -> [String] in
+            let url = URL(fileURLWithPath: folder, relativeTo: DeviceTransferService.appSharedDataDirectory)
+            return try OWSFileSystem.recursiveFilesInDirectory(url.path)
+        }
 
         for file in filesToTransfer {
             guard let size = OWSFileSystem.fileSize(ofPath: file) else {
@@ -137,13 +122,19 @@ extension DeviceTransferService {
             throw OWSAssertionError("path contains invalid character: *")
         }
 
-        guard !path.contains("~") else {
-            throw OWSAssertionError("path starts with invalid character: .")
+        let components = path.components(separatedBy: "/")
+
+        guard components.first != "~" else {
+            throw OWSAssertionError("path starts with invalid component: ~")
         }
 
-        for component in path.components(separatedBy: "/") {
-            guard !component.starts(with: ".") else {
-                throw OWSAssertionError("path starts with invalid character: .")
+        for component in components {
+            guard component != "." else {
+                throw OWSAssertionError("path contains invalid component: .")
+            }
+
+            guard component != ".." else {
+                throw OWSAssertionError("path contains invalid component: ..")
             }
         }
 
@@ -169,7 +160,7 @@ extension DeviceTransferService {
             stopTransfer()
             return owsFailDebug("Failed to read manifest data")
         }
-        guard let manifest = try? DeviceTransferProtoManifest.parseData(data) else {
+        guard let manifest = try? DeviceTransferProtoManifest(serializedData: data) else {
             stopTransfer()
             return owsFailDebug("Failed to parse manifest proto")
         }
@@ -196,6 +187,7 @@ extension DeviceTransferService {
             oldDevicePeerId: peerId,
             manifest: manifest,
             receivedFileIds: [DeviceTransferService.manifestIdentifier],
+            skippedFileIds: [],
             progress: progress
         )
 
@@ -273,6 +265,6 @@ extension DeviceTransferService {
         ).path
         guard OWSFileSystem.fileOrFolderExists(atPath: manifestPath) else { return nil }
         guard let manifestData = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)) else { return nil }
-        return try? DeviceTransferProtoManifest.parseData(manifestData)
+        return try? DeviceTransferProtoManifest(serializedData: manifestData)
     }
 }

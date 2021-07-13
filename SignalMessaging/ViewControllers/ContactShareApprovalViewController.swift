@@ -6,7 +6,7 @@ import Foundation
 import SignalServiceKit
 
 @objc
-public protocol ContactShareApprovalViewControllerDelegate: class {
+public protocol ContactShareApprovalViewControllerDelegate: AnyObject {
     func approveContactShare(_ approveContactShare: ContactShareApprovalViewController,
                              didApproveContactShare contactShare: ContactShareViewModel)
     func approveContactShare(_ approveContactShare: ContactShareApprovalViewController,
@@ -21,7 +21,7 @@ public protocol ContactShareApprovalViewControllerDelegate: class {
 
 // MARK: -
 
-protocol ContactShareField: class {
+protocol ContactShareField: AnyObject {
 
     var isAvatar: Bool { get }
 
@@ -63,7 +63,7 @@ class ContactShareFieldBase<ContactFieldType: OWSContactField>: NSObject, Contac
     }
 
     func applyToContact(contact: ContactShareViewModel) {
-        preconditionFailure("This method must be overridden")
+        notImplemented()
     }
 }
 
@@ -147,7 +147,7 @@ class ContactShareAvatarField: ContactShareFieldBase<OWSContactAvatar> {
 
 // MARK: -
 
-protocol ContactShareFieldViewDelegate: class {
+protocol ContactShareFieldViewDelegate: AnyObject {
     func contactShareFieldViewDidChangeSelectedState()
 }
 
@@ -228,14 +228,6 @@ class ContactShareFieldView: UIStackView {
 
 @objc
 public class ContactShareApprovalViewController: OWSViewController, EditContactShareNameViewControllerDelegate, ContactShareFieldViewDelegate {
-
-    // MARK: - Dependencies
-
-    private var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    // MARK: -
 
     @objc
     public weak var delegate: ContactShareApprovalViewControllerDelegate?
@@ -463,7 +455,7 @@ public class ContactShareApprovalViewController: OWSViewController, EditContactS
         let nameLabel = UILabel()
         self.nameLabel = nameLabel
         nameLabel.text = contactShare.name.displayName
-        nameLabel.font = UIFont.ows_dynamicTypeBody.ows_semibold()
+        nameLabel.font = UIFont.ows_dynamicTypeBody.ows_semibold
         nameLabel.textColor = Theme.primaryTextColor
         nameLabel.lineBreakMode = .byTruncatingTail
         stackView.addArrangedSubview(nameLabel)

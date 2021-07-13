@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -21,18 +21,8 @@ public class PerformanceBaseTest: XCTestCase {
     }
 
     public override func tearDown() {
-        SDSDatabaseStorage.shouldLogDBQueries = FeatureFlags.logSQLQueries
+        SDSDatabaseStorage.shouldLogDBQueries = DebugFlags.logSQLQueries
         super.tearDown()
-    }
-
-    // MARK: - Dependencies
-
-    public var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    var storageCoordinator: StorageCoordinator {
-        return SSKEnvironment.shared.storageCoordinator
     }
 
     // MARK: Helpers

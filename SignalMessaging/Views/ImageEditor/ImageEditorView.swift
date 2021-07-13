@@ -5,11 +5,13 @@
 import UIKit
 
 @objc
-public protocol ImageEditorViewDelegate: class {
+public protocol ImageEditorViewDelegate: AnyObject {
     func imageEditor(presentFullScreenView viewController: UIViewController,
                      isTransparent: Bool)
     func imageEditorUpdateNavigationBar()
     func imageEditorUpdateControls()
+
+    var imageEditorShouldIgnoreTapGesture: Bool { get }
 }
 
 // MARK: -
@@ -195,6 +197,8 @@ public class ImageEditorView: UIView {
     @objc
     public func handleTapGesture(_ gestureRecognizer: UIGestureRecognizer) {
         AssertIsOnMainThread()
+
+        guard delegate?.imageEditorShouldIgnoreTapGesture != true else { return }
 
         guard gestureRecognizer.state == .recognized else {
             owsFailDebug("Unexpected state.")

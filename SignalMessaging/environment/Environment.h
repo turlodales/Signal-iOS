@@ -1,14 +1,18 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import <SignalServiceKit/SSKEnvironment.h>
 
+@class AvatarBuilder;
+@class BroadcastMediaMessageJobQueue;
+@class ChatColors;
+@class ContactsViewHelper;
 @class LaunchJobs;
 @class OWSAudioSession;
-@class OWSContactsManager;
 @class OWSIncomingContactSyncJobQueue;
 @class OWSIncomingGroupSyncJobQueue;
+@class OWSOrphanDataCleaner;
 @class OWSPreferences;
 @class OWSSounds;
 @class OWSWindowManager;
@@ -35,17 +39,26 @@
                          preferences:(OWSPreferences *)preferences
           proximityMonitoringManager:(id<OWSProximityMonitoringManager>)proximityMonitoringManager
                               sounds:(OWSSounds *)sounds
-                       windowManager:(OWSWindowManager *)windowManager;
+                       windowManager:(OWSWindowManager *)windowManager
+                  contactsViewHelper:(ContactsViewHelper *)contactsViewHelper
+       broadcastMediaMessageJobQueue:(BroadcastMediaMessageJobQueue *)broadcastMediaMessageJobQueue
+                   orphanDataCleaner:(OWSOrphanDataCleaner *)orphanDataCleaner
+                          chatColors:(ChatColors *)chatColors
+                       avatarBuilder:(AvatarBuilder *)avatarBuilder;
 
-@property (nonatomic, readonly) OWSAudioSession *audioSession;
-@property (nonatomic, readonly) OWSContactsManager *contactsManager;
-@property (nonatomic, readonly) OWSIncomingContactSyncJobQueue *incomingContactSyncJobQueue;
-@property (nonatomic, readonly) OWSIncomingGroupSyncJobQueue *incomingGroupSyncJobQueue;
-@property (nonatomic, readonly) LaunchJobs *launchJobs;
-@property (nonatomic, readonly) id<OWSProximityMonitoringManager> proximityMonitoringManager;
-@property (nonatomic, readonly) OWSPreferences *preferences;
-@property (nonatomic, readonly) OWSSounds *sounds;
-@property (nonatomic, readonly) OWSWindowManager *windowManager;
+@property (nonatomic, readonly) OWSAudioSession *audioSessionRef;
+@property (nonatomic, readonly) OWSIncomingContactSyncJobQueue *incomingContactSyncJobQueueRef;
+@property (nonatomic, readonly) OWSIncomingGroupSyncJobQueue *incomingGroupSyncJobQueueRef;
+@property (nonatomic, readonly) LaunchJobs *launchJobsRef;
+@property (nonatomic, readonly) id<OWSProximityMonitoringManager> proximityMonitoringManagerRef;
+@property (nonatomic, readonly) OWSPreferences *preferencesRef;
+@property (nonatomic, readonly) OWSSounds *soundsRef;
+@property (nonatomic, readonly) OWSWindowManager *windowManagerRef;
+@property (nonatomic, readonly) ContactsViewHelper *contactsViewHelperRef;
+@property (nonatomic, readonly) BroadcastMediaMessageJobQueue *broadcastMediaMessageJobQueueRef;
+@property (nonatomic, readonly) OWSOrphanDataCleaner *orphanDataCleanerRef;
+@property (nonatomic, readonly) ChatColors *chatColorsRef;
+@property (nonatomic, readonly) AvatarBuilder *avatarBuilderRef;
 
 @property (class, nonatomic) Environment *shared;
 

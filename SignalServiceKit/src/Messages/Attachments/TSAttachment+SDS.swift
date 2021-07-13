@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -53,6 +53,7 @@ public struct AttachmentRecord: SDSRecord {
     public let uploadTimestamp: UInt64
     public let cdnKey: String
     public let cdnNumber: UInt32
+    public let isAnimatedCached: Bool?
 
     public enum CodingKeys: String, CodingKey, ColumnExpression, CaseIterable {
         case id
@@ -83,6 +84,7 @@ public struct AttachmentRecord: SDSRecord {
         case uploadTimestamp
         case cdnKey
         case cdnNumber
+        case isAnimatedCached
     }
 
     public static func columnName(_ column: AttachmentRecord.CodingKeys, fullyQualified: Bool = false) -> String {
@@ -134,6 +136,7 @@ public extension AttachmentRecord {
         uploadTimestamp = row[25]
         cdnKey = row[26]
         cdnNumber = row[27]
+        isAnimatedCached = row[28]
     }
 }
 
@@ -262,6 +265,7 @@ extension TSAttachment {
             }
             let creationTimestamp: Date = SDSDeserialization.requiredDoubleAsDate(creationTimestampInterval, name: "creationTimestamp")
             let digest: Data? = SDSDeserialization.optionalData(record.digest, name: "digest")
+            let isAnimatedCached: NSNumber? = SDSDeserialization.optionalNumericAsNSNumber(record.isAnimatedCached, name: "isAnimatedCached", conversion: { NSNumber(value: $0) })
             let isUploaded: Bool = try SDSDeserialization.required(record.isUploaded, name: "isUploaded")
             let isValidImageCached: NSNumber? = SDSDeserialization.optionalNumericAsNSNumber(record.isValidImageCached, name: "isValidImageCached", conversion: { NSNumber(value: $0) })
             let isValidVideoCached: NSNumber? = SDSDeserialization.optionalNumericAsNSNumber(record.isValidVideoCached, name: "isValidVideoCached", conversion: { NSNumber(value: $0) })
@@ -286,6 +290,7 @@ extension TSAttachment {
                                       cachedImageWidth: cachedImageWidth,
                                       creationTimestamp: creationTimestamp,
                                       digest: digest,
+                                      isAnimatedCached: isAnimatedCached,
                                       isUploaded: isUploaded,
                                       isValidImageCached: isValidImageCached,
                                       isValidVideoCached: isValidVideoCached,
@@ -330,6 +335,148 @@ extension TSAttachment: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension TSAttachment: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        if let modelToCopy = self as? TSAttachmentStream {
+            assert(type(of: modelToCopy) == TSAttachmentStream.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let albumMessageId: String? = modelToCopy.albumMessageId
+            let attachmentType: TSAttachmentType = modelToCopy.attachmentType
+            let blurHash: String? = modelToCopy.blurHash
+            let byteCount: UInt32 = modelToCopy.byteCount
+            let caption: String? = modelToCopy.caption
+            let cdnKey: String = modelToCopy.cdnKey
+            let cdnNumber: UInt32 = modelToCopy.cdnNumber
+            let contentType: String = modelToCopy.contentType
+            let encryptionKey: Data? = modelToCopy.encryptionKey
+            let serverId: UInt64 = modelToCopy.serverId
+            let sourceFilename: String? = modelToCopy.sourceFilename
+            let uploadTimestamp: UInt64 = modelToCopy.uploadTimestamp
+            let cachedAudioDurationSeconds: NSNumber? = modelToCopy.cachedAudioDurationSeconds
+            let cachedImageHeight: NSNumber? = modelToCopy.cachedImageHeight
+            let cachedImageWidth: NSNumber? = modelToCopy.cachedImageWidth
+            let creationTimestamp: Date = modelToCopy.creationTimestamp
+            let digest: Data? = modelToCopy.digest
+            let isAnimatedCached: NSNumber? = modelToCopy.isAnimatedCached
+            let isUploaded: Bool = modelToCopy.isUploaded
+            let isValidImageCached: NSNumber? = modelToCopy.isValidImageCached
+            let isValidVideoCached: NSNumber? = modelToCopy.isValidVideoCached
+            let localRelativeFilePath: String? = modelToCopy.localRelativeFilePath
+
+            return TSAttachmentStream(grdbId: id,
+                                      uniqueId: uniqueId,
+                                      albumMessageId: albumMessageId,
+                                      attachmentType: attachmentType,
+                                      blurHash: blurHash,
+                                      byteCount: byteCount,
+                                      caption: caption,
+                                      cdnKey: cdnKey,
+                                      cdnNumber: cdnNumber,
+                                      contentType: contentType,
+                                      encryptionKey: encryptionKey,
+                                      serverId: serverId,
+                                      sourceFilename: sourceFilename,
+                                      uploadTimestamp: uploadTimestamp,
+                                      cachedAudioDurationSeconds: cachedAudioDurationSeconds,
+                                      cachedImageHeight: cachedImageHeight,
+                                      cachedImageWidth: cachedImageWidth,
+                                      creationTimestamp: creationTimestamp,
+                                      digest: digest,
+                                      isAnimatedCached: isAnimatedCached,
+                                      isUploaded: isUploaded,
+                                      isValidImageCached: isValidImageCached,
+                                      isValidVideoCached: isValidVideoCached,
+                                      localRelativeFilePath: localRelativeFilePath)
+        }
+
+        if let modelToCopy = self as? TSAttachmentPointer {
+            assert(type(of: modelToCopy) == TSAttachmentPointer.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let albumMessageId: String? = modelToCopy.albumMessageId
+            let attachmentType: TSAttachmentType = modelToCopy.attachmentType
+            let blurHash: String? = modelToCopy.blurHash
+            let byteCount: UInt32 = modelToCopy.byteCount
+            let caption: String? = modelToCopy.caption
+            let cdnKey: String = modelToCopy.cdnKey
+            let cdnNumber: UInt32 = modelToCopy.cdnNumber
+            let contentType: String = modelToCopy.contentType
+            let encryptionKey: Data? = modelToCopy.encryptionKey
+            let serverId: UInt64 = modelToCopy.serverId
+            let sourceFilename: String? = modelToCopy.sourceFilename
+            let uploadTimestamp: UInt64 = modelToCopy.uploadTimestamp
+            let digest: Data? = modelToCopy.digest
+            let lazyRestoreFragmentId: String? = modelToCopy.lazyRestoreFragmentId
+            let mediaSize: CGSize = modelToCopy.mediaSize
+            let pointerType: TSAttachmentPointerType = modelToCopy.pointerType
+            let state: TSAttachmentPointerState = modelToCopy.state
+
+            return TSAttachmentPointer(grdbId: id,
+                                       uniqueId: uniqueId,
+                                       albumMessageId: albumMessageId,
+                                       attachmentType: attachmentType,
+                                       blurHash: blurHash,
+                                       byteCount: byteCount,
+                                       caption: caption,
+                                       cdnKey: cdnKey,
+                                       cdnNumber: cdnNumber,
+                                       contentType: contentType,
+                                       encryptionKey: encryptionKey,
+                                       serverId: serverId,
+                                       sourceFilename: sourceFilename,
+                                       uploadTimestamp: uploadTimestamp,
+                                       digest: digest,
+                                       lazyRestoreFragmentId: lazyRestoreFragmentId,
+                                       mediaSize: mediaSize,
+                                       pointerType: pointerType,
+                                       state: state)
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == TSAttachment.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let albumMessageId: String? = modelToCopy.albumMessageId
+            let attachmentType: TSAttachmentType = modelToCopy.attachmentType
+            let blurHash: String? = modelToCopy.blurHash
+            let byteCount: UInt32 = modelToCopy.byteCount
+            let caption: String? = modelToCopy.caption
+            let cdnKey: String = modelToCopy.cdnKey
+            let cdnNumber: UInt32 = modelToCopy.cdnNumber
+            let contentType: String = modelToCopy.contentType
+            let encryptionKey: Data? = modelToCopy.encryptionKey
+            let serverId: UInt64 = modelToCopy.serverId
+            let sourceFilename: String? = modelToCopy.sourceFilename
+            let uploadTimestamp: UInt64 = modelToCopy.uploadTimestamp
+
+            return TSAttachment(grdbId: id,
+                                uniqueId: uniqueId,
+                                albumMessageId: albumMessageId,
+                                attachmentType: attachmentType,
+                                blurHash: blurHash,
+                                byteCount: byteCount,
+                                caption: caption,
+                                cdnKey: cdnKey,
+                                cdnNumber: cdnNumber,
+                                contentType: contentType,
+                                encryptionKey: encryptionKey,
+                                serverId: serverId,
+                                sourceFilename: sourceFilename,
+                                uploadTimestamp: uploadTimestamp)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension TSAttachmentSerializer {
@@ -365,6 +512,7 @@ extension TSAttachmentSerializer {
     static let uploadTimestampColumn = SDSColumnMetadata(columnName: "uploadTimestamp", columnType: .int64)
     static let cdnKeyColumn = SDSColumnMetadata(columnName: "cdnKey", columnType: .unicodeString)
     static let cdnNumberColumn = SDSColumnMetadata(columnName: "cdnNumber", columnType: .int64)
+    static let isAnimatedCachedColumn = SDSColumnMetadata(columnName: "isAnimatedCached", columnType: .int, isOptional: true)
 
     // TODO: We should decide on a naming convention for
     //       tables that store models.
@@ -398,7 +546,8 @@ extension TSAttachmentSerializer {
         stateColumn,
         uploadTimestampColumn,
         cdnKeyColumn,
-        cdnNumberColumn
+        cdnNumberColumn,
+        isAnimatedCachedColumn
         ])
 }
 
@@ -508,9 +657,11 @@ public extension TSAttachment {
 
 @objc
 public class TSAttachmentCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<AttachmentRecord>?
 
-    init(cursor: RecordCursor<AttachmentRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<AttachmentRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -521,7 +672,9 @@ public class TSAttachmentCursor: NSObject {
         guard let record = try cursor.next() else {
             return nil
         }
-        return try TSAttachment.fromRecord(record)
+        let value = try TSAttachment.fromRecord(record)
+        Self.modelReadCaches.attachmentReadCache.didReadAttachment(value, transaction: transaction.asAnyRead)
+        return value
     }
 
     public func all() throws -> [TSAttachment] {
@@ -552,10 +705,10 @@ public extension TSAttachment {
         let database = transaction.database
         do {
             let cursor = try AttachmentRecord.fetchCursor(database)
-            return TSAttachmentCursor(cursor: cursor)
+            return TSAttachmentCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return TSAttachmentCursor(cursor: nil)
+            return TSAttachmentCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -564,9 +717,21 @@ public extension TSAttachment {
                         transaction: SDSAnyReadTransaction) -> TSAttachment? {
         assert(uniqueId.count > 0)
 
+        return anyFetch(uniqueId: uniqueId, transaction: transaction, ignoreCache: false)
+    }
+
+    // Fetches a single model by "unique id".
+    class func anyFetch(uniqueId: String,
+                        transaction: SDSAnyReadTransaction,
+                        ignoreCache: Bool) -> TSAttachment? {
+        assert(uniqueId.count > 0)
+
+        if !ignoreCache,
+            let cachedCopy = Self.modelReadCaches.attachmentReadCache.getAttachment(uniqueId: uniqueId, transaction: transaction) {
+            return cachedCopy
+        }
+
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return TSAttachment.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(AttachmentRecord.databaseTableName) WHERE \(attachmentColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -597,28 +762,20 @@ public extension TSAttachment {
                             batchSize: UInt,
                             block: @escaping (TSAttachment, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            TSAttachment.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? TSAttachment else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = TSAttachment.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = TSAttachment.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -646,10 +803,6 @@ public extension TSAttachment {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: TSAttachment.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -681,8 +834,6 @@ public extension TSAttachment {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: TSAttachment.collection())
         case .grdbRead(let grdbTransaction):
             return AttachmentRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -692,8 +843,6 @@ public extension TSAttachment {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: TSAttachment.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try AttachmentRecord.deleteAll(grdbTransaction.database)
@@ -742,8 +891,6 @@ public extension TSAttachment {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: TSAttachment.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(AttachmentRecord.databaseTableName) WHERE \(attachmentColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -761,11 +908,11 @@ public extension TSAttachment {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try AttachmentRecord.fetchCursor(transaction.database, sqlRequest)
-            return TSAttachmentCursor(cursor: cursor)
+            return TSAttachmentCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return TSAttachmentCursor(cursor: nil)
+            return TSAttachmentCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -780,7 +927,9 @@ public extension TSAttachment {
                 return nil
             }
 
-            return try TSAttachment.fromRecord(record)
+            let value = try TSAttachment.fromRecord(record)
+            Self.modelReadCaches.attachmentReadCache.didReadAttachment(value, transaction: transaction.asAnyRead)
+            return value
         } catch {
             owsFailDebug("error: \(error)")
             return nil
@@ -833,7 +982,25 @@ class TSAttachmentSerializer: SDSSerializer {
         let uploadTimestamp: UInt64 = model.uploadTimestamp
         let cdnKey: String = model.cdnKey
         let cdnNumber: UInt32 = model.cdnNumber
+        let isAnimatedCached: Bool? = nil
 
-        return AttachmentRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, albumMessageId: albumMessageId, attachmentType: attachmentType, blurHash: blurHash, byteCount: byteCount, caption: caption, contentType: contentType, encryptionKey: encryptionKey, serverId: serverId, sourceFilename: sourceFilename, cachedAudioDurationSeconds: cachedAudioDurationSeconds, cachedImageHeight: cachedImageHeight, cachedImageWidth: cachedImageWidth, creationTimestamp: creationTimestamp, digest: digest, isUploaded: isUploaded, isValidImageCached: isValidImageCached, isValidVideoCached: isValidVideoCached, lazyRestoreFragmentId: lazyRestoreFragmentId, localRelativeFilePath: localRelativeFilePath, mediaSize: mediaSize, pointerType: pointerType, state: state, uploadTimestamp: uploadTimestamp, cdnKey: cdnKey, cdnNumber: cdnNumber)
+        return AttachmentRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, albumMessageId: albumMessageId, attachmentType: attachmentType, blurHash: blurHash, byteCount: byteCount, caption: caption, contentType: contentType, encryptionKey: encryptionKey, serverId: serverId, sourceFilename: sourceFilename, cachedAudioDurationSeconds: cachedAudioDurationSeconds, cachedImageHeight: cachedImageHeight, cachedImageWidth: cachedImageWidth, creationTimestamp: creationTimestamp, digest: digest, isUploaded: isUploaded, isValidImageCached: isValidImageCached, isValidVideoCached: isValidVideoCached, lazyRestoreFragmentId: lazyRestoreFragmentId, localRelativeFilePath: localRelativeFilePath, mediaSize: mediaSize, pointerType: pointerType, state: state, uploadTimestamp: uploadTimestamp, cdnKey: cdnKey, cdnNumber: cdnNumber, isAnimatedCached: isAnimatedCached)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension TSAttachment {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> TSAttachment {
+        guard let record = try asRecord() as? AttachmentRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try TSAttachment.fromRecord(record)
+    }
+}
+#endif

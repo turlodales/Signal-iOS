@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -10,24 +10,6 @@ import PromiseKit
 #if DEBUG
 
 class DebugUINotifications: DebugUIPage {
-
-    // MARK: Dependencies
-
-    var notificationPresenter: NotificationPresenter {
-        return AppEnvironment.shared.notificationPresenter
-    }
-
-    var messageSender: MessageSender {
-        return SSKEnvironment.shared.messageSender
-    }
-
-    var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    var databaseStorage: SDSDatabaseStorage {
-        return SSKEnvironment.shared.databaseStorage
-    }
 
     // MARK: Overrides
 
@@ -109,11 +91,16 @@ class DebugUINotifications: DebugUIPage {
         }
     }
 
-    func delayedNotificationDispatchWithFakeCall(thread: TSContactThread, callBlock: @escaping (SignalCall) -> Void) -> Guarantee<Void> {
-        let call = SignalCall.incomingCall(localId: UUID(), remoteAddress: thread.contactAddress, sentAtTimestamp: Date.ows_millisecondTimestamp())
+    func delayedNotificationDispatchWithFakeCall(thread: TSContactThread, callBlock: @escaping (IndividualCall) -> Void) -> Guarantee<Void> {
+        let call = SignalCall.incomingIndividualCall(
+            localId: UUID(),
+            remoteAddress: thread.contactAddress,
+            sentAtTimestamp: Date.ows_millisecondTimestamp(),
+            offerMediaType: .audio
+        )
 
         return delayedNotificationDispatch {
-            callBlock(call)
+            callBlock(call.individualCall)
         }
     }
 
@@ -187,8 +174,8 @@ class DebugUINotifications: DebugUIPage {
 
     func notifyForErrorMessage(thread: TSThread) -> Guarantee<Void> {
         return delayedNotificationDispatch {
-            let errorMessage = TSErrorMessage(thread: thread,
-                                              failedMessageType: TSErrorMessageType.invalidMessage)
+            let builder = TSErrorMessageBuilder(thread: thread, errorType: .invalidMessage)
+            let errorMessage = TSErrorMessage(errorMessageWithBuilder: builder)
 
             self.databaseStorage.write { transaction in
                 self.notificationPresenter.notifyUser(for: errorMessage, thread: thread, transaction: transaction)

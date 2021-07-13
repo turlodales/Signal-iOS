@@ -1,14 +1,17 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "BaseModel.h"
+#import <SignalServiceKit/BaseModel.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @class SDSAnyReadTransaction;
 @class SDSAnyWriteTransaction;
 @class SignalServiceAddress;
+
+typedef NS_CLOSED_ENUM(
+    NSUInteger, SignalRecipientTrustLevel) { SignalRecipientTrustLevelLow, SignalRecipientTrustLevelHigh };
 
 /// SignalRecipient serves two purposes:
 ///
@@ -29,7 +32,14 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)initWithUniqueId:(NSString *)uniqueId NS_UNAVAILABLE;
 - (instancetype)initWithGrdbId:(int64_t)grdbId uniqueId:(NSString *)uniqueId NS_UNAVAILABLE;
 
-- (instancetype)initWithAddress:(SignalServiceAddress *)address NS_DESIGNATED_INITIALIZER;
+#if TESTABLE_BUILD
+- (instancetype)initWithAddress:(SignalServiceAddress *)address;
+- (instancetype)initWithUUIDString:(NSString *)uuidString;
+
+- (instancetype)initWithPhoneNumber:(nullable NSString *)phoneNumber
+                               uuid:(nullable NSUUID *)uuid
+                            devices:(NSArray<NSNumber *> *)devices;
+#endif
 
 // --- CODE GENERATION MARKER
 
@@ -48,16 +58,19 @@ NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(grdbId:uniqueId:devices:recipientPh
 
 // --- CODE GENERATION MARKER
 
-+ (nullable instancetype)registeredRecipientForAddress:(SignalServiceAddress *)address
-                                       mustHaveDevices:(BOOL)mustHaveDevices
-                                           transaction:(SDSAnyReadTransaction *)transaction;
++ (nullable instancetype)getRecipientForAddress:(SignalServiceAddress *)address
+                                mustHaveDevices:(BOOL)mustHaveDevices
+                                    transaction:(SDSAnyReadTransaction *)transaction
+    NS_SWIFT_NAME(get(address:mustHaveDevices:transaction:));
 
-+ (instancetype)getOrBuildUnsavedRecipientForAddress:(SignalServiceAddress *)address
-                                         transaction:(SDSAnyReadTransaction *)transaction;
++ (void)updateWithAddress:(SignalServiceAddress *)address
+             devicesToAdd:(nullable NSArray<NSNumber *> *)devicesToAdd
+          devicesToRemove:(nullable NSArray<NSNumber *> *)devicesToRemove
+              transaction:(SDSAnyWriteTransaction *)transaction;
 
-- (void)updateRegisteredRecipientWithDevicesToAdd:(nullable NSArray<NSNumber *> *)devicesToAdd
-                                  devicesToRemove:(nullable NSArray<NSNumber *> *)devicesToRemove
-                                      transaction:(SDSAnyWriteTransaction *)transaction;
+- (void)updateWithDevicesToAdd:(nullable NSArray<NSNumber *> *)devicesToAdd
+               devicesToRemove:(nullable NSArray<NSNumber *> *)devicesToRemove
+                   transaction:(SDSAnyWriteTransaction *)transaction;
 
 @property (nonatomic, nullable) NSString *recipientPhoneNumber;
 @property (nonatomic, nullable) NSString *recipientUUID;
@@ -69,13 +82,17 @@ NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(grdbId:uniqueId:devices:recipientPh
 + (BOOL)isRegisteredRecipient:(SignalServiceAddress *)address transaction:(SDSAnyReadTransaction *)transaction;
 
 + (SignalRecipient *)markRecipientAsRegisteredAndGet:(SignalServiceAddress *)address
+                                          trustLevel:(SignalRecipientTrustLevel)trustLevel
                                          transaction:(SDSAnyWriteTransaction *)transaction;
 
-+ (void)markRecipientAsRegistered:(SignalServiceAddress *)address
-                         deviceId:(UInt32)deviceId
-                      transaction:(SDSAnyWriteTransaction *)transaction;
++ (SignalRecipient *)markRecipientAsRegisteredAndGet:(SignalServiceAddress *)address
+                                            deviceId:(UInt32)deviceId
+                                          trustLevel:(SignalRecipientTrustLevel)trustLevel
+                                         transaction:(SDSAnyWriteTransaction *)transaction;
 
 + (void)markRecipientAsUnregistered:(SignalServiceAddress *)address transaction:(SDSAnyWriteTransaction *)transaction;
+
+- (void)removePhoneNumberForDatabaseMigration;
 
 @end
 

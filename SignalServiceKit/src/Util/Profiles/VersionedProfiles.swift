@@ -1,12 +1,10 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import PromiseKit
-//import SignalServiceKit
 import SignalMetadataKit
-//import ZKGroup
 
 @objc
 public class VersionedProfileUpdate: NSObject {
@@ -22,14 +20,15 @@ public class VersionedProfileUpdate: NSObject {
 // MARK: -
 
 @objc
-public protocol VersionedProfileRequest: class {
+public protocol VersionedProfileRequest: AnyObject {
     var request: TSRequest { get }
+    var profileKey: OWSAES256Key? { get }
 }
 
 // MARK: -
 
 @objc
-public protocol VersionedProfiles: class {
+public protocol VersionedProfiles: AnyObject {
     @objc(clearProfileKeyCredentialForAddress:transaction:)
     func clearProfileKeyCredential(for address: SignalServiceAddress,
                                    transaction: SDSAnyWriteTransaction)
@@ -48,7 +47,10 @@ public protocol VersionedProfiles: class {
 public protocol VersionedProfilesSwift: VersionedProfiles {
     func updateProfilePromise(profileGivenName: String?,
                               profileFamilyName: String?,
-                              profileAvatarData: Data?) -> Promise<VersionedProfileUpdate>
+                              profileBio: String?,
+                              profileBioEmoji: String?,
+                              profileAvatarData: Data?,
+                              unsavedRotatedProfileKey: OWSAES256Key?) -> Promise<VersionedProfileUpdate>
 }
 
 // MARK: -
@@ -70,7 +72,10 @@ public class MockVersionedProfiles: NSObject, VersionedProfilesSwift {
 
     public func updateProfilePromise(profileGivenName: String?,
                                      profileFamilyName: String?,
-                                     profileAvatarData: Data?) -> Promise<VersionedProfileUpdate> {
+                                     profileBio: String?,
+                                     profileBioEmoji: String?,
+                                     profileAvatarData: Data?,
+                                     unsavedRotatedProfileKey: OWSAES256Key?) -> Promise<VersionedProfileUpdate> {
         owsFail("Not implemented.")
     }
 }

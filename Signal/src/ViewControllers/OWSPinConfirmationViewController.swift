@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
@@ -102,7 +102,7 @@ public class PinConfirmationViewController: OWSViewController {
 
         let titleLabel = UILabel()
         titleLabel.textColor = Theme.primaryTextColor
-        titleLabel.font = UIFont.ows_dynamicTypeTitle3Clamped.ows_semibold()
+        titleLabel.font = UIFont.ows_dynamicTypeTitle3Clamped.ows_semibold
         titleLabel.numberOfLines = 0
         titleLabel.lineBreakMode = .byWordWrapping
         titleLabel.textAlignment = .center
@@ -154,7 +154,7 @@ public class PinConfirmationViewController: OWSViewController {
         pinStack.autoSetDimension(.width, toSize: 227)
         pinStackRow.setContentHuggingVerticalHigh()
 
-        let font = UIFont.ows_dynamicTypeBodyClamped.ows_semibold()
+        let font = UIFont.ows_dynamicTypeBodyClamped.ows_semibold
         let buttonHeight = OWSFlatButton.heightForFont(font)
         let submitButton = OWSFlatButton.button(
             title: actionText,
@@ -238,9 +238,9 @@ public class PinConfirmationViewController: OWSViewController {
             return
         }
 
-        OWS2FAManager.shared().verifyPin(pin) { success in
+        OWS2FAManager.shared.verifyPin(pin) { success in
             guard success else {
-                guard OWS2FAManager.shared().needsLegacyPinMigration(), pin.count > kLegacyTruncated2FAv1PinLength else {
+                guard OWS2FAManager.shared.needsLegacyPinMigration(), pin.count > kLegacyTruncated2FAv1PinLength else {
                     self.validationState = .mismatch
                     return
                 }

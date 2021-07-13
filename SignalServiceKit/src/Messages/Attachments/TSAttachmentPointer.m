@@ -1,14 +1,33 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSAttachmentPointer.h"
-#import "OWSBackupFragment.h"
-#import "TSAttachmentStream.h"
 #import <SignalServiceKit/MimeTypeUtil.h>
+#import <SignalServiceKit/OWSBackupFragment.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSAttachmentPointer.h>
+#import <SignalServiceKit/TSAttachmentStream.h>
 
 NS_ASSUME_NONNULL_BEGIN
+
+NSString *NSStringForTSAttachmentPointerState(TSAttachmentPointerState value)
+{
+    switch (value) {
+        case TSAttachmentPointerStateEnqueued:
+            return @"Enqueued";
+        case TSAttachmentPointerStateDownloading:
+            return @"Downloading";
+        case TSAttachmentPointerStateFailed:
+            return @"Failed";
+        case TSAttachmentPointerStatePendingMessageRequest:
+            return @"PendingMessageRequest";
+        case TSAttachmentPointerStatePendingManualDownload:
+            return @"PendingManualDownload";
+        default:
+            OWSCFailDebug(@"Invalid value.");
+            return @"Invalid value";
+    }
+}
 
 @interface TSAttachmentStream (TSAttachmentPointer)
 
@@ -19,6 +38,8 @@ NS_ASSUME_NONNULL_BEGIN
 #pragma mark -
 
 @interface TSAttachmentPointer ()
+
+@property (nonatomic) TSAttachmentPointerState state;
 
 // Optional property.  Only set for attachments which need "lazy backup restore."
 @property (nonatomic, nullable) NSString *lazyRestoreFragmentId;
@@ -201,8 +222,12 @@ NS_ASSUME_NONNULL_BEGIN
     TSAttachmentType attachmentType = TSAttachmentTypeDefault;
     if ([attachmentProto hasFlags]) {
         UInt32 flags = attachmentProto.flags;
-        if ((flags & (UInt32)SSKProtoAttachmentPointerFlagsVoiceMessage) > 0) {
+        if ((flags & SSKProtoAttachmentPointerFlagsVoiceMessage) > 0) {
             attachmentType = TSAttachmentTypeVoiceMessage;
+        } else if ((flags & SSKProtoAttachmentPointerFlagsBorderless) > 0) {
+            attachmentType = TSAttachmentTypeBorderless;
+        } else if ((flags & SSKProtoAttachmentPointerFlagsGif) > 0) {
+            attachmentType = TSAttachmentTypeGIF;
         }
     }
     NSString *_Nullable caption;
@@ -327,13 +352,6 @@ NS_ASSUME_NONNULL_BEGIN
                                               }];
 }
 
-- (void)ydb_saveWithTransaction:(YapDatabaseReadWriteTransaction *)transaction
-{
-    [self checkForStreamOverwrite:transaction.asAnyRead];
-
-    [super ydb_saveWithTransaction:transaction];
-}
-
 - (void)anyWillInsertWithTransaction:(SDSAnyWriteTransaction *)transaction
 {
     [super anyWillInsertWithTransaction:transaction];
@@ -360,6 +378,34 @@ NS_ASSUME_NONNULL_BEGIN
         OWSFailDebug(@"Missing uniqueId.");
     }
 #endif
+}
+
+#if TESTABLE_BUILD
+- (void)setAttachmentPointerStateDebug:(TSAttachmentPointerState)state
+{
+    self.state = state;
+}
+#endif
+
+- (void)updateWithAttachmentPointerState:(TSAttachmentPointerState)state
+                             transaction:(SDSAnyWriteTransaction *)transaction
+{
+    [self anyUpdateAttachmentPointerWithTransaction:transaction
+                                              block:^(TSAttachmentPointer *attachmentPointer) {
+                                                  attachmentPointer.state = state;
+                                              }];
+}
+
+- (void)updateAttachmentPointerStateFrom:(TSAttachmentPointerState)oldState
+                                      to:(TSAttachmentPointerState)newState
+                             transaction:(SDSAnyWriteTransaction *)transaction
+{
+    [self anyUpdateAttachmentPointerWithTransaction:transaction
+                                              block:^(TSAttachmentPointer *attachmentPointer) {
+                                                  if (attachmentPointer.state == oldState) {
+                                                      attachmentPointer.state = newState;
+                                                  }
+                                              }];
 }
 
 @end

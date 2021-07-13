@@ -1,19 +1,11 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 
 @objc
 public class LaunchJobs: NSObject {
-
-    // MARK: Singletons
-
-    private var tsAccountManager: TSAccountManager {
-        return TSAccountManager.sharedInstance()
-    }
-
-    // MARK: 
 
     private enum LaunchJobsState: String {
         case notYetStarted
@@ -47,6 +39,7 @@ public class LaunchJobs: NSObject {
     // completion will be invoked async on the main thread.
     private func startLaunchJobs(completion: @escaping () -> Void) {
         AssertIsOnMainThread()
+        owsAssertDebug(!CurrentAppContext().isNSE)
 
         state = .inFlight
 

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -11,7 +11,8 @@ public class NonContactTableViewCell: UITableViewCell {
     private let headerLabel = UILabel()
     private let accessoryLabel = UILabel()
 
-    @objc var accessoryMessage: String?
+    @objc
+    public var accessoryMessage: String?
 
     override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
@@ -19,15 +20,14 @@ public class NonContactTableViewCell: UITableViewCell {
         OWSTableItem.configureCell(self)
 
         let stackView = UIStackView()
-        stackView.isLayoutMarginsRelativeArrangement = true
-        stackView.layoutMargins = UIEdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16)
-        stackView.spacing = kContactCellAvatarTextMargin
+        stackView.spacing = ContactCellView.avatarTextHSpacing
         stackView.addArrangedSubview(iconView)
 
         contentView.addSubview(stackView)
-        stackView.autoPinEdgesToSuperviewEdges()
+        stackView.autoPinWidthToSuperviewMargins()
+        stackView.autoPinHeightToSuperview(withMargin: 7)
 
-        let avatarSize = CGFloat(kStandardAvatarSize)
+        let avatarSize = CGFloat(AvatarBuilder.smallAvatarSizePoints)
         iconView.autoSetDimensions(to: CGSize(square: avatarSize))
         iconView.layer.cornerRadius = avatarSize * 0.5
         iconView.clipsToBounds = true
@@ -43,7 +43,7 @@ public class NonContactTableViewCell: UITableViewCell {
         headerLabel.textColor = Theme.primaryTextColor
         labelStack.addArrangedSubview(headerLabel)
 
-        identifierLabel.font = OWSTableItem.primaryLabelFont.ows_semibold()
+        identifierLabel.font = OWSTableItem.primaryLabelFont.ows_semibold
         identifierLabel.textColor = Theme.primaryTextColor
         labelStack.addArrangedSubview(identifierLabel)
 
@@ -51,7 +51,7 @@ public class NonContactTableViewCell: UITableViewCell {
         labelStack.addArrangedSubview(bottomSpacer)
         bottomSpacer.autoMatch(.height, to: .height, of: topSpacer)
 
-        accessoryLabel.font = OWSTableItem.accessoryLabelFont.ows_semibold()
+        accessoryLabel.font = OWSTableItem.accessoryLabelFont.ows_semibold
         accessoryLabel.textColor = Theme.middleGrayColor
         accessoryLabel.textAlignment = .right
         accessoryLabel.isHidden = true
@@ -75,13 +75,10 @@ public class NonContactTableViewCell: UITableViewCell {
 
         if isRegistered {
             let address = SignalServiceAddress(phoneNumber: phoneNumber)
-            let avatarBuilder = OWSContactAvatarBuilder(
-                address: address,
-                colorName: TSThread.stableColorNameForNewConversation(with: address.stringForDisplay),
-                diameter: 48
-            )
-
-            iconView.image = avatarBuilder.build()
+            let avatar = Self.avatarBuilder.avatarImageWithSneakyTransaction(forAddress: address,
+                                                                             diameterPoints: 48,
+                                                                             localUserDisplayMode: .asUser)
+            iconView.image = avatar
             headerLabel.text = NSLocalizedString("NON_CONTACT_TABLE_CELL_NEW_MESSAGE",
                                                  comment: "A string prompting the user to send a new mesaage to a user")
         } else {

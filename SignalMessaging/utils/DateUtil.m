@@ -1,12 +1,12 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "DateUtil.h"
 #import <SignalCoreKit/NSDate+OWS.h>
 #import <SignalCoreKit/NSString+OWS.h>
-#import <SignalMessaging/OWSFormat.h>
 #import <SignalMessaging/SignalMessaging-Swift.h>
+#import <SignalServiceKit/OWSFormat.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -64,7 +64,7 @@ static NSString *const DATE_FORMAT_WEEKDAY = @"EEEE";
         formatter = [NSDateFormatter new];
         formatter.locale = [NSLocale currentLocale];
         // Tue, Jun 6
-        formatter.dateFormat = @"EE, MMM d";
+        [formatter setLocalizedDateFormatFromTemplate:@"EE, MMM d"];
     });
 
     return formatter;
@@ -117,7 +117,7 @@ static NSString *const DATE_FORMAT_WEEKDAY = @"EEEE";
     dispatch_once(&onceToken, ^{
         formatter = [NSDateFormatter new];
         [formatter setLocale:[NSLocale currentLocale]];
-        formatter.dateFormat = @"MMM d";
+        [formatter setLocalizedDateFormatFromTemplate: @"MMM d"];
     });
     return formatter;
 }
@@ -264,7 +264,6 @@ static NSString *const DATE_FORMAT_WEEKDAY = @"EEEE";
 
 + (NSString *)formatDateShort:(NSDate *)date
 {
-    OWSAssertIsOnMainThread();
     OWSAssertDebug(date);
 
     NSDate *now = [NSDate date];
@@ -283,7 +282,7 @@ static NSString *const DATE_FORMAT_WEEKDAY = @"EEEE";
         dateTimeString = [[DateUtil timeFormatter] stringFromDate:date];
     }
 
-    return dateTimeString.localizedUppercaseString;
+    return dateTimeString;
 }
 
 + (NSString *)formatDateForConversationDateBreaks:(NSDate *)date
@@ -315,7 +314,28 @@ static NSString *const DATE_FORMAT_WEEKDAY = @"EEEE";
     OWSAssertDebug(date);
 
     NSString *dateTimeString = [[DateUtil timeFormatter] stringFromDate:date];
-    return dateTimeString.localizedUppercaseString;
+    return dateTimeString;
+}
+
++ (NSString *)formatTimestampAsDate:(uint64_t)timestamp
+{
+    return [self formatDateAsDate:[NSDate ows_dateWithMillisecondsSince1970:timestamp]];
+}
+
++ (NSString *)formatDateAsDate:(NSDate *)date
+{
+    OWSAssertDebug(date);
+
+    NSString *dateTimeString;
+
+    NSInteger yearsDiff = [self yearsFromFirstDate:date toSecondDate:[NSDate new]];
+    if (yearsDiff > 0) {
+        dateTimeString = [[DateUtil otherYearMessageFormatter] stringFromDate:date];
+    } else {
+        dateTimeString = [[DateUtil thisYearMessageFormatter] stringFromDate:date];
+    }
+
+    return dateTimeString;
 }
 
 + (NSDateFormatter *)otherYearMessageFormatter
@@ -325,7 +345,7 @@ static NSString *const DATE_FORMAT_WEEKDAY = @"EEEE";
     dispatch_once(&onceToken, ^{
         formatter = [NSDateFormatter new];
         [formatter setLocale:[NSLocale currentLocale]];
-        [formatter setDateFormat:@"MMM d, yyyy"];
+        [formatter setLocalizedDateFormatFromTemplate:@"MMM d, yyyy"];
     });
     return formatter;
 }
@@ -337,12 +357,12 @@ static NSString *const DATE_FORMAT_WEEKDAY = @"EEEE";
     dispatch_once(&onceToken, ^{
         formatter = [NSDateFormatter new];
         [formatter setLocale:[NSLocale currentLocale]];
-        [formatter setDateFormat:@"MMM d"];
+        [formatter setLocalizedDateFormatFromTemplate:@"MMM d"];
     });
     return formatter;
 }
 
-+ (NSDateFormatter *)thisWeekMessageFormatter
++ (NSDateFormatter *)thisWeekMessageFormatterShort
 {
     static NSDateFormatter *formatter;
     static dispatch_once_t onceToken;
@@ -354,7 +374,20 @@ static NSString *const DATE_FORMAT_WEEKDAY = @"EEEE";
     return formatter;
 }
 
++ (NSDateFormatter *)thisWeekMessageFormatterLong
+{
+    static NSDateFormatter *formatter;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        formatter = [NSDateFormatter new];
+        [formatter setLocale:[NSLocale currentLocale]];
+        [formatter setDateFormat:@"EEEE"];
+    });
+    return formatter;
+}
+
 + (NSString *)formatMessageTimestamp:(uint64_t)timestamp
+                 shouldUseLongFormat:(BOOL)shouldUseLongFormat
 {
     NSDate *date = [NSDate ows_dateWithMillisecondsSince1970:timestamp];
     uint64_t nowTimestamp = [NSDate ows_millisecondTimeStamp];
@@ -365,46 +398,61 @@ static NSString *const DATE_FORMAT_WEEKDAY = @"EEEE";
     NSDateComponents *relativeDiffComponents =
         [calendar components:NSCalendarUnitMinute | NSCalendarUnitHour fromDate:date toDate:nowDate options:0];
 
-    NSInteger minutesDiff = MAX(0, [relativeDiffComponents minute]);
-    NSInteger hoursDiff = MAX(0, [relativeDiffComponents hour]);
-    if (hoursDiff < 1 && minutesDiff < 1) {
-        return NSLocalizedString(@"DATE_NOW", @"The present; the current time.");
-    }
-
-    if (hoursDiff < 1) {
-        NSString *minutesString = [OWSFormat formatInt:minutesDiff];
-        return [NSString stringWithFormat:NSLocalizedString(@"DATE_MINUTES_AGO_FORMAT",
-                                              @"Format string for a relative time, expressed as a certain number of "
-                                              @"minutes in the past. Embeds {{The number of minutes}}."),
-                         minutesString];
-    }
-
     // Note: we are careful to treat "future" dates as "now".
     NSInteger yearsDiff = [self yearsFromFirstDate:date toSecondDate:nowDate];
+    NSInteger daysDiff = [self daysFromFirstDate:date toSecondDate:nowDate];
+    NSInteger hoursDiff = MAX(0, [relativeDiffComponents hour]);
+    NSInteger minutesDiff = MAX(0, [relativeDiffComponents minute]);
+
     if (yearsDiff > 0) {
         // "Long date" + locale-specific "short" time format.
         NSString *dayOfWeek = [self.otherYearMessageFormatter stringFromDate:date];
         NSString *formattedTime = [[self timeFormatter] stringFromDate:date];
         return [[dayOfWeek stringByAppendingString:@" "] stringByAppendingString:formattedTime];
-    }
 
-    NSInteger daysDiff = [self daysFromFirstDate:date toSecondDate:nowDate];
-    if (daysDiff >= 7) {
+    } else if (daysDiff >= 7) {
         // "Short date" + locale-specific "short" time format.
         NSString *dayOfWeek = [self.thisYearMessageFormatter stringFromDate:date];
         NSString *formattedTime = [[self timeFormatter] stringFromDate:date];
         return [[dayOfWeek stringByAppendingString:@" "] stringByAppendingString:formattedTime];
+
     } else if (daysDiff > 0) {
         // "Day of week" + locale-specific "short" time format.
-        NSString *dayOfWeek = [self.thisWeekMessageFormatter stringFromDate:date];
+        NSDateFormatter *thisWeekMessageFormatter = (shouldUseLongFormat
+                                                     ? self.thisWeekMessageFormatterLong
+                                                     : self.thisWeekMessageFormatterShort);
+        NSString *dayOfWeek = [thisWeekMessageFormatter stringFromDate:date];
         NSString *formattedTime = [[self timeFormatter] stringFromDate:date];
         return [[dayOfWeek stringByAppendingString:@" "] stringByAppendingString:formattedTime];
-    } else {
+
+    } else if (hoursDiff > 0) {
+        if (shouldUseLongFormat && hoursDiff == 1) {
+            // Long format has a distinction between singular and plural
+            return NSLocalizedString(@"DATE_ONE_HOUR_AGO_LONG", @"Full string for a relative time of one hour ago.");
+        }
+
+        NSString *shortFormat = NSLocalizedString(@"DATE_HOURS_AGO_FORMAT", @"Format string for a relative time, expressed as a certain number of hours in the past. Embeds {{The number of hours}}.");
+        NSString *longFormat = NSLocalizedString(@"DATE_HOURS_AGO_LONG_FORMAT", @"Full format string for a relative time, expressed as a certain number of hours in the past. Embeds {{The number of hours}}.");
+
+        NSString *formatString = shouldUseLongFormat ? longFormat : shortFormat;
         NSString *hoursString = [OWSFormat formatInt:hoursDiff];
-        return [NSString stringWithFormat:NSLocalizedString(@"DATE_HOURS_AGO_FORMAT",
-                                              @"Format string for a relative time, expressed as a certain number of "
-                                              @"hours in the past. Embeds {{The number of hours}}."),
-                         hoursString];
+        return [NSString stringWithFormat:formatString, hoursString];
+
+    } else if (minutesDiff > 0) {
+        if (shouldUseLongFormat && minutesDiff == 1) {
+            // Long format has a distinction between singular and plural
+            return NSLocalizedString(@"DATE_ONE_MINUTE_AGO_LONG", @"Full string for a relative time of one minute ago.");
+        }
+
+        NSString *shortFormat = NSLocalizedString(@"DATE_MINUTES_AGO_FORMAT", @"Format string for a relative time, expressed as a certain number of minutes in the past. Embeds {{The number of minutes}}.");
+        NSString *longFormat = NSLocalizedString(@"DATE_MINUTES_AGO_LONG_FORMAT", @"Full format string for a relative time, expressed as a certain number of minutes in the past. Embeds {{The number of minutes}}.");
+
+        NSString *formatString = shouldUseLongFormat ? longFormat : shortFormat;
+        NSString *minutesString = [OWSFormat formatInt:minutesDiff];
+        return [NSString stringWithFormat:formatString, minutesString];
+
+    } else {
+        return NSLocalizedString(@"DATE_NOW", @"The present; the current time.");
     }
 }
 
@@ -423,7 +471,7 @@ static NSString *const DATE_FORMAT_WEEKDAY = @"EEEE";
 
 + (NSString *)exemplaryNowTimeFormat
 {
-    return NSLocalizedString(@"DATE_NOW", @"The present; the current time.").localizedUppercaseString;
+    return NSLocalizedString(@"DATE_NOW", @"The present; the current time.");
 }
 
 + (NSString *)exemplaryMinutesTimeFormat

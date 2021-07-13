@@ -1,11 +1,11 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import PromiseKit
 
-protocol AddGroupMembersViewControllerDelegate: class {
+protocol AddGroupMembersViewControllerDelegate: AnyObject {
     func addGroupMembersViewDidUpdate()
 }
 
@@ -13,22 +13,6 @@ protocol AddGroupMembersViewControllerDelegate: class {
 
 @objc
 public class AddGroupMembersViewController: BaseGroupMemberViewController {
-
-    // MARK: - Dependencies
-
-    fileprivate var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    fileprivate var tsAccountManager: TSAccountManager {
-        return .sharedInstance()
-    }
-
-    private var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    // MARK: -
 
     weak var addGroupMembersViewControllerDelegate: AddGroupMembersViewControllerDelegate?
 
@@ -133,12 +117,13 @@ private extension AddGroupMembersViewController {
                     return nil
                 }
                 for address in addresses {
-                    guard !oldGroupMembership.isPendingOrNonPendingMember(address) else {
+                    guard !oldGroupMembership.isFullMember(address) else {
                         owsFailDebug("Recipient is already in group.")
                         continue
                     }
                     // GroupManager will separate out members as pending if necessary.
-                    groupMembershipBuilder.addNonPendingMember(address, role: .normal)
+                    groupMembershipBuilder.remove(address)
+                    groupMembershipBuilder.addFullMember(address, role: .normal)
                 }
                 builder.groupMembership = groupMembershipBuilder.build()
                 return try builder.build(transaction: transaction)
@@ -164,7 +149,6 @@ private extension AddGroupMembersViewController {
             return dismissAndUpdateDelegate()
         }
 
-        let oldGroupModel = self.oldGroupModel
         guard let newGroupModel = buildNewGroupModel() else {
                                                         let error = OWSAssertionError("Couldn't build group model.")
                                                         GroupViewUtils.showUpdateErrorUI(error: error)
@@ -172,16 +156,16 @@ private extension AddGroupMembersViewController {
         }
         GroupViewUtils.updateGroupWithActivityIndicator(fromViewController: self,
                                                         updatePromiseBlock: {
-                                                            self.updateGroupThreadPromise(oldGroupModel: oldGroupModel,
-                                                                                          newGroupModel: newGroupModel)
+                                                            self.updateGroupThreadPromise(newGroupModel: newGroupModel)
         },
-                                                        completion: {
+                                                        completion: { _ in
                                                             dismissAndUpdateDelegate()
         })
     }
 
-    func updateGroupThreadPromise(oldGroupModel: TSGroupModel,
-                                  newGroupModel: TSGroupModel) -> Promise<Void> {
+    func updateGroupThreadPromise(newGroupModel: TSGroupModel) -> Promise<Void> {
+
+        let oldGroupModel = self.oldGroupModel
 
         guard let localAddress = tsAccountManager.localAddress else {
             return Promise(error: OWSAssertionError("Missing localAddress."))
@@ -192,7 +176,8 @@ private extension AddGroupMembersViewController {
                                                          description: self.logTag)
         }.then(on: .global()) { _ in
             // dmConfiguration: nil means don't change disappearing messages configuration.
-            GroupManager.localUpdateExistingGroup(groupModel: newGroupModel,
+            GroupManager.localUpdateExistingGroup(oldGroupModel: oldGroupModel,
+                                                  newGroupModel: newGroupModel,
                                                   dmConfiguration: nil,
                                                   groupUpdateSourceAddress: localAddress)
         }.asVoid()
@@ -204,15 +189,15 @@ private extension AddGroupMembersViewController {
 extension AddGroupMembersViewController: GroupMemberViewDelegate {
 
     var groupMemberViewRecipientSet: OrderedSet<PickedRecipient> {
-        return newRecipientSet
+        newRecipientSet
     }
 
     var groupMemberViewHasUnsavedChanges: Bool {
-        return !newRecipientSet.isEmpty
+        !newRecipientSet.isEmpty
     }
 
     var shouldTryToEnableGroupsV2ForMembers: Bool {
-        return groupThread.isGroupV2Thread
+        groupThread.isGroupV2Thread
     }
 
     func groupMemberViewRemoveRecipient(_ recipient: PickedRecipient) {
@@ -239,33 +224,46 @@ extension AddGroupMembersViewController: GroupMemberViewDelegate {
     }
 
     func groupMemberViewShouldShowMemberCount() -> Bool {
-        return groupThread.isGroupV2Thread
+        groupThread.isGroupV2Thread
     }
 
     func groupMemberViewGroupMemberCountForDisplay() -> Int {
-        return (oldGroupModel.groupMembership.pendingAndNonPendingMemberCount +
+        (oldGroupModel.groupMembership.allMembersOfAnyKind.count +
                 newRecipientSet.count)
     }
 
-    func groupMemberViewIsGroupFull() -> Bool {
-        guard groupThread.isGroupV2Thread else {
-            return false
-        }
-        return groupMemberViewGroupMemberCountForDisplay() >= GroupManager.maxGroupMemberCount
+    func groupMemberViewIsGroupFull_HardLimit() -> Bool {
+        groupMemberViewGroupMemberCountForDisplay() >= GroupManager.groupsV2MaxGroupSizeHardLimit
     }
 
-    func groupMemberViewMaxMemberCount() -> UInt? {
-        return (groupThread.isGroupV2Thread
-        ? GroupManager.maxGroupMemberCount
-        : nil)
+    func groupMemberViewIsGroupFull_RecommendedLimit() -> Bool {
+        groupMemberViewGroupMemberCountForDisplay() >= GroupManager.groupsV2MaxGroupSizeRecommended
     }
 
-    func groupMemberViewIsPreExistingMember(_ recipient: PickedRecipient) -> Bool {
+    func groupMemberViewIsPreExistingMember(_ recipient: PickedRecipient,
+                                            transaction: SDSAnyReadTransaction) -> Bool {
         guard let address = recipient.address else {
             owsFailDebug("Invalid recipient.")
             return false
         }
-        return oldGroupModel.groupMembership.isPendingOrNonPendingMember(address)
+        let groupMembership = oldGroupModel.groupMembership
+        if groupMembership.isFullMember(address) {
+            return true
+        }
+        if groupMembership.isInvitedMember(address) ||
+            groupMembership.isRequestingMember(address) {
+            // We can "add" pending or requesting members if they support gv2
+            // and we know their profile key credential.
+            let canAddMember: Bool = {
+                guard GroupManager.doesUserSupportGroupsV2(address: address, transaction: transaction) else {
+                    return false
+                }
+                return self.groupsV2.hasProfileKeyCredential(for: address, transaction: transaction)
+            }()
+
+            return !canAddMember
+        }
+        return false
     }
 
     func groupMemberViewIsGroupsV2Required() -> Bool {
@@ -274,5 +272,9 @@ extension AddGroupMembersViewController: GroupMemberViewDelegate {
 
     func groupMemberViewDismiss() {
         navigationController?.popViewController(animated: true)
+    }
+
+    var isNewGroup: Bool {
+        false
     }
 }

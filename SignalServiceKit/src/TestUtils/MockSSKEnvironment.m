@@ -1,55 +1,37 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "MockSSKEnvironment.h"
-#import "OWS2FAManager.h"
-#import "OWSAttachmentDownloads.h"
-#import "OWSBatchMessageProcessor.h"
-#import "OWSBlockingManager.h"
-#import "OWSDisappearingMessagesJob.h"
-#import "OWSFakeCallMessageHandler.h"
-#import "OWSFakeContactsUpdater.h"
-#import "OWSFakeMessageSender.h"
-#import "OWSFakeNetworkManager.h"
-#import "OWSFakeProfileManager.h"
-#import "OWSIdentityManager.h"
-#import "OWSMessageDecrypter.h"
-#import "OWSMessageManager.h"
-#import "OWSMessageReceiver.h"
-#import "OWSOutgoingReceiptManager.h"
-#import "OWSPrimaryStorage.h"
-#import "OWSReadReceiptManager.h"
-#import "SSKPreKeyStore.h"
-#import "SSKSessionStore.h"
-#import "SSKSignedPreKeyStore.h"
-#import "StorageCoordinator.h"
-#import "TSAccountManager.h"
-#import "TSSocketManager.h"
 #import <PromiseKit/AnyPromise.h>
+#import <SignalServiceKit/MockSSKEnvironment.h>
+#import <SignalServiceKit/OWS2FAManager.h>
 #import <SignalServiceKit/OWSBackgroundTask.h>
+#import <SignalServiceKit/OWSBlockingManager.h>
+#import <SignalServiceKit/OWSDisappearingMessagesJob.h>
+#import <SignalServiceKit/OWSFakeCallMessageHandler.h>
+#import <SignalServiceKit/OWSFakeMessageSender.h>
+#import <SignalServiceKit/OWSFakeNetworkManager.h>
+#import <SignalServiceKit/OWSFakeProfileManager.h>
+#import <SignalServiceKit/OWSIdentityManager.h>
+#import <SignalServiceKit/OWSMessageManager.h>
+#import <SignalServiceKit/OWSOutgoingReceiptManager.h>
+#import <SignalServiceKit/OWSReceiptManager.h>
 #import <SignalServiceKit/ProfileManagerProtocol.h>
+#import <SignalServiceKit/SSKPreKeyStore.h>
+#import <SignalServiceKit/SSKSignedPreKeyStore.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/StorageCoordinator.h>
+#import <SignalServiceKit/TSAccountManager.h>
+#import <SignalServiceKit/TSSocketManager.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 #ifdef TESTABLE_BUILD
 
-@interface OWSPrimaryStorage (Tests)
-
-@property (atomic) BOOL areAsyncRegistrationsComplete;
-@property (atomic) BOOL areSyncRegistrationsComplete;
-
-@end
-
-#pragma mark -
-
 @implementation MockSSKEnvironment
 
 + (void)activate
 {
-    [SMKEnvironment setShared:[[SMKEnvironment alloc] initWithAccountIdFinder:[OWSAccountIdFinder new]]];
-
     MockSSKEnvironment *instance = [[self alloc] init];
     [self setShared:instance];
     [instance configure];
@@ -60,17 +42,15 @@ NS_ASSUME_NONNULL_BEGIN
 - (instancetype)init
 {
     // Ensure that OWSBackgroundTaskManager is created now.
-    [OWSBackgroundTaskManager sharedManager];
+    [OWSBackgroundTaskManager shared];
 
     StorageCoordinator *storageCoordinator = [StorageCoordinator new];
     SDSDatabaseStorage *databaseStorage = storageCoordinator.databaseStorage;
-    // Unlike AppSetup, we always load YDB in the tests.
-    OWSPrimaryStorage *primaryStorage = databaseStorage.yapPrimaryStorage;
 
     id<ContactsManagerProtocol> contactsManager = [OWSFakeContactsManager new];
     OWSLinkPreviewManager *linkPreviewManager = [OWSLinkPreviewManager new];
     TSNetworkManager *networkManager = [[OWSFakeNetworkManager alloc] init];
-    OWSMessageSender *messageSender = [OWSFakeMessageSender new];
+    MessageSender *messageSender = [OWSFakeMessageSender new];
     MessageSenderJobQueue *messageSenderJobQueue = [MessageSenderJobQueue new];
 
     OWSMessageManager *messageManager = [OWSMessageManager new];
@@ -82,15 +62,12 @@ NS_ASSUME_NONNULL_BEGIN
     SSKSignedPreKeyStore *signedPreKeyStore = [SSKSignedPreKeyStore new];
     id<OWSUDManager> udManager = [OWSUDManagerImpl new];
     OWSMessageDecrypter *messageDecrypter = [OWSMessageDecrypter new];
-    SSKMessageDecryptJobQueue *messageDecryptJobQueue = [SSKMessageDecryptJobQueue new];
-    OWSBatchMessageProcessor *batchMessageProcessor = [OWSBatchMessageProcessor new];
-    OWSMessageReceiver *messageReceiver = [OWSMessageReceiver new];
     GroupsV2MessageProcessor *groupsV2MessageProcessor = [GroupsV2MessageProcessor new];
     TSSocketManager *socketManager = [[TSSocketManager alloc] init];
     TSAccountManager *tsAccountManager = [TSAccountManager new];
     OWS2FAManager *ows2FAManager = [OWS2FAManager new];
     OWSDisappearingMessagesJob *disappearingMessagesJob = [OWSDisappearingMessagesJob new];
-    OWSReadReceiptManager *readReceiptManager = [OWSReadReceiptManager new];
+    OWSReceiptManager *receiptManager = [OWSReceiptManager new];
     OWSOutgoingReceiptManager *outgoingReceiptManager = [OWSOutgoingReceiptManager new];
     id<SSKReachabilityManager> reachabilityManager = [SSKReachabilityManagerImpl new];
     id<SyncManagerProtocol> syncManager = [[OWSMockSyncManager alloc] init];
@@ -103,21 +80,25 @@ NS_ASSUME_NONNULL_BEGIN
     SSKPreferences *sskPreferences = [SSKPreferences new];
     id<GroupsV2> groupsV2 = [[MockGroupsV2 alloc] init];
     id<GroupV2Updates> groupV2Updates = [[MockGroupV2Updates alloc] init];
-    MessageProcessing *messageProcessing = [MessageProcessing new];
     MessageFetcherJob *messageFetcherJob = [MessageFetcherJob new];
     BulkProfileFetch *bulkProfileFetch = [BulkProfileFetch new];
     BulkUUIDLookup *bulkUUIDLookup = [BulkUUIDLookup new];
     id<VersionedProfiles> versionedProfiles = [MockVersionedProfiles new];
+    ModelReadCaches *modelReadCaches = [ModelReadCaches new];
     EarlyMessageManager *earlyMessageManager = [EarlyMessageManager new];
+    OWSMessagePipelineSupervisor *messagePipelineSupervisor = [OWSMessagePipelineSupervisor createStandardSupervisor];
+    AppExpiry *appExpiry = [AppExpiry new];
+    MessageProcessor *messageProcessor = [MessageProcessor new];
+    id<Payments> payments = [MockPayments new];
+    id<PaymentsCurrencies> paymentsCurrencies = [MockPaymentsCurrencies new];
+    SpamChallengeResolver *spamChallengeResolver = [SpamChallengeResolver new];
 
     self = [super initWithContactsManager:contactsManager
                        linkPreviewManager:linkPreviewManager
                             messageSender:messageSender
                     messageSenderJobQueue:messageSenderJobQueue
-               pendingReadReceiptRecorder:[NoopPendingReadReceiptRecorder new]
+                   pendingReceiptRecorder:[NoopPendingReceiptRecorder new]
                            profileManager:[OWSFakeProfileManager new]
-                           primaryStorage:primaryStorage
-                          contactsUpdater:[OWSFakeContactsUpdater new]
                            networkManager:networkManager
                            messageManager:messageManager
                           blockingManager:blockingManager
@@ -128,15 +109,12 @@ NS_ASSUME_NONNULL_BEGIN
                               preKeyStore:preKeyStore
                                 udManager:udManager
                          messageDecrypter:messageDecrypter
-                   messageDecryptJobQueue:messageDecryptJobQueue
-                    batchMessageProcessor:batchMessageProcessor
-                          messageReceiver:messageReceiver
                  groupsV2MessageProcessor:groupsV2MessageProcessor
                             socketManager:socketManager
                          tsAccountManager:tsAccountManager
                             ows2FAManager:ows2FAManager
                   disappearingMessagesJob:disappearingMessagesJob
-                       readReceiptManager:readReceiptManager
+                           receiptManager:receiptManager
                    outgoingReceiptManager:outgoingReceiptManager
                       reachabilityManager:reachabilityManager
                               syncManager:syncManager
@@ -151,19 +129,25 @@ NS_ASSUME_NONNULL_BEGIN
                            sskPreferences:sskPreferences
                                  groupsV2:groupsV2
                            groupV2Updates:groupV2Updates
-                        messageProcessing:messageProcessing
                         messageFetcherJob:messageFetcherJob
                          bulkProfileFetch:bulkProfileFetch
                            bulkUUIDLookup:bulkUUIDLookup
                         versionedProfiles:versionedProfiles
-                      earlyMessageManager:earlyMessageManager];
+                          modelReadCaches:modelReadCaches
+                      earlyMessageManager:earlyMessageManager
+                messagePipelineSupervisor:messagePipelineSupervisor
+                                appExpiry:appExpiry
+                         messageProcessor:messageProcessor
+                                 payments:payments
+                       paymentsCurrencies:paymentsCurrencies
+                    spamChallengeResolver:spamChallengeResolver];
 
     if (!self) {
         return nil;
     }
 
-    self.callMessageHandler = [OWSFakeCallMessageHandler new];
-    self.notificationsManager = [NoopNotificationsManager new];
+    self.callMessageHandlerRef = [OWSFakeCallMessageHandler new];
+    self.notificationsManagerRef = [NoopNotificationsManager new];
 
     return self;
 }
@@ -171,17 +155,11 @@ NS_ASSUME_NONNULL_BEGIN
 - (void)configure
 {
     __block dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
-    [self configureYdb]
-        .then(^{
-            OWSAssertIsOnMainThread();
+    [self configureGrdb].then(^{
+        OWSAssertIsOnMainThread();
 
-            return [self configureGrdb];
-        })
-        .then(^{
-            OWSAssertIsOnMainThread();
-
-            dispatch_semaphore_signal(semaphore);
-        });
+        dispatch_semaphore_signal(semaphore);
+    });
 
     // Registering extensions is a complicated process than can move
     // on and off the main thread.  While we wait for it to complete,
@@ -198,22 +176,6 @@ NS_ASSUME_NONNULL_BEGIN
         // Process a single "source" (e.g. item) on the default run loop.
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, false);
     }
-}
-
-- (AnyPromise *)configureYdb
-{
-    if (!self.databaseStorage.canLoadYdb) {
-        return [AnyPromise promiseWithValue:@(1)];
-    }
-    AnyPromise *promise = [AnyPromise promiseWithResolverBlock:^(PMKResolver resolve) {
-        [OWSStorage registerExtensionsWithCompletionBlock:^() {
-            [self.storageCoordinator markStorageSetupAsComplete];
-
-            // The value doesn't matter, we just need any non-NSError value.
-            resolve(@(1));
-        }];
-    }];
-    return promise;
 }
 
 - (AnyPromise *)configureGrdb

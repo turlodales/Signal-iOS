@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -39,7 +39,7 @@ import Foundation
 
         let actionSheet = ActionSheetController(title: title, message: message)
 
-        let actionTitle = buttonTitle ?? NSLocalizedString("OK", comment: "")
+        let actionTitle = buttonTitle ?? CommonStrings.okButton
         let okAction = ActionSheetAction(title: actionTitle, style: .default, handler: buttonAction)
         okAction.accessibilityIdentifier = "OWSActionSheets.\("ok")"
         actionSheet.addAction(okAction)
@@ -53,7 +53,7 @@ import Foundation
         let actionSheet = ActionSheetController(title: title, message: message)
         actionSheet.addAction(self.cancelAction)
 
-        let actionTitle = proceedTitle ?? NSLocalizedString("OK", comment: "")
+        let actionTitle = proceedTitle ?? CommonStrings.okButton
         let okAction = ActionSheetAction(
             title: actionTitle,
             accessibilityIdentifier: "OWSActionSheets.ok",
@@ -68,6 +68,19 @@ import Foundation
     @objc
     public class func showErrorAlert(message: String) {
         self.showActionSheet(title: CommonStrings.errorAlertTitle, message: message, buttonTitle: nil)
+    }
+
+    @objc
+    public class var okayAction: ActionSheetAction {
+        let action = ActionSheetAction(
+            title: CommonStrings.okButton,
+            accessibilityIdentifier: "OWSActionSheets.okay",
+            style: .cancel
+        ) { _ in
+            Logger.debug("Okay item")
+            // Do nothing.
+        }
+        return action
     }
 
     @objc
@@ -123,24 +136,20 @@ import Foundation
         // our min SDK to iOS 11.
         if #available(iOS 11.0, *) { return }
 
-        // Don't nag legacy users if this is an end of life build
-        // (the last build their OS version supports)
-        guard !AppExpiry.isEndOfLifeOSVersion else { return }
-
         // Don't show the nag to users who have just launched
         // the app for the first time.
-        guard AppVersion.sharedInstance().lastAppVersion != nil else {
+        guard AppVersion.shared().lastAppVersion != nil else {
             return
         }
 
-        if let iOSUpgradeNagDate = Environment.shared.preferences.iOSUpgradeNagDate() {
+        if let iOSUpgradeNagDate = Self.preferences.iOSUpgradeNagDate() {
             let kNagFrequencySeconds = 3 * kDayInterval
             guard fabs(iOSUpgradeNagDate.timeIntervalSinceNow) > kNagFrequencySeconds else {
                 return
             }
         }
 
-        Environment.shared.preferences.setIOSUpgradeNagDate(Date())
+        Self.preferences.setIOSUpgradeNagDate(Date())
 
         OWSActionSheets.showActionSheet(title: NSLocalizedString("UPGRADE_IOS_ALERT_TITLE",
                                                         comment: "Title for the alert indicating that user should upgrade iOS."),

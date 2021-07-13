@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -9,8 +9,9 @@ protocol MessageContentJobFinder {
     associatedtype ReadTransaction
     associatedtype WriteTransaction
 
-    func addJob(envelopeData: Data, plaintextData: Data?, wasReceivedByUD: Bool, transaction: WriteTransaction)
+    func addJob(envelopeData: Data, plaintextData: Data?, wasReceivedByUD: Bool, serverDeliveryTimestamp: UInt64, transaction: WriteTransaction)
     func nextJobs(batchSize: UInt, transaction: ReadTransaction) -> [OWSMessageContentJob]
+    func allJobs(transaction: ReadTransaction) -> [OWSMessageContentJob]
     func removeJobs(withUniqueIds uniqueIds: [String], transaction: WriteTransaction)
 }
 
@@ -19,34 +20,34 @@ public class AnyMessageContentJobFinder: NSObject, MessageContentJobFinder {
     typealias ReadTransaction = SDSAnyReadTransaction
     typealias WriteTransaction = SDSAnyWriteTransaction
 
-    let yapAdapter = YAPDBMessageContentJobFinder()
     let grdbAdapter = GRDBMessageContentJobFinder()
 
     @objc
-    public func addJob(envelopeData: Data, plaintextData: Data?, wasReceivedByUD: Bool, transaction: SDSAnyWriteTransaction) {
+    public func addJob(envelopeData: Data, plaintextData: Data?, wasReceivedByUD: Bool, serverDeliveryTimestamp: UInt64, transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let yapWrite):
-            yapAdapter.addJob(withEnvelopeData: envelopeData, plaintextData: plaintextData, wasReceivedByUD: wasReceivedByUD, transaction: yapWrite)
         case .grdbWrite(let grdbWrite):
-            grdbAdapter.addJob(envelopeData: envelopeData, plaintextData: plaintextData, wasReceivedByUD: wasReceivedByUD, transaction: grdbWrite)
+            grdbAdapter.addJob(envelopeData: envelopeData, plaintextData: plaintextData, wasReceivedByUD: wasReceivedByUD, serverDeliveryTimestamp: serverDeliveryTimestamp, transaction: grdbWrite)
         }
     }
 
     @objc
     public func nextJobs(batchSize: UInt, transaction: SDSAnyReadTransaction) -> [OWSMessageContentJob] {
         switch transaction.readTransaction {
-        case .yapRead(let yapRead):
-            return yapAdapter.nextJobs(forBatchSize: batchSize, transaction: yapRead)
         case .grdbRead(let grdbRead):
             return grdbAdapter.nextJobs(batchSize: batchSize, transaction: grdbRead)
+        }
+    }
+
+    @objc func allJobs(transaction: SDSAnyReadTransaction) -> [OWSMessageContentJob] {
+        switch transaction.readTransaction {
+        case .grdbRead(let grdbRead):
+            return grdbAdapter.allJobs(transaction: grdbRead)
         }
     }
 
     @objc
     public func removeJobs(withUniqueIds uniqueIds: [String], transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let yapWrite):
-            yapAdapter.removeJobs(withIds: uniqueIds, transaction: yapWrite)
         case .grdbWrite(let grdbWrite):
             grdbAdapter.removeJobs(withUniqueIds: uniqueIds, transaction: grdbWrite)
         }
@@ -62,8 +63,8 @@ class GRDBMessageContentJobFinder: MessageContentJobFinder {
     typealias ReadTransaction = GRDBReadTransaction
     typealias WriteTransaction = GRDBWriteTransaction
 
-    func addJob(envelopeData: Data, plaintextData: Data?, wasReceivedByUD: Bool, transaction: GRDBWriteTransaction) {
-        let job = OWSMessageContentJob(envelopeData: envelopeData, plaintextData: plaintextData, wasReceivedByUD: wasReceivedByUD)
+    func addJob(envelopeData: Data, plaintextData: Data?, wasReceivedByUD: Bool, serverDeliveryTimestamp: UInt64, transaction: GRDBWriteTransaction) {
+        let job = OWSMessageContentJob(envelopeData: envelopeData, plaintextData: plaintextData, wasReceivedByUD: wasReceivedByUD, serverDeliveryTimestamp: serverDeliveryTimestamp)
         job.anyInsert(transaction: transaction.asAnyWrite)
     }
 
@@ -73,6 +74,18 @@ class GRDBMessageContentJobFinder: MessageContentJobFinder {
             FROM \(MessageContentJobRecord.databaseTableName)
             ORDER BY \(messageContentJobColumn: .id)
             LIMIT \(batchSize)
+        """
+        let cursor = OWSMessageContentJob.grdbFetchCursor(sql: sql,
+                                                          transaction: transaction)
+
+        return try! cursor.all()
+    }
+
+    func allJobs(transaction: GRDBReadTransaction) -> [OWSMessageContentJob] {
+        let sql = """
+            SELECT *
+            FROM \(MessageContentJobRecord.databaseTableName)
+            ORDER BY \(messageContentJobColumn: .id)
         """
         let cursor = OWSMessageContentJob.grdbFetchCursor(sql: sql,
                                                           transaction: transaction)

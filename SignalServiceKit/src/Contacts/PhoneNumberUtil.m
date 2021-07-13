@@ -1,10 +1,11 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "PhoneNumberUtil.h"
-#import "ContactsManagerProtocol.h"
-#import "FunctionalUtil.h"
+#import <SignalServiceKit/ContactsManagerProtocol.h>
+#import <SignalServiceKit/FunctionalUtil.h>
+#import <SignalServiceKit/PhoneNumberUtil.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <libPhoneNumber_iOS/NBPhoneNumber.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -12,7 +13,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface PhoneNumberUtil ()
 
 @property (nonatomic, readonly) NSMutableDictionary *countryCodesFromCallingCodeCache;
-@property (nonatomic, readonly) NSCache *parsedPhoneNumberCache;
+@property (nonatomic, readonly) AnyLRUCache *parsedPhoneNumberCache;
 
 @end
 
@@ -37,7 +38,9 @@ NS_ASSUME_NONNULL_BEGIN
     if (self) {
         _nbPhoneNumberUtil = [[NBPhoneNumberUtil alloc] init];
         _countryCodesFromCallingCodeCache = [NSMutableDictionary new];
-        _parsedPhoneNumberCache = [NSCache new];
+        _parsedPhoneNumberCache = [[AnyLRUCache alloc] initWithMaxSize:256
+                                                            nseMaxSize:8
+                                            shouldEvacuateInBackground:NO];
     }
 
     return self;
@@ -49,7 +52,7 @@ NS_ASSUME_NONNULL_BEGIN
 {
     NSString *hashKey = [NSString stringWithFormat:@"numberToParse:%@defaultRegion:%@", numberToParse, defaultRegion];
 
-    NBPhoneNumber *result = [self.parsedPhoneNumberCache objectForKey:hashKey];
+    NBPhoneNumber *_Nullable result = (NBPhoneNumber *)[self.parsedPhoneNumberCache objectForKey:hashKey];
 
     if (!result) {
         result = [self.nbPhoneNumberUtil parse:numberToParse defaultRegion:defaultRegion error:error];
@@ -466,10 +469,10 @@ NS_ASSUME_NONNULL_BEGIN
     NSArray *queryStrings         = [queryString componentsSeparatedByCharactersInSet:whitespaceSet];
     NSArray *nameStrings          = [nameString componentsSeparatedByCharactersInSet:whitespaceSet];
 
-    return [queryStrings all:^int(NSString *query) {
+    return [queryStrings allSatisfy:^BOOL(NSString *query) {
         if (query.length == 0)
             return YES;
-        return [nameStrings any:^int(NSString *nameWord) {
+        return [nameStrings anySatisfy:^BOOL(NSString *nameWord) {
             NSStringCompareOptions searchOpts = NSCaseInsensitiveSearch | NSAnchoredSearch;
             return [nameWord rangeOfString:query options:searchOpts].location != NSNotFound;
         }];
@@ -482,7 +485,7 @@ NS_ASSUME_NONNULL_BEGIN
 
     NSArray *countryCodes = NSLocale.ISOCountryCodes;
 
-    countryCodes = [countryCodes filter:^int(NSString *countryCode) {
+    countryCodes = [countryCodes filter:^(NSString *countryCode) {
         NSString *countryName = [self countryNameFromCountryCode:countryCode];
         NSString *callingCode = [self callingCodeFromCountryCode:countryCode];
 

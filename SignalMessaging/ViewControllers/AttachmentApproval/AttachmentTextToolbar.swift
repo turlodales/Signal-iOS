@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -8,7 +8,7 @@ import UIKit
 // Coincides with Android's max text message length
 let kMaxMessageBodyCharacterCount = 2000
 
-protocol AttachmentTextToolbarDelegate: class {
+protocol AttachmentTextToolbarDelegate: MentionTextViewDelegate {
     func attachmentTextToolbarDidTapSend(_ attachmentTextToolbar: AttachmentTextToolbar)
     func attachmentTextToolbarDidBeginEditing(_ attachmentTextToolbar: AttachmentTextToolbar)
     func attachmentTextToolbarDidEndEditing(_ attachmentTextToolbar: AttachmentTextToolbar)
@@ -20,15 +20,7 @@ protocol AttachmentTextToolbarDelegate: class {
 
 // MARK: -
 
-class AttachmentTextToolbar: UIView, UITextViewDelegate {
-
-    // MARK: - Dependencies
-
-    private var preferences: OWSPreferences {
-        return Environment.shared.preferences
-    }
-
-    // MARK: - Properties
+class AttachmentTextToolbar: UIView, MentionTextViewDelegate {
 
     var options: AttachmentApprovalViewControllerOptions {
         didSet {
@@ -42,17 +34,17 @@ class AttachmentTextToolbar: UIView, UITextViewDelegate {
         return options.contains(.canToggleViewOnce) && attachmentTextToolbarDelegate?.isViewOnceEnabled ?? false
     }
 
-    var messageText: String? {
+    var messageBody: MessageBody? {
         get {
             // Ignore message text if "view-once" is enabled.
             guard !isViewOnceEnabled else {
                 return nil
             }
-            return textView.text
+            return textView.messageBody
         }
 
         set {
-            textView.text = newValue
+            textView.messageBody = newValue
             updatePlaceholderTextViewVisibility()
         }
     }
@@ -88,7 +80,7 @@ class AttachmentTextToolbar: UIView, UITextViewDelegate {
         self.translatesAutoresizingMaskIntoConstraints = false
         self.backgroundColor = UIColor.clear
 
-        textView.delegate = self
+        textView.mentionDelegate = self
 
         let sendButton = OWSButton.sendButton(imageName: sendButtonImageName) { [weak self] in
             guard let self = self else { return }
@@ -197,12 +189,12 @@ class AttachmentTextToolbar: UIView, UITextViewDelegate {
         updateRecipientNames()
     }
 
-    lazy var textView: UITextView = {
+    lazy var textView: MentionTextView = {
         let textView = buildTextView()
 
         textView.returnKeyType = .done
         textView.scrollIndicatorInsets = UIEdgeInsets(top: 5, left: 0, bottom: 5, right: 3)
-        textView.delegate = self
+        textView.mentionDelegate = self
 
         return textView
     }()
@@ -289,16 +281,22 @@ class AttachmentTextToolbar: UIView, UITextViewDelegate {
         return textContainer
     }()
 
-    private func buildTextView() -> UITextView {
+    private func buildTextView() -> MentionTextView {
         let textView = AttachmentTextView()
 
         textView.keyboardAppearance = Theme.darkThemeKeyboardAppearance
         textView.backgroundColor = .clear
         textView.tintColor = Theme.darkThemePrimaryColor
 
-        textView.font = UIFont.ows_dynamicTypeBody
+        let textViewFont = UIFont.ows_dynamicTypeBody
+        textView.font = textViewFont
         textView.textColor = Theme.darkThemePrimaryColor
-        textView.textContainerInset = UIEdgeInsets(top: 7, left: 7, bottom: 7, right: 7)
+
+        // Check the system font size and increase text inset accordingly
+        // to keep the text vertically centered
+        textView.updateVerticalInsetsForDynamicBodyType(defaultInsets: 7)
+        textView.textContainerInset.left = 7
+        textView.textContainerInset.right = 7
 
         return textView
     }
@@ -327,7 +325,42 @@ class AttachmentTextToolbar: UIView, UITextViewDelegate {
 
         attachmentTextToolbarDelegate?.attachmentTextToolbarDidViewOnce(self)
 
+        if isViewOnceEnabled { textView.resignFirstResponder() }
+
         updateContent()
+    }
+
+    // MARK: - MentionTextViewDelegate
+
+    func textViewDidBeginTypingMention(_ textView: MentionTextView) {
+        attachmentTextToolbarDelegate?.textViewDidBeginTypingMention(textView)
+    }
+
+    func textViewDidEndTypingMention(_ textView: MentionTextView) {
+        attachmentTextToolbarDelegate?.textViewDidEndTypingMention(textView)
+    }
+
+    func textViewMentionPickerParentView(_ textView: MentionTextView) -> UIView? {
+        return attachmentTextToolbarDelegate?.textViewMentionPickerParentView(textView)
+    }
+
+    func textViewMentionPickerReferenceView(_ textView: MentionTextView) -> UIView? {
+        return attachmentTextToolbarDelegate?.textViewMentionPickerReferenceView(textView)
+    }
+
+    func textViewMentionPickerPossibleAddresses(_ textView: MentionTextView) -> [SignalServiceAddress] {
+        return attachmentTextToolbarDelegate?.textViewMentionPickerPossibleAddresses(textView) ?? []
+    }
+
+    func textView(_ textView: MentionTextView, didDeleteMention mention: Mention) {}
+
+    func textView(_ textView: MentionTextView, shouldResolveMentionForAddress address: SignalServiceAddress) -> Bool {
+        owsAssertDebug(attachmentTextToolbarDelegate != nil)
+        return attachmentTextToolbarDelegate?.textView(textView, shouldResolveMentionForAddress: address) ?? false
+    }
+
+    func textViewMentionStyle(_ textView: MentionTextView) -> Mention.Style {
+        return .composingAttachment
     }
 
     // MARK: - UITextViewDelegate
@@ -470,10 +503,12 @@ class AttachmentTextToolbar: UIView, UITextViewDelegate {
         }
         viewOnceTooltip = tooltip
 
-        preferences.setWasViewOnceTooltipShown()
+        DispatchQueue.global().async {
+            self.preferences.setWasViewOnceTooltipShown()
 
-        DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 5) { [weak self] in
-            self?.removeViewOnceTooltip()
+            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 5) { [weak self] in
+                self?.removeViewOnceTooltip()
+            }
         }
     }
 

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "Environment.h"
@@ -11,13 +11,17 @@ static Environment *sharedEnvironment = nil;
 
 @interface Environment ()
 
-@property (nonatomic) OWSAudioSession *audioSession;
-@property (nonatomic) OWSContactsManager *contactsManager;
-@property (nonatomic) OWSPreferences *preferences;
-@property (nonatomic) id<OWSProximityMonitoringManager> proximityMonitoringManager;
-@property (nonatomic) OWSSounds *sounds;
-@property (nonatomic) OWSWindowManager *windowManager;
-@property (nonatomic) LaunchJobs *launchJobs;
+@property (nonatomic) OWSAudioSession *audioSessionRef;
+@property (nonatomic) OWSPreferences *preferencesRef;
+@property (nonatomic) id<OWSProximityMonitoringManager> proximityMonitoringManagerRef;
+@property (nonatomic) OWSSounds *soundsRef;
+@property (nonatomic) OWSWindowManager *windowManagerRef;
+@property (nonatomic) LaunchJobs *launchJobsRef;
+@property (nonatomic) ContactsViewHelper *contactsViewHelperRef;
+@property (nonatomic) BroadcastMediaMessageJobQueue *broadcastMediaMessageJobQueueRef;
+@property (nonatomic) OWSOrphanDataCleaner *orphanDataCleanerRef;
+@property (nonatomic) ChatColors *chatColorsRef;
+@property (nonatomic) AvatarBuilder *avatarBuilderRef;
 
 @end
 
@@ -57,6 +61,11 @@ static Environment *sharedEnvironment = nil;
           proximityMonitoringManager:(id<OWSProximityMonitoringManager>)proximityMonitoringManager
                               sounds:(OWSSounds *)sounds
                        windowManager:(OWSWindowManager *)windowManager
+                  contactsViewHelper:(ContactsViewHelper *)contactsViewHelper
+       broadcastMediaMessageJobQueue:(BroadcastMediaMessageJobQueue *)broadcastMediaMessageJobQueue
+                   orphanDataCleaner:(OWSOrphanDataCleaner *)orphanDataCleaner
+                          chatColors:(ChatColors *)chatColors
+                       avatarBuilder:(AvatarBuilder *)avatarBuilder
 {
     self = [super init];
     if (!self) {
@@ -71,24 +80,29 @@ static Environment *sharedEnvironment = nil;
     OWSAssertDebug(proximityMonitoringManager);
     OWSAssertDebug(sounds);
     OWSAssertDebug(windowManager);
+    OWSAssertDebug(contactsViewHelper);
+    OWSAssertDebug(broadcastMediaMessageJobQueue);
+    OWSAssertDebug(orphanDataCleaner);
+    OWSAssertDebug(chatColors);
+    OWSAssertDebug(avatarBuilder);
 
-    _audioSession = audioSession;
-    _incomingContactSyncJobQueue = incomingContactSyncJobQueue;
-    _incomingGroupSyncJobQueue = incomingGroupSyncJobQueue;
-    _launchJobs = launchJobs;
-    _preferences = preferences;
-    _proximityMonitoringManager = proximityMonitoringManager;
-    _sounds = sounds;
-    _windowManager = windowManager;
+    _audioSessionRef = audioSession;
+    _incomingContactSyncJobQueueRef = incomingContactSyncJobQueue;
+    _incomingGroupSyncJobQueueRef = incomingGroupSyncJobQueue;
+    _launchJobsRef = launchJobs;
+    _preferencesRef = preferences;
+    _proximityMonitoringManagerRef = proximityMonitoringManager;
+    _soundsRef = sounds;
+    _windowManagerRef = windowManager;
+    _contactsViewHelperRef = contactsViewHelper;
+    _broadcastMediaMessageJobQueueRef = broadcastMediaMessageJobQueue;
+    _orphanDataCleanerRef = orphanDataCleaner;
+    _chatColorsRef = chatColors;
+    _avatarBuilderRef = avatarBuilder;
 
     OWSSingletonAssert();
 
     return self;
-}
-
-- (OWSContactsManager *)contactsManager
-{
-    return (OWSContactsManager *)SSKEnvironment.shared.contactsManager;
 }
 
 @end

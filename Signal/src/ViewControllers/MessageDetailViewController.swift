@@ -1,578 +1,462 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
+import QuickLook
 import SignalServiceKit
 import SignalMessaging
 
-@objc
-enum MessageMetadataViewMode: UInt {
-    case focusOnMessage
-    case focusOnMetadata
-}
-
-@objc
 protocol MessageDetailViewDelegate: AnyObject {
     func detailViewMessageWasDeleted(_ messageDetailViewController: MessageDetailViewController)
 }
 
-@objc
-class MessageDetailViewController: OWSViewController {
+class MessageDetailViewController: OWSTableViewController2 {
 
-    // MARK: - Dependencies
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
+    private enum DetailViewError: Error {
+        case messageWasDeleted
     }
 
-    // MARK: -
-
-    @objc
-    weak var delegate: MessageDetailViewDelegate?
+    weak var detailDelegate: MessageDetailViewDelegate?
 
     // MARK: Properties
 
-    var bubbleView: UIView?
+    weak var pushPercentDrivenTransition: UIPercentDrivenInteractiveTransition?
+    private var popPercentDrivenTransition: UIPercentDrivenInteractiveTransition?
 
-    let mode: MessageMetadataViewMode
-    let viewItem: ConversationViewItem
-    var message: TSMessage
-    var wasDeleted: Bool = false
+    private var renderItem: CVRenderItem?
+    private var thread: TSThread? { renderItem?.itemModel.thread }
 
-    var messageView: OWSMessageView?
-    var messageViewWidthLayoutConstraint: NSLayoutConstraint?
-    var messageViewHeightLayoutConstraint: NSLayoutConstraint?
+    private(set) var message: TSMessage
+    private var wasDeleted: Bool = false
+    private var isIncoming: Bool { message as? TSIncomingMessage != nil }
 
-    var scrollView: UIScrollView!
-    var contentView: UIView?
+    private struct MessageRecipientModel {
+        let address: SignalServiceAddress
+        let accessoryText: String
+        let displayUDIndicator: Bool
+    }
+    private let messageRecipients = AtomicOptional<[MessageReceiptStatus: [MessageRecipientModel]]>(nil)
 
-    var attachments: [TSAttachment]?
-    var attachmentStreams: [TSAttachmentStream]? {
+    private let cellView = CVCellView()
+
+    private var attachments: [TSAttachment]?
+    private var attachmentStreams: [TSAttachmentStream]? {
         return attachments?.compactMap { $0 as? TSAttachmentStream }
     }
-    var messageBody: String?
-
-    lazy var shouldShowUD: Bool = {
-        return self.preferences.shouldShowUnidentifiedDeliveryIndicators()
-    }()
-
-    var conversationStyle: ConversationStyle
-
-    private var contactShareViewHelper: ContactShareViewHelper!
-
-    // MARK: Dependencies
-
-    var preferences: OWSPreferences {
-        return Environment.shared.preferences
-    }
-
-    var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    var audioAttachmentPlayer: OWSAudioPlayer?
-
-    // MARK: Initializers
-
-    @objc
-    required init(viewItem: ConversationViewItem, message: TSMessage, thread: TSThread, mode: MessageMetadataViewMode) {
-        self.viewItem = viewItem
-        self.message = message
-        self.mode = mode
-        self.conversationStyle = ConversationStyle(thread: thread)
-
-        super.init()
-    }
-
-    // MARK: View Lifecycle
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-        self.contactShareViewHelper = ContactShareViewHelper(contactsManager: contactsManager)
-        contactShareViewHelper.delegate = self
-
-        do {
-            try updateMessageToLatest()
-        } catch DetailViewError.messageWasDeleted {
-            self.delegate?.detailViewMessageWasDeleted(self)
-        } catch {
-            owsFailDebug("unexpected error")
-        }
-
-        // We use the navigation controller's width here as ours may not be calculated yet.
-        self.conversationStyle.viewWidth = navigationController?.view.width ?? view.width
-
-        self.navigationItem.title = NSLocalizedString("MESSAGE_METADATA_VIEW_TITLE",
-                                                      comment: "Title for the 'message metadata' view.")
-
-        createViews()
-
-        self.view.layoutIfNeeded()
-
-        databaseStorage.add(databaseStorageObserver: self)
-    }
-
-    override public func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
-        Logger.debug("")
-
-        super.viewWillTransition(to: size, with: coordinator)
-
-        self.conversationStyle.viewWidth = size.width
-        updateMessageViewLayout()
-    }
-
-    override func viewWillAppear(_ animated: Bool) {
-        super.viewWillAppear(animated)
-
-        updateMessageViewLayout()
-
-        if mode == .focusOnMetadata {
-            if let bubbleView = self.bubbleView {
-                // Force layout.
-                view.setNeedsLayout()
-                view.layoutIfNeeded()
-
-                let contentHeight = scrollView.contentSize.height
-                let scrollViewHeight = scrollView.frame.size.height
-                guard contentHeight >=  scrollViewHeight else {
-                    // All content is visible within the scroll view. No need to offset.
-                    return
-                }
-
-                // We want to include at least a little portion of the message, but scroll no farther than necessary.
-                let showAtLeast: CGFloat = 50
-                let bubbleViewBottom = bubbleView.superview!.convert(bubbleView.frame, to: scrollView).maxY
-                let maxOffset =  bubbleViewBottom - showAtLeast
-                let lastPage = contentHeight - scrollViewHeight
-
-                let offset = CGPoint(x: 0, y: min(maxOffset, lastPage))
-
-                scrollView.setContentOffset(offset, animated: false)
-            }
-        }
-    }
-
-    // MARK: - Create Views
-
-    private func createViews() {
-        view.backgroundColor = Theme.backgroundColor
-
-        let scrollView = UIScrollView()
-        self.scrollView = scrollView
-        view.addSubview(scrollView)
-        scrollView.autoPinWidthToSuperview(withMargin: 0)
-
-        if scrollView.applyInsetsFix() {
-            scrollView.autoPin(toTopLayoutGuideOf: self, withInset: 0)
-        } else {
-            scrollView.autoPinEdge(toSuperviewEdge: .top)
-        }
-
-        let contentView = UIView.container()
-        self.contentView = contentView
-        scrollView.addSubview(contentView)
-        contentView.autoPinLeadingToSuperviewMargin()
-        contentView.autoPinTrailingToSuperviewMargin()
-        contentView.autoPinEdge(toSuperviewEdge: .top)
-        contentView.autoPinEdge(toSuperviewEdge: .bottom)
-        scrollView.layoutMargins = UIEdgeInsets(top: 0, left: 0, bottom: 0, right: 0)
-        scrollView.contentInset = UIEdgeInsets(top: 20, left: 0, bottom: 20, right: 0)
-
-        if hasMediaAttachment {
-            let footer = UIToolbar()
-            view.addSubview(footer)
-            footer.autoPinWidthToSuperview(withMargin: 0)
-            footer.autoPinEdge(.top, to: .bottom, of: scrollView)
-            footer.autoPin(toBottomLayoutGuideOf: self, withInset: 0)
-            footer.tintColor = Theme.primaryIconColor
-
-            footer.items = [
-                UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil),
-                UIBarButtonItem(
-                    image: Theme.iconImage(.messageActionShare),
-                    style: .plain,
-                    target: self,
-                    action: #selector(shareButtonPressed)
-                ),
-                UIBarButtonItem(barButtonSystemItem: .flexibleSpace, target: nil, action: nil)
-            ]
-        } else {
-            scrollView.autoPinEdge(toSuperviewEdge: .bottom)
-        }
-
-        updateContent()
-    }
-
-    lazy var thread: TSThread = {
-        var thread: TSThread?
-        databaseStorage.uiRead { transaction in
-            thread = self.message.thread(transaction: transaction)
-        }
-        return thread!
-    }()
-
-    private func updateContent() {
-        guard let contentView = contentView else {
-            owsFailDebug("Missing contentView")
-            return
-        }
-
-        // Remove any existing content views.
-        for subview in contentView.subviews {
-            subview.removeFromSuperview()
-        }
-
-        var rows = [UIView]()
-
-        // Content
-        rows += contentRows()
-
-        // Sender?
-        if let incomingMessage = message as? TSIncomingMessage {
-            let senderName: String
-            if RemoteConfig.messageRequests {
-                senderName = contactsManager.displayName(for: incomingMessage.authorAddress)
-            } else {
-                senderName = contactsManager.legacyDisplayName(for: incomingMessage.authorAddress)
-            }
-            rows.append(valueRow(name: NSLocalizedString("MESSAGE_METADATA_VIEW_SENDER",
-                                                         comment: "Label for the 'sender' field of the 'message metadata' view."),
-                                 value: senderName))
-        }
-
-        // Recipient(s)
-        if let outgoingMessage = message as? TSOutgoingMessage {
-
-            let isGroupThread = thread.isGroupThread
-
-            let recipientStatusGroups: [MessageReceiptStatus] = [
-                .read,
-                .uploading,
-                .delivered,
-                .sent,
-                .sending,
-                .failed,
-                .skipped
-            ]
-            for recipientStatusGroup in recipientStatusGroups {
-                var groupRows = [UIView]()
-
-                // TODO: It'd be nice to inset these dividers from the edge of the screen.
-                let addDivider = {
-                    let divider = UIView()
-                    divider.backgroundColor = Theme.hairlineColor
-                    divider.autoSetDimension(.height, toSize: CGHairlineWidth())
-                    groupRows.append(divider)
-                }
-
-                let messageRecipientAddresses = outgoingMessage.recipientAddresses()
-
-                for recipientAddress in messageRecipientAddresses {
-                    guard let recipientState = outgoingMessage.recipientState(for: recipientAddress) else {
-                        owsFailDebug("no message status for recipient: \(recipientAddress).")
-                        continue
-                    }
-
-                    // We use the "short" status message to avoid being redundant with the section title.
-                    let (recipientStatus, shortStatusMessage, _) = MessageRecipientStatusUtils.recipientStatusAndStatusMessage(outgoingMessage: outgoingMessage, recipientState: recipientState)
-
-                    guard recipientStatus == recipientStatusGroup else {
-                        continue
-                    }
-
-                    if groupRows.count < 1 {
-                        if isGroupThread {
-                            groupRows.append(valueRow(name: string(for: recipientStatusGroup),
-                                                      value: ""))
-                        }
-
-                        addDivider()
-                    }
-
-                    // We use ContactCellView, not ContactTableViewCell.
-                    // Table view cells don't layout properly outside the
-                    // context of a table view.
-                    let cellView = ContactCellView()
-                    if self.shouldShowUD, recipientState.wasSentByUD {
-                        let udAccessoryView = self.buildUDAccessoryView(text: shortStatusMessage)
-                        cellView.setAccessory(udAccessoryView)
-                    } else {
-                        cellView.accessoryMessage = shortStatusMessage
-                    }
-                    cellView.configure(withRecipientAddress: recipientAddress)
-
-                    let wrapper = UIView()
-                    wrapper.layoutMargins = UIEdgeInsets(top: 8, left: 20, bottom: 8, right: 20)
-                    wrapper.addSubview(cellView)
-                    cellView.autoPinEdgesToSuperviewMargins()
-                    groupRows.append(wrapper)
-                }
-
-                if groupRows.count > 0 {
-                    addDivider()
-
-                    let spacer = UIView()
-                    spacer.autoSetDimension(.height, toSize: 10)
-                    groupRows.append(spacer)
-                }
-
-                Logger.verbose("\(groupRows.count) rows for \(recipientStatusGroup)")
-                guard groupRows.count > 0 else {
-                    continue
-                }
-                rows += groupRows
-            }
-        }
-
-        let sentText = DateUtil.formatPastTimestampRelativeToNow(message.timestamp)
-        let sentRow: UIStackView = valueRow(name: NSLocalizedString("MESSAGE_METADATA_VIEW_SENT_DATE_TIME",
-                                                                    comment: "Label for the 'sent date & time' field of the 'message metadata' view."),
-                                            value: sentText)
-        if let incomingMessage = message as? TSIncomingMessage {
-            if self.shouldShowUD, incomingMessage.wasReceivedByUD {
-                let icon = #imageLiteral(resourceName: "ic_secret_sender_indicator").withRenderingMode(.alwaysTemplate)
-                let iconView = UIImageView(image: icon)
-                iconView.tintColor = Theme.secondaryTextAndIconColor
-                iconView.setContentHuggingHigh()
-                sentRow.addArrangedSubview(iconView)
-                // keep the icon close to the label.
-                let spacerView = UIView()
-                spacerView.setContentHuggingLow()
-                sentRow.addArrangedSubview(spacerView)
-            }
-        }
-
-        sentRow.isUserInteractionEnabled = true
-        sentRow.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(didLongPressSent)))
-        rows.append(sentRow)
-
-        if message is TSIncomingMessage {
-            rows.append(valueRow(name: NSLocalizedString("MESSAGE_METADATA_VIEW_RECEIVED_DATE_TIME",
-                                                         comment: "Label for the 'received date & time' field of the 'message metadata' view."),
-                                 value: DateUtil.formatPastTimestampRelativeToNow(message.receivedAtTimestamp)))
-        }
-
-        rows += addAttachmentMetadataRows()
-
-        // TODO: We could include the "disappearing messages" state here.
-
-        let rowStack = UIStackView(arrangedSubviews: rows)
-        rowStack.axis = .vertical
-        rowStack.spacing = 5
-        contentView.addSubview(rowStack)
-        rowStack.autoPinEdgesToSuperviewMargins()
-        contentView.layoutIfNeeded()
-        updateMessageViewLayout()
-    }
-
-    private func displayableTextIfText() -> String? {
-        guard viewItem.hasBodyText else {
-                return nil
-        }
-        guard let displayableText = viewItem.displayableBodyText else {
-                return nil
-        }
-        let messageBody = displayableText.fullText
-        guard messageBody.count > 0  else {
-            return nil
-        }
-        return messageBody
-    }
-
-    let bubbleViewHMargin: CGFloat = 10
-
-    private func contentRows() -> [UIView] {
-        var rows = [UIView]()
-
-        let messageView: OWSMessageView
-        if viewItem.messageCellType == .stickerMessage {
-            let messageStickerView = OWSMessageStickerView()
-            messageStickerView.delegate = self
-            messageView = messageStickerView
-        } else if viewItem.messageCellType == .viewOnce {
-            let messageViewOnceView = OWSMessageViewOnceView()
-            messageViewOnceView.delegate = self
-            messageView = messageViewOnceView
-        } else {
-            let messageBubbleView = OWSMessageBubbleView()
-            messageBubbleView.delegate = self
-            messageView = messageBubbleView
-        }
-
-        messageView.addGestureHandlers()
-        self.messageView = messageView
-        messageView.viewItem = viewItem
-        messageView.cellMediaCache = NSCache()
-        messageView.conversationStyle = conversationStyle
-        messageView.configureViews()
-        messageView.loadContent()
-
-        assert(messageView.isUserInteractionEnabled)
-
-        let row = UIView()
-        row.addSubview(messageView)
-        messageView.autoPinHeightToSuperview()
-
-        let isIncoming = self.message as? TSIncomingMessage != nil
-        messageView.autoPinEdge(toSuperviewEdge: isIncoming ? .leading : .trailing, withInset: bubbleViewHMargin)
-
-        self.messageViewWidthLayoutConstraint = messageView.autoSetDimension(.width, toSize: 0)
-        self.messageViewHeightLayoutConstraint = messageView.autoSetDimension(.height, toSize: 0)
-        rows.append(row)
-
-        if rows.isEmpty {
-            // Neither attachment nor body.
-            owsFailDebug("Message has neither attachment nor body.")
-            rows.append(valueRow(name: NSLocalizedString("MESSAGE_METADATA_VIEW_NO_ATTACHMENT_OR_BODY",
-                                                         comment: "Label for messages without a body or attachment in the 'message metadata' view."),
-                                 value: ""))
-        }
-
-        let spacer = UIView()
-        spacer.autoSetDimension(.height, toSize: 15)
-        rows.append(spacer)
-
-        return rows
-    }
-
     var hasMediaAttachment: Bool {
         guard let attachmentStreams = self.attachmentStreams, !attachmentStreams.isEmpty else {
             return false
         }
-
         return true
     }
 
     private let byteCountFormatter: ByteCountFormatter = ByteCountFormatter()
 
-    private func addAttachmentMetadataRows() -> [UIView] {
-        guard hasMediaAttachment else {
+    private lazy var contactShareViewHelper: ContactShareViewHelper = {
+        let contactShareViewHelper = ContactShareViewHelper()
+        contactShareViewHelper.delegate = self
+        return contactShareViewHelper
+    }()
+
+    private var databaseUpdateTimer: Timer?
+
+    // MARK: Initializers
+
+    required init(
+        message: TSMessage,
+        thread: TSThread
+    ) {
+        self.message = message
+        super.init()
+    }
+
+    // MARK: View Lifecycle
+
+    override func themeDidChange() {
+        super.themeDidChange()
+
+        refreshContent()
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+
+        title = NSLocalizedString(
+            "MESSAGE_METADATA_VIEW_TITLE",
+            comment: "Title for the 'message metadata' view."
+        )
+
+        databaseStorage.appendDatabaseChangeDelegate(self)
+
+        // Use our own swipe back animation, since the message
+        // details are presented as a "drawer" type view.
+        let panGesture = DirectionalPanGestureRecognizer(direction: .horizontal, target: self, action: #selector(handlePan))
+
+        // Allow panning with trackpad
+        if #available(iOS 13.4, *) { panGesture.allowedScrollTypesMask = .continuous }
+
+        view.addGestureRecognizer(panGesture)
+
+        if let interactivePopGestureRecognizer = navigationController?.interactivePopGestureRecognizer {
+            interactivePopGestureRecognizer.require(toFail: panGesture)
+        }
+
+        tableView.register(ContactTableViewCell.self, forCellReuseIdentifier: ContactTableViewCell.reuseIdentifier)
+
+        refreshContent()
+    }
+
+    override func viewWillTransition(to size: CGSize, with coordinator: UIViewControllerTransitionCoordinator) {
+        super.viewWillTransition(to: size, with: coordinator)
+        coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+            self?.refreshContent()
+        }
+    }
+
+    private func updateTableContents() {
+        let contents = OWSTableContents()
+
+        contents.addSection(buildMessageSection())
+
+        if isIncoming {
+            contents.addSection(buildSenderSection())
+        } else {
+            buildStatusSections().forEach { contents.addSection($0) }
+        }
+
+        self.contents = contents
+    }
+
+    public func buildRenderItem(interactionId: String) -> CVRenderItem? {
+        databaseStorage.read { transaction in
+            guard let interaction = TSInteraction.anyFetch(
+                uniqueId: interactionId,
+                transaction: transaction
+            ) else {
+                owsFailDebug("Missing interaction.")
+                return nil
+            }
+            guard let thread = TSThread.anyFetch(
+                uniqueId: interaction.uniqueThreadId,
+                transaction: transaction
+            ) else {
+                owsFailDebug("Missing thread.")
+                return nil
+            }
+
+            let chatColor = ChatColors.chatColorForRendering(thread: thread, transaction: transaction)
+
+            let conversationStyle = ConversationStyle(
+                type: .messageDetails,
+                thread: thread,
+                viewWidth: view.width - (cellOuterInsets.totalWidth + (Self.cellHInnerMargin * 2)),
+                hasWallpaper: false,
+                chatColor: chatColor
+            )
+
+            return CVLoader.buildStandaloneRenderItem(
+                interaction: interaction,
+                thread: thread,
+                conversationStyle: conversationStyle,
+                transaction: transaction
+            )
+        }
+    }
+
+    private func buildMessageSection() -> OWSTableSection {
+        guard let renderItem = renderItem else {
+            owsFailDebug("Missing renderItem.")
+            return OWSTableSection()
+        }
+
+        let messageStack = UIStackView()
+        messageStack.axis = .vertical
+
+        cellView.reset()
+
+        cellView.configure(renderItem: renderItem, componentDelegate: self)
+        cellView.isCellVisible = true
+        cellView.autoSetDimension(.height, toSize: renderItem.cellSize.height)
+
+        let cellContainer = UIView()
+        cellContainer.layoutMargins = UIEdgeInsets(top: 0, left: 0, bottom: 20, right: 0)
+
+        cellContainer.addSubview(cellView)
+        cellView.autoPinHeightToSuperviewMargins()
+
+        cellView.autoPinEdge(toSuperviewEdge: .leading)
+        cellView.autoPinEdge(toSuperviewEdge: .trailing)
+
+        messageStack.addArrangedSubview(cellContainer)
+
+        // Sent time
+
+        let sentTimeLabel = buildValueLabel(
+            name: NSLocalizedString("MESSAGE_METADATA_VIEW_SENT_DATE_TIME",
+                                    comment: "Label for the 'sent date & time' field of the 'message metadata' view."),
+            value: DateUtil.formatPastTimestampRelativeToNow(message.timestamp)
+        )
+        messageStack.addArrangedSubview(sentTimeLabel)
+        sentTimeLabel.isUserInteractionEnabled = true
+        sentTimeLabel.addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(didLongPressSent)))
+
+        if isIncoming {
+            // Received time
+            messageStack.addArrangedSubview(buildValueLabel(
+                name: NSLocalizedString("MESSAGE_METADATA_VIEW_RECEIVED_DATE_TIME",
+                                        comment: "Label for the 'received date & time' field of the 'message metadata' view."),
+                value: DateUtil.formatPastTimestampRelativeToNow(message.receivedAtTimestamp)
+            ))
+        }
+
+        if hasMediaAttachment, attachments?.count == 1, let attachment = attachments?.first {
+            if let sourceFilename = attachment.sourceFilename {
+                messageStack.addArrangedSubview(buildValueLabel(
+                    name: NSLocalizedString("MESSAGE_METADATA_VIEW_SOURCE_FILENAME",
+                                            comment: "Label for the original filename of any attachment in the 'message metadata' view."),
+                    value: sourceFilename
+                ))
+            }
+
+            if let formattedByteCount = byteCountFormatter.string(for: attachment.byteCount) {
+                messageStack.addArrangedSubview(buildValueLabel(
+                    name: NSLocalizedString("MESSAGE_METADATA_VIEW_ATTACHMENT_FILE_SIZE",
+                                            comment: "Label for file size of attachments in the 'message metadata' view."),
+                    value: formattedByteCount
+                ))
+            } else {
+                owsFailDebug("formattedByteCount was unexpectedly nil")
+            }
+
+            if DebugFlags.messageDetailsExtraInfo {
+                let contentType = attachment.contentType
+                messageStack.addArrangedSubview(buildValueLabel(
+                    name: NSLocalizedString("MESSAGE_METADATA_VIEW_ATTACHMENT_MIME_TYPE",
+                                            comment: "Label for the MIME type of attachments in the 'message metadata' view."),
+                    value: contentType
+                ))
+            }
+        }
+
+        let section = OWSTableSection()
+        section.add(.init(
+            customCellBlock: {
+                let cell = OWSTableItem.newCell()
+                cell.selectionStyle = .none
+                cell.contentView.addSubview(messageStack)
+                messageStack.autoPinWidthToSuperviewMargins()
+                messageStack.autoPinHeightToSuperview(withMargin: 20)
+                return cell
+            }, actionBlock: {
+
+            }
+        ))
+
+        return section
+    }
+
+    private func buildSenderSection() -> OWSTableSection {
+        guard let incomingMessage = message as? TSIncomingMessage else {
+            owsFailDebug("Unexpected message type")
+            return OWSTableSection()
+        }
+
+        let section = OWSTableSection()
+        section.headerTitle = NSLocalizedString(
+            "MESSAGE_DETAILS_VIEW_SENT_FROM_TITLE",
+            comment: "Title for the 'sent from' section on the 'message details' view."
+        )
+        section.add(contactItem(
+            for: incomingMessage.authorAddress,
+            accessoryText: DateUtil.formatPastTimestampRelativeToNow(incomingMessage.timestamp),
+            displayUDIndicator: incomingMessage.wasReceivedByUD
+        ))
+        return section
+    }
+
+    private func buildStatusSections() -> [OWSTableSection] {
+        guard nil != message as? TSOutgoingMessage else {
+            owsFailDebug("Unexpected message type")
             return []
         }
 
-        var rows = [UIView]()
+        var sections = [OWSTableSection]()
 
-        if self.attachments?.count == 1, let attachment = self.attachments?.first {
-            if let sourceFilename = attachment.sourceFilename {
-                rows.append(valueRow(name: NSLocalizedString("MESSAGE_METADATA_VIEW_SOURCE_FILENAME",
-                                                             comment: "Label for the original filename of any attachment in the 'message metadata' view."),
-                                     value: sourceFilename))
+        let orderedStatusGroups: [MessageReceiptStatus] = [
+            .viewed,
+            .read,
+            .delivered,
+            .sent,
+            .uploading,
+            .sending,
+            .pending,
+            .failed,
+            .skipped
+        ]
+
+        guard let messageRecipients = messageRecipients.get() else { return [] }
+
+        for statusGroup in orderedStatusGroups {
+            guard let recipients = messageRecipients[statusGroup], !recipients.isEmpty else { continue }
+
+            let section = OWSTableSection()
+            sections.append(section)
+
+            let sectionTitle = self.sectionTitle(for: statusGroup)
+            if let iconName = sectionIconName(for: statusGroup) {
+                let headerView = UIView()
+                headerView.layoutMargins = cellOuterInsetsWithMargin(
+                    top: (defaultSpacingBetweenSections ?? 0) + 12,
+                    left: Self.cellHInnerMargin * 0.5,
+                    bottom: 10,
+                    right: Self.cellHInnerMargin * 0.5
+                )
+
+                let label = UILabel()
+                label.textColor = Theme.isDarkThemeEnabled ? UIColor.ows_gray05 : UIColor.ows_gray90
+                label.font = UIFont.ows_dynamicTypeBodyClamped.ows_semibold
+                label.text = sectionTitle
+
+                headerView.addSubview(label)
+                label.autoPinHeightToSuperviewMargins()
+                label.autoPinEdge(toSuperviewMargin: .leading)
+
+                let iconView = UIImageView()
+                iconView.contentMode = .scaleAspectFit
+                iconView.setTemplateImageName(
+                    iconName,
+                    tintColor: Theme.isDarkThemeEnabled ? UIColor.ows_gray05 : UIColor.ows_gray90
+                )
+                headerView.addSubview(iconView)
+                iconView.autoAlignAxis(.horizontal, toSameAxisOf: label)
+                iconView.autoPinEdge(.leading, to: .trailing, of: label)
+                iconView.autoPinEdge(toSuperviewMargin: .trailing)
+                iconView.autoSetDimension(.height, toSize: 12)
+
+                section.customHeaderView = headerView
+            } else {
+                section.headerTitle = sectionTitle
             }
 
-            if _isDebugAssertConfiguration() {
-                let contentType = attachment.contentType
-                rows.append(valueRow(name: NSLocalizedString("MESSAGE_METADATA_VIEW_ATTACHMENT_MIME_TYPE",
-                                                             comment: "Label for the MIME type of attachments in the 'message metadata' view."),
-                                     value: contentType))
+            section.separatorInsetLeading = NSNumber(value: Float(Self.cellHInnerMargin + CGFloat(AvatarBuilder.smallAvatarSizePoints) + ContactCellView.avatarTextHSpacing))
 
-                if let formattedByteCount = byteCountFormatter.string(for: attachment.byteCount) {
-                    rows.append(valueRow(name: NSLocalizedString("MESSAGE_METADATA_VIEW_ATTACHMENT_FILE_SIZE",
-                                                                 comment: "Label for file size of attachments in the 'message metadata' view."),
-                                         value: formattedByteCount))
-                } else {
-                    owsFailDebug("formattedByteCount was unexpectedly nil")
+            for recipient in recipients {
+                section.add(contactItem(
+                    for: recipient.address,
+                    accessoryText: recipient.accessoryText,
+                    displayUDIndicator: recipient.displayUDIndicator
+                ))
+            }
+        }
+
+        return sections
+    }
+
+    private func contactItem(for address: SignalServiceAddress, accessoryText: String, displayUDIndicator: Bool) -> OWSTableItem {
+        return .init(customCellBlock: { [weak self] in
+                guard let self = self else { return UITableViewCell() }
+                let tableView = self.tableView
+                guard let cell = tableView.dequeueReusableCell(withIdentifier: ContactTableViewCell.reuseIdentifier) as? ContactTableViewCell else {
+                    owsFailDebug("Missing cell.")
+                    return UITableViewCell()
                 }
-            }
-        }
 
-        return rows
+                Self.databaseStorage.read { transaction in
+                    let configuration = ContactCellConfiguration.build(address: address,
+                                                                       localUserDisplayMode: .asUser,
+                                                                       transaction: transaction)
+                    configuration.accessoryView = self.buildAccessoryView(text: accessoryText,
+                                                                          displayUDIndicator: displayUDIndicator,
+                                                                          transaction: transaction)
+                    cell.configure(configuration: configuration, transaction: transaction)
+                }
+                return cell
+            },
+            actionBlock: { [weak self] in
+                guard let self = self else { return }
+                let actionSheet = MemberActionSheet(address: address, groupViewHelper: nil)
+                actionSheet.present(from: self)
+            }
+        )
     }
 
-    private func buildUDAccessoryView(text: String) -> UIView {
-        let label = UILabel()
-        label.textColor = Theme.secondaryTextAndIconColor
-        label.text = text
+    private func buildAccessoryView(text: String,
+                                    displayUDIndicator: Bool,
+                                    transaction: SDSAnyReadTransaction) -> ContactCellAccessoryView {
+        let label = CVLabel()
         label.textAlignment = .right
-        label.font = UIFont.ows_semiboldFont(withSize: 13)
+        let labelConfig = CVLabelConfig(text: text,
+                                        font: .ows_dynamicTypeFootnoteClamped,
+                                        textColor: Theme.ternaryTextColor)
+        labelConfig.applyForRendering(label: label)
+        let labelSize = CVText.measureLabel(config: labelConfig, maxWidth: .greatestFiniteMagnitude)
 
-        let image = #imageLiteral(resourceName: "ic_secret_sender_indicator").withRenderingMode(.alwaysTemplate)
-        let imageView = UIImageView(image: image)
-        imageView.tintColor = Theme.middleGrayColor
+        let shouldShowUD = preferences.shouldShowUnidentifiedDeliveryIndicators(transaction: transaction)
 
-        let hStack = UIStackView(arrangedSubviews: [imageView, label])
-        hStack.axis = .horizontal
-        hStack.spacing = 8
-
-        return hStack
-    }
-
-    private func nameLabel(text: String) -> UILabel {
-        let label = UILabel()
-        label.textColor = Theme.primaryTextColor
-        label.font = UIFont.ows_semiboldFont(withSize: 14)
-        label.text = text
-        label.setContentHuggingHorizontalHigh()
-        return label
-    }
-
-    private func valueLabel(text: String) -> UILabel {
-        let label = UILabel()
-        label.textColor = Theme.primaryTextColor
-        label.font = UIFont.ows_regularFont(withSize: 14)
-        label.text = text
-        label.setContentHuggingHorizontalLow()
-        return label
-    }
-
-    private func valueRow(name: String, value: String, subtitle: String = "") -> UIStackView {
-        let nameLabel = self.nameLabel(text: name)
-        let valueLabel = self.valueLabel(text: value)
-        let hStackView = UIStackView(arrangedSubviews: [nameLabel, valueLabel])
-        hStackView.axis = .horizontal
-        hStackView.spacing = 10
-        hStackView.layoutMargins = UIEdgeInsets(top: 0, left: 20, bottom: 0, right: 20)
-        hStackView.isLayoutMarginsRelativeArrangement = true
-
-        if subtitle.count > 0 {
-            let subtitleLabel = self.valueLabel(text: subtitle)
-            subtitleLabel.textColor = Theme.secondaryTextAndIconColor
-            hStackView.addArrangedSubview(subtitleLabel)
+        guard displayUDIndicator && shouldShowUD else {
+            return ContactCellAccessoryView(accessoryView: label, size: labelSize)
         }
 
-        return hStackView
+        let imageView = CVImageView()
+        imageView.setTemplateImageName(Theme.iconName(.sealedSenderIndicator), tintColor: Theme.ternaryTextColor)
+        let imageSize = CGSize.square(20)
+
+        let hStack = ManualStackView(name: "hStack")
+        let hStackConfig = CVStackViewConfig(axis: .horizontal,
+                                             alignment: .center,
+                                             spacing: 8,
+                                             layoutMargins: .zero)
+        let hStackMeasurement = hStack.configure(config: hStackConfig,
+                                                 subviews: [imageView, label],
+                                                 subviewInfos: [
+                                                    imageSize.asManualSubviewInfo(hasFixedSize: true),
+                                                    labelSize.asManualSubviewInfo
+                                                 ])
+        let hStackSize = hStackMeasurement.measuredSize
+        return ContactCellAccessoryView(accessoryView: hStack, size: hStackSize)
+    }
+
+    private func buildValueLabel(name: String, value: String) -> UILabel {
+        let label = UILabel()
+        label.textColor = Theme.primaryTextColor
+        label.font = .ows_dynamicTypeFootnoteClamped
+        label.attributedText = .composed(of: [
+            name.styled(with: .font(UIFont.ows_dynamicTypeFootnoteClamped.ows_semibold)),
+            " ",
+            value
+        ])
+        return label
     }
 
     // MARK: - Actions
 
-    @objc func shareButtonPressed(_ sender: UIBarButtonItem) {
-        guard let attachmentStreams = attachmentStreams, !attachmentStreams.isEmpty else {
-            Logger.error("Share button should only be shown with attachments, but no attachments found.")
-            return
-        }
-        AttachmentSharing.showShareUI(forAttachments: attachmentStreams, sender: sender)
-    }
-
-    // MARK: - Actions
-
-    enum DetailViewError: Error {
-        case messageWasDeleted
-    }
-
-    // This method should be called after self.databaseConnection.beginLongLivedReadTransaction().
-    private func updateMessageToLatest() throws {
-
-        AssertIsOnMainThread()
-
-        try databaseStorage.uiReadThrows { transaction in
-            let uniqueId = self.message.uniqueId
-            guard let newMessage = TSInteraction.anyFetch(uniqueId: uniqueId, transaction: transaction) as? TSMessage else {
-                Logger.error("Message was deleted")
-                throw DetailViewError.messageWasDeleted
-            }
-            self.message = newMessage
-            self.attachments = newMessage.mediaAttachments(with: transaction.unwrapGrdbRead)
+    private func sectionIconName(for messageReceiptStatus: MessageReceiptStatus) -> String? {
+        switch messageReceiptStatus {
+        case .uploading, .sending, .pending:
+            return "message_status_sending"
+        case .sent:
+            return "message_status_sent"
+        case .delivered:
+            return "message_status_delivered"
+        case .read, .viewed:
+            return "message_status_read"
+        case .failed, .skipped:
+            return nil
         }
     }
 
-    private func string(for messageReceiptStatus: MessageReceiptStatus) -> String {
+    private func sectionTitle(for messageReceiptStatus: MessageReceiptStatus) -> String {
         switch messageReceiptStatus {
         case .uploading:
             return NSLocalizedString("MESSAGE_METADATA_VIEW_MESSAGE_STATUS_UPLOADING",
                               comment: "Status label for messages which are uploading.")
         case .sending:
             return NSLocalizedString("MESSAGE_METADATA_VIEW_MESSAGE_STATUS_SENDING",
-                              comment: "Status label for messages which are sending.")
+                                     comment: "Status label for messages which are sending.")
+        case .pending:
+            return NSLocalizedString("MESSAGE_METADATA_VIEW_MESSAGE_STATUS_PAUSED",
+                                     comment: "Status label for messages which are paused.")
         case .sent:
             return NSLocalizedString("MESSAGE_METADATA_VIEW_MESSAGE_STATUS_SENT",
                               comment: "Status label for messages which are sent.")
@@ -588,200 +472,83 @@ class MessageDetailViewController: OWSViewController {
         case .skipped:
             return NSLocalizedString("MESSAGE_METADATA_VIEW_MESSAGE_STATUS_SKIPPED",
                                      comment: "Status label for messages which were skipped.")
+        case .viewed:
+            return NSLocalizedString("MESSAGE_METADATA_VIEW_MESSAGE_STATUS_VIEWED",
+                              comment: "Status label for messages which are viewed.")
         }
     }
 
-    // MARK: - Audio Setup
+    private var isPanning = false
 
-    private func prepareAudioPlayer(for viewItem: ConversationViewItem, attachmentStream: TSAttachmentStream) {
-        AssertIsOnMainThread()
+    @objc
+    func handlePan(_ sender: UIPanGestureRecognizer) {
+        var xOffset = sender.translation(in: view).x
+        var xVelocity = sender.velocity(in: view).x
 
-        guard let mediaURL = attachmentStream.originalMediaURL else {
-            owsFailDebug("mediaURL was unexpectedly nil for attachment: \(attachmentStream)")
-            return
+        if CurrentAppContext().isRTL {
+            xOffset = -xOffset
+            xVelocity = -xVelocity
         }
 
-        guard FileManager.default.fileExists(atPath: mediaURL.path) else {
-            owsFailDebug("audio file missing at path: \(mediaURL)")
-            return
-        }
+        if xOffset < 0 { xOffset = 0 }
 
-        if let audioAttachmentPlayer = self.audioAttachmentPlayer {
-            // Is this player associated with this media adapter?
-            if audioAttachmentPlayer.owner?.isEqual(viewItem.interaction.uniqueId) == true {
-                return
+        let percentage = xOffset / view.width
+
+        switch sender.state {
+        case .began:
+            popPercentDrivenTransition = UIPercentDrivenInteractiveTransition()
+            navigationController?.popViewController(animated: true)
+        case .changed:
+            popPercentDrivenTransition?.update(percentage)
+        case .ended:
+            let percentageThreshold: CGFloat = 0.5
+            let velocityThreshold: CGFloat = 500
+
+            let shouldFinish = (percentage >= percentageThreshold && xVelocity >= 0) || (xVelocity >= velocityThreshold)
+            if shouldFinish {
+                popPercentDrivenTransition?.finish()
+            } else {
+                popPercentDrivenTransition?.cancel()
             }
-            audioAttachmentPlayer.stop()
-            self.audioAttachmentPlayer = nil
+        case .cancelled, .failed:
+            popPercentDrivenTransition?.cancel()
+            popPercentDrivenTransition = nil
+        case .possible:
+            break
+        @unknown default:
+            break
         }
-
-        let audioAttachmentPlayer = OWSAudioPlayer(mediaUrl: mediaURL, audioBehavior: .audioMessagePlayback, delegate: viewItem)
-        self.audioAttachmentPlayer = audioAttachmentPlayer
-
-        // Associate the player with this media adapter.
-        audioAttachmentPlayer.owner = viewItem.interaction.uniqueId as AnyObject
-
-        audioAttachmentPlayer.setupAudioPlayer()
-    }
-
-    // MARK: - Message Bubble Layout
-
-    private func updateMessageViewLayout() {
-        guard let messageView = messageView else {
-            return
-        }
-        guard let messageViewWidthLayoutConstraint = messageViewWidthLayoutConstraint else {
-            return
-        }
-        guard let messageViewHeightLayoutConstraint = messageViewHeightLayoutConstraint else {
-            return
-        }
-
-        let messageBubbleSize = messageView.measureSize()
-        messageViewWidthLayoutConstraint.constant = messageBubbleSize.width
-        messageViewHeightLayoutConstraint.constant = messageBubbleSize.height
     }
 }
 
-extension MessageDetailViewController: OWSMessageBubbleViewDelegate {
+// MARK: -
 
-    func didTapImageViewItem(_ viewItem: ConversationViewItem, attachmentStream: TSAttachmentStream, imageView: UIView) {
-        let mediaPageVC = MediaPageViewController(
-            initialMediaAttachment: attachmentStream,
-            thread: thread,
-            showingSingleMessage: true
-        )
-        mediaPageVC.mediaGallery.addDelegate(self)
-        present(mediaPageVC, animated: true)
-    }
-
-    func didTapVideoViewItem(_ viewItem: ConversationViewItem, attachmentStream: TSAttachmentStream, imageView: UIView) {
-        let mediaPageVC = MediaPageViewController(
-            initialMediaAttachment: attachmentStream,
-            thread: thread,
-            showingSingleMessage: true
-        )
-        mediaPageVC.mediaGallery.addDelegate(self)
-        present(mediaPageVC, animated: true)
-    }
-
-    func didTapContactShare(_ viewItem: ConversationViewItem) {
-        guard let contactShare = viewItem.contactShare else {
-            owsFailDebug("missing contact.")
-            return
-        }
-        let contactViewController = ContactViewController(contactShare: contactShare)
-        self.navigationController?.pushViewController(contactViewController, animated: true)
-    }
-
-    func didTapSendMessage(toContactShare contactShare: ContactShareViewModel) {
-        contactShareViewHelper.sendMessage(contactShare: contactShare, fromViewController: self)
-    }
-
-    func didTapSendInvite(toContactShare contactShare: ContactShareViewModel) {
-        contactShareViewHelper.showInviteContact(contactShare: contactShare, fromViewController: self)
-    }
-
-    func didTapShowAddToContactUI(forContactShare contactShare: ContactShareViewModel) {
-        contactShareViewHelper.showAddToContacts(contactShare: contactShare, fromViewController: self)
-    }
-
-    func didTapStickerPack(_ stickerPackInfo: StickerPackInfo) {
-        let packView = StickerPackViewController(stickerPackInfo: stickerPackInfo)
-        packView.present(from: self, animated: true)
-    }
-
-    func didTapAudioViewItem(_ viewItem: ConversationViewItem, attachmentStream: TSAttachmentStream) {
-        AssertIsOnMainThread()
-
-        self.prepareAudioPlayer(for: viewItem, attachmentStream: attachmentStream)
-
-        // Resume from where we left off
-        audioAttachmentPlayer?.setCurrentTime(TimeInterval(viewItem.audioProgressSeconds))
-
-        audioAttachmentPlayer?.togglePlayState()
-    }
-
-    func didScrubAudioViewItem(_ viewItem: ConversationViewItem, toTime time: TimeInterval, attachmentStream: TSAttachmentStream) {
-        AssertIsOnMainThread()
-
-        self.prepareAudioPlayer(for: viewItem, attachmentStream: attachmentStream)
-
-        audioAttachmentPlayer?.setCurrentTime(time)
-    }
-
-    func didTapPdf(for viewItem: ConversationViewItem, attachmentStream: TSAttachmentStream) {
-        AssertIsOnMainThread()
-
-        let pdfView = PdfViewController(viewItem: viewItem, attachmentStream: attachmentStream)
-        let navigationController = OWSNavigationController(rootViewController: pdfView)
-        presentFullScreen(navigationController, animated: true)
-    }
-
-    func didTapTruncatedTextMessage(_ conversationItem: ConversationViewItem) {
-        guard let navigationController = self.navigationController else {
-            owsFailDebug("navigationController was unexpectedly nil")
-            return
-        }
-
-        let viewController = LongTextViewController(viewItem: viewItem)
-        viewController.delegate = self
-        navigationController.pushViewController(viewController, animated: true)
-    }
-
-    func didTapFailedIncomingAttachment(_ viewItem: ConversationViewItem) {
-        // no - op
-    }
-
-    func didTapPendingMessageRequestIncomingAttachment(_ viewItem: ConversationViewItem) {
-        // no - op
-    }
-
-    func didTapFailedOutgoingMessage(_ message: TSOutgoingMessage) {
-        // no - op
-    }
-
-    func didTapConversationItem(_ viewItem: ConversationViewItem, quotedReply: OWSQuotedReplyModel) {
-        // no - op
-    }
-
-    func didTapConversationItem(_ viewItem: ConversationViewItem, quotedReply: OWSQuotedReplyModel, failedThumbnailDownloadAttachmentPointer attachmentPointer: TSAttachmentPointer) {
-        // no - op
-    }
-
-    func didTapConversationItem(_ viewItem: ConversationViewItem, linkPreview: OWSLinkPreview) {
-        guard let urlString = linkPreview.urlString else {
-            owsFailDebug("Missing url.")
-            return
-        }
-        guard let url = URL(string: urlString) else {
-            owsFailDebug("Invalid url: \(urlString).")
-            return
-        }
-        UIApplication.shared.open(url, options: [:])
-    }
-
-    @objc func didLongPressSent(sender: UIGestureRecognizer) {
+extension MessageDetailViewController {
+    @objc
+    func didLongPressSent(sender: UIGestureRecognizer) {
         guard sender.state == .began else {
             return
         }
         let messageTimestamp = "\(message.timestamp)"
         UIPasteboard.general.string = messageTimestamp
-    }
 
-    var lastSearchedText: String? {
-        return nil
+        let toast = ToastController(text: NSLocalizedString(
+            "MESSAGE_DETAIL_VIEW_DID_COPY_SENT_TIMESTAMP",
+            comment: "Toast indicating that the user has copied the sent timestamp."
+        ))
+        toast.presentToastView(fromBottomOfView: view, inset: bottomLayoutGuide.length + 8)
     }
 }
+
+// MARK: -
 
 extension MessageDetailViewController: MediaGalleryDelegate {
 
     func mediaGallery(_ mediaGallery: MediaGallery, willDelete items: [MediaGalleryItem], initiatedBy: AnyObject) {
         Logger.info("")
 
-        guard (items.map({ $0.message }) == [self.message]) else {
-            // Should only be one message we can delete when viewing message details
-            owsFailDebug("Unexpectedly informed of irrelevant message deletion")
+        guard items.contains(where: { $0.message == self.message }) else {
+            Logger.info("ignoring deletion of unrelated media")
             return
         }
 
@@ -789,52 +556,42 @@ extension MessageDetailViewController: MediaGalleryDelegate {
     }
 
     func mediaGallery(_ mediaGallery: MediaGallery, deletedSections: IndexSet, deletedItems: [IndexPath]) {
+        guard self.wasDeleted else {
+            return
+        }
         self.dismiss(animated: true) {
             self.navigationController?.popViewController(animated: true)
         }
     }
-}
 
-extension MessageDetailViewController: OWSMessageStickerViewDelegate {
-    public func showStickerPack(_ stickerPackInfo: StickerPackInfo) {
-        let packView = StickerPackViewController(stickerPackInfo: stickerPackInfo)
-        packView.present(from: self, animated: true)
+    func mediaGallery(_ mediaGallery: MediaGallery, didReloadItemsInSections sections: IndexSet) {
+        // No action needed
     }
 }
 
-extension MessageDetailViewController: OWSMessageViewOnceViewDelegate {
-    public func didTapViewOnceAttachment(_ viewItem: ConversationViewItem, attachmentStream: TSAttachmentStream) {
-        ViewOnceMessageViewController.tryToPresent(interaction: viewItem.interaction,
-                                                        from: self)
-    }
-
-    func didTapViewOnceExpired(_ viewItem: ConversationViewItem) {
-
-    }
-}
+// MARK: -
 
 extension MessageDetailViewController: ContactShareViewHelperDelegate {
-
     public func didCreateOrEditContact() {
-        updateContent()
+        updateTableContents()
         self.dismiss(animated: true)
     }
 }
 
 extension MessageDetailViewController: LongTextViewDelegate {
-    func longTextViewMessageWasDeleted(_ longTextViewController: LongTextViewController) {
-        self.delegate?.detailViewMessageWasDeleted(self)
+    public func longTextViewMessageWasDeleted(_ longTextViewController: LongTextViewController) {
+        self.detailDelegate?.detailViewMessageWasDeleted(self)
     }
 }
 
 extension MessageDetailViewController: MediaPresentationContextProvider {
-    func mediaPresentationContext(galleryItem: MediaGalleryItem, in coordinateSpace: UICoordinateSpace) -> MediaPresentationContext? {
-        guard let messageBubbleView = self.messageView as? OWSMessageBubbleView else {
-            owsFailDebug("messageBubbleView was unexpectedly nil")
+    func mediaPresentationContext(item: Media, in coordinateSpace: UICoordinateSpace) -> MediaPresentationContext? {
+        guard case let .gallery(galleryItem) = item else {
+            owsFailDebug("Unexpected media type")
             return nil
         }
 
-        guard let mediaView = messageBubbleView.albumItemView(forAttachment: galleryItem.attachmentStream) else {
+        guard let mediaView = cellView.albumItemView(forAttachment: galleryItem.attachmentStream) else {
             owsFailDebug("itemView was unexpectedly nil")
             return nil
         }
@@ -847,7 +604,9 @@ extension MessageDetailViewController: MediaPresentationContextProvider {
         let presentationFrame = coordinateSpace.convert(mediaView.frame, from: mediaSuperview)
 
         // TODO better corner rounding.
-        return MediaPresentationContext(mediaView: mediaView, presentationFrame: presentationFrame, cornerRadius: kOWSMessageCellCornerRadius_Small * 2)
+        return MediaPresentationContext(mediaView: mediaView,
+                                        presentationFrame: presentationFrame,
+                                        cornerRadius: CVComponentMessage.bubbleSharpCornerRadius * 2)
     }
 
     func snapshotOverlayView(in coordinateSpace: UICoordinateSpace) -> (UIView, CGRect)? {
@@ -855,63 +614,88 @@ extension MessageDetailViewController: MediaPresentationContextProvider {
     }
 
     func mediaWillDismiss(toContext: MediaPresentationContext) {
-        guard let messageBubbleView = toContext.messageBubbleView else { return }
-
         // To avoid flicker when transition view is animated over the message bubble,
         // we initially hide the overlaying elements and fade them in.
-        messageBubbleView.footerView.alpha = 0
-        messageBubbleView.bodyMediaGradientView?.alpha = 0.0
+        let mediaOverlayViews = toContext.mediaOverlayViews
+        for mediaOverlayView in mediaOverlayViews {
+            mediaOverlayView.alpha = 0
+        }
     }
 
     func mediaDidDismiss(toContext: MediaPresentationContext) {
-        guard let messageBubbleView = toContext.messageBubbleView else { return }
-
         // To avoid flicker when transition view is animated over the message bubble,
         // we initially hide the overlaying elements and fade them in.
+        let mediaOverlayViews = toContext.mediaOverlayViews
         let duration: TimeInterval = kIsDebuggingMediaPresentationAnimations ? 1.5 : 0.2
         UIView.animate(
             withDuration: duration,
             animations: {
-                messageBubbleView.footerView.alpha = 1.0
-                messageBubbleView.bodyMediaGradientView?.alpha = 1.0
-        })
-    }
-}
-
-private extension MediaPresentationContext {
-    var messageBubbleView: OWSMessageBubbleView? {
-        guard let messageBubbleView = mediaView.firstAncestor(ofType: OWSMessageBubbleView.self) else {
-            owsFailDebug("unexpected mediaView: \(mediaView)")
-            return nil
-        }
-
-        return messageBubbleView
+                for mediaOverlayView in mediaOverlayViews {
+                    mediaOverlayView.alpha = 1
+                }
+            })
     }
 }
 
 // MARK: -
 
-extension MessageDetailViewController: SDSDatabaseStorageObserver {
-    func databaseStorageDidUpdate(change: SDSDatabaseStorageChange) {
+extension MediaPresentationContext {
+    var mediaOverlayViews: [UIView] {
+        guard let bodyMediaPresentationContext = mediaView.firstAncestor(ofType: BodyMediaPresentationContext.self) else {
+            owsFailDebug("unexpected mediaView: \(mediaView)")
+            return []
+        }
+        return bodyMediaPresentationContext.mediaOverlayViews
+    }
+}
+
+// MARK: -
+
+extension MessageDetailViewController: DatabaseChangeDelegate {
+
+    public func databaseChangesWillUpdate() {
+        AssertIsOnMainThread()
+    }
+
+    public func databaseChangesDidUpdate(databaseChanges: DatabaseChanges) {
         AssertIsOnMainThread()
 
-        guard change.didUpdate(interaction: self.message) else {
+        guard databaseChanges.didUpdate(interaction: self.message) else {
             return
         }
 
-        refreshContent()
+        refreshContentForDatabaseUpdate()
     }
 
-    func databaseStorageDidUpdateExternally() {
+    public func databaseChangesDidUpdateExternally() {
         AssertIsOnMainThread()
 
-        refreshContent()
+        refreshContentForDatabaseUpdate()
     }
 
-    func databaseStorageDidReset() {
+    public func databaseChangesDidReset() {
         AssertIsOnMainThread()
 
-        refreshContent()
+        refreshContentForDatabaseUpdate()
+    }
+
+    private func refreshContentForDatabaseUpdate() {
+        guard databaseUpdateTimer == nil else { return }
+        // Updating this view is slightly expensive and there will be tons of relevant
+        // database updates when sending to a large group. Update latency isn't that
+        // imporant, so we de-bounce to never update this view more than once every N seconds.
+        self.databaseUpdateTimer = Timer.scheduledTimer(
+            withTimeInterval: 2.0,
+            repeats: false
+        ) { [weak self] _ in
+            guard let self = self else {
+                return
+            }
+            assert(self.databaseUpdateTimer != nil)
+            self.databaseUpdateTimer?.invalidate()
+            self.databaseUpdateTimer = nil
+            self.refreshContent()
+        }
     }
 
     private func refreshContent() {
@@ -924,15 +708,437 @@ extension MessageDetailViewController: SDSDatabaseStorageObserver {
         }
 
         do {
-            try updateMessageToLatest()
-        } catch DetailViewError.messageWasDeleted {
-            DispatchQueue.main.async {
-                self.delegate?.detailViewMessageWasDeleted(self)
+            try databaseStorage.readThrows { transaction in
+                let uniqueId = self.message.uniqueId
+                guard let newMessage = TSInteraction.anyFetch(uniqueId: uniqueId,
+                                                              transaction: transaction) as? TSMessage else {
+                    Logger.error("Message was deleted")
+                    throw DetailViewError.messageWasDeleted
+                }
+                self.message = newMessage
+                self.attachments = newMessage.mediaAttachments(with: transaction.unwrapGrdbRead)
             }
-            return
+
+            guard let renderItem = buildRenderItem(interactionId: message.uniqueId) else {
+                owsFailDebug("Could not build renderItem.")
+                throw DetailViewError.messageWasDeleted
+            }
+            self.renderItem = renderItem
+
+            if isIncoming {
+                updateTableContents()
+            } else {
+                refreshMessageRecipientsAsync()
+            }
+        } catch DetailViewError.messageWasDeleted {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self else { return }
+                self.detailDelegate?.detailViewMessageWasDeleted(self)
+            }
         } catch {
             owsFailDebug("unexpected error: \(error)")
         }
-        updateContent()
+    }
+
+    private func refreshMessageRecipientsAsync() {
+        guard let outgoingMessage = message as? TSOutgoingMessage else {
+            return owsFailDebug("Unexpected message type")
+        }
+
+        DispatchQueue.sharedUserInitiated.async { [weak self] in
+            guard let self = self else { return }
+
+            let messageRecipientAddressesUnsorted = outgoingMessage.recipientAddresses()
+            let messageRecipientAddressesSorted = self.databaseStorage.read { transaction in
+                self.contactsManagerImpl.sortSignalServiceAddresses(
+                    messageRecipientAddressesUnsorted,
+                    transaction: transaction
+                )
+            }
+            let messageRecipientAddressesGrouped = messageRecipientAddressesSorted.reduce(
+                into: [MessageReceiptStatus: [MessageRecipientModel]]()
+            ) { result, address in
+                guard let recipientState = outgoingMessage.recipientState(for: address) else {
+                    return owsFailDebug("no message status for recipient: \(address).")
+                }
+
+                let (status, statusMessage, _) = MessageRecipientStatusUtils.recipientStatusAndStatusMessage(
+                    outgoingMessage: outgoingMessage,
+                    recipientState: recipientState
+                )
+                var bucket = result[status] ?? []
+
+                switch status {
+                case .delivered, .read, .sent, .viewed:
+                    bucket.append(MessageRecipientModel(
+                        address: address,
+                        accessoryText: statusMessage,
+                        displayUDIndicator: recipientState.wasSentByUD
+                    ))
+                case .sending, .failed, .skipped, .uploading, .pending:
+                    bucket.append(MessageRecipientModel(
+                        address: address,
+                        accessoryText: "",
+                        displayUDIndicator: false
+                    ))
+                }
+
+                result[status] = bucket
+            }
+
+            self.messageRecipients.set(messageRecipientAddressesGrouped)
+            DispatchQueue.main.async { self.updateTableContents() }
+        }
+    }
+}
+
+// MARK: -
+
+extension MessageDetailViewController: CVComponentDelegate {
+
+    // MARK: - Body Text Items
+
+    func cvc_didTapBodyTextItem(_ item: CVBodyTextLabel.ItemObject) {}
+
+    func cvc_didLongPressBodyTextItem(_ item: CVBodyTextLabel.ItemObject) {}
+
+    // MARK: - Long Press
+
+    // TODO:
+    func cvc_didLongPressTextViewItem(_ cell: CVCell,
+                                      itemViewModel: CVItemViewModelImpl,
+                                      shouldAllowReply: Bool) {}
+
+    // TODO:
+    func cvc_didLongPressMediaViewItem(_ cell: CVCell,
+                                       itemViewModel: CVItemViewModelImpl,
+                                       shouldAllowReply: Bool) {}
+
+    // TODO:
+    func cvc_didLongPressQuote(_ cell: CVCell,
+                               itemViewModel: CVItemViewModelImpl,
+                               shouldAllowReply: Bool) {}
+
+    // TODO:
+    func cvc_didLongPressSystemMessage(_ cell: CVCell,
+                                       itemViewModel: CVItemViewModelImpl) {}
+
+    // TODO:
+    func cvc_didLongPressSticker(_ cell: CVCell,
+                                 itemViewModel: CVItemViewModelImpl,
+                                 shouldAllowReply: Bool) {}
+
+    // TODO:
+    func cvc_didChangeLongpress(_ itemViewModel: CVItemViewModelImpl) {}
+
+    // TODO:
+    func cvc_didEndLongpress(_ itemViewModel: CVItemViewModelImpl) {}
+
+    // TODO:
+    func cvc_didCancelLongpress(_ itemViewModel: CVItemViewModelImpl) {}
+
+    // MARK: -
+
+    // TODO:
+    func cvc_didTapReplyToItem(_ itemViewModel: CVItemViewModelImpl) {}
+
+    // TODO:
+    func cvc_didTapSenderAvatar(_ interaction: TSInteraction) {}
+
+    // TODO:
+    func cvc_shouldAllowReplyForItem(_ itemViewModel: CVItemViewModelImpl) -> Bool { false }
+
+    // TODO:
+    func cvc_didTapReactions(reactionState: InteractionReactionState,
+                             message: TSMessage) {}
+
+    func cvc_didTapTruncatedTextMessage(_ itemViewModel: CVItemViewModelImpl) {
+        AssertIsOnMainThread()
+
+        let viewController = LongTextViewController(itemViewModel: itemViewModel)
+        viewController.delegate = self
+        navigationController?.pushViewController(viewController, animated: true)
+    }
+
+    // TODO:
+    var cvc_hasPendingMessageRequest: Bool { false }
+
+    func cvc_didTapFailedOrPendingDownloads(_ message: TSMessage) {}
+
+    // MARK: - Messages
+
+    func cvc_didTapBodyMedia(itemViewModel: CVItemViewModelImpl,
+                         attachmentStream: TSAttachmentStream,
+                         imageView: UIView) {
+        guard let thread = thread else {
+            owsFailDebug("Missing thread.")
+            return
+        }
+        let mediaPageVC = MediaPageViewController(
+            initialMediaAttachment: attachmentStream,
+            thread: thread,
+            showingSingleMessage: true
+        )
+        mediaPageVC.mediaGallery.addDelegate(self)
+        present(mediaPageVC, animated: true)
+    }
+
+    func cvc_didTapGenericAttachment(_ attachment: CVComponentGenericAttachment) -> CVAttachmentTapAction {
+        if attachment.canQuickLook {
+            let previewController = QLPreviewController()
+            previewController.dataSource = attachment
+            present(previewController, animated: true)
+            return .handledByDelegate
+        } else {
+            return .default
+        }
+    }
+
+    func cvc_didTapQuotedReply(_ quotedReply: OWSQuotedReplyModel) {}
+
+    func cvc_didTapLinkPreview(_ linkPreview: OWSLinkPreview) {
+        guard let urlString = linkPreview.urlString else {
+            owsFailDebug("Missing url.")
+            return
+        }
+        guard let url = URL(string: urlString) else {
+            owsFailDebug("Invalid url: \(urlString).")
+            return
+        }
+        UIApplication.shared.open(url, options: [:])
+    }
+
+    func cvc_didTapContactShare(_ contactShare: ContactShareViewModel) {
+        let contactViewController = ContactViewController(contactShare: contactShare)
+        self.navigationController?.pushViewController(contactViewController, animated: true)
+    }
+
+    func cvc_didTapSendMessage(toContactShare contactShare: ContactShareViewModel) {
+        contactShareViewHelper.sendMessage(contactShare: contactShare, fromViewController: self)
+    }
+
+    func cvc_didTapSendInvite(toContactShare contactShare: ContactShareViewModel) {
+        contactShareViewHelper.showInviteContact(contactShare: contactShare, fromViewController: self)
+    }
+
+    func cvc_didTapAddToContacts(contactShare: ContactShareViewModel) {
+        contactShareViewHelper.showAddToContacts(contactShare: contactShare, fromViewController: self)
+    }
+
+    func cvc_didTapStickerPack(_ stickerPackInfo: StickerPackInfo) {
+        let packView = StickerPackViewController(stickerPackInfo: stickerPackInfo)
+        packView.present(from: self, animated: true)
+    }
+
+    func cvc_didTapGroupInviteLink(url: URL) {
+        GroupInviteLinksUI.openGroupInviteLink(url, fromViewController: self)
+    }
+
+    func cvc_didTapShowMessageDetail(_ itemViewModel: CVItemViewModelImpl) {}
+
+    func cvc_prepareMessageDetailForInteractivePresentation(_ itemViewModel: CVItemViewModelImpl) {}
+
+    func cvc_beginCellAnimation(maximumDuration: TimeInterval) -> EndCellAnimation {
+        return {}
+    }
+
+    var isConversationPreview: Bool { true }
+
+    var wallpaperBlurProvider: WallpaperBlurProvider? { nil }
+
+    // MARK: - Selection
+
+    // TODO:
+    var isShowingSelectionUI: Bool { false }
+
+    // TODO:
+    func cvc_isMessageSelected(_ interaction: TSInteraction) -> Bool { false }
+
+    // TODO:
+    func cvc_didSelectViewItem(_ itemViewModel: CVItemViewModelImpl) {}
+
+    // TODO:
+    func cvc_didDeselectViewItem(_ itemViewModel: CVItemViewModelImpl) {}
+
+    // MARK: - System Cell
+
+    // TODO:
+    func cvc_didTapPreviouslyVerifiedIdentityChange(_ address: SignalServiceAddress) {}
+
+    // TODO:
+    func cvc_didTapUnverifiedIdentityChange(_ address: SignalServiceAddress) {}
+
+    // TODO:
+    func cvc_didTapInvalidIdentityKeyErrorMessage(_ message: TSInvalidIdentityKeyErrorMessage) {}
+
+    // TODO:
+    func cvc_didTapCorruptedMessage(_ message: TSErrorMessage) {}
+
+    // TODO:
+    func cvc_didTapSessionRefreshMessage(_ message: TSErrorMessage) {}
+
+    // See: resendGroupUpdate
+    // TODO:
+    func cvc_didTapResendGroupUpdateForErrorMessage(_ errorMessage: TSErrorMessage) {}
+
+    // TODO:
+    func cvc_didTapShowFingerprint(_ address: SignalServiceAddress) {}
+
+    // TODO:
+    func cvc_didTapIndividualCall(_ call: TSCall) {}
+
+    // TODO:
+    func cvc_didTapGroupCall() {}
+
+    // TODO:
+    func cvc_didTapPendingOutgoingMessage(_ message: TSOutgoingMessage) {}
+
+    // TODO:
+    func cvc_didTapFailedOutgoingMessage(_ message: TSOutgoingMessage) {}
+
+    // TODO:
+    func cvc_didTapShowGroupMigrationLearnMoreActionSheet(infoMessage: TSInfoMessage,
+                                                          oldGroupModel: TSGroupModel,
+                                                          newGroupModel: TSGroupModel) {}
+
+    func cvc_didTapGroupInviteLinkPromotion(groupModel: TSGroupModel) {}
+
+    func cvc_didTapViewGroupDescription(groupModel: TSGroupModel?) {}
+
+    // TODO:
+    func cvc_didTapShowConversationSettings() {}
+
+    // TODO:
+    func cvc_didTapShowConversationSettingsAndShowMemberRequests() {}
+
+    // TODO:
+    func cvc_didTapShowUpgradeAppUI() {}
+
+    // TODO:
+    func cvc_didTapUpdateSystemContact(_ address: SignalServiceAddress,
+                                       newNameComponents: PersonNameComponents) {}
+
+    func cvc_didTapViewOnceAttachment(_ interaction: TSInteraction) {
+        guard let renderItem = renderItem else {
+            owsFailDebug("Missing renderItem.")
+            return
+        }
+        let itemViewModel = CVItemViewModelImpl(renderItem: renderItem)
+        ViewOnceMessageViewController.tryToPresent(interaction: itemViewModel.interaction,
+                                                   from: self)
+    }
+
+    // TODO:
+    func cvc_didTapViewOnceExpired(_ interaction: TSInteraction) {}
+
+    // TODO:
+    func cvc_didTapUnknownThreadWarningGroup() {}
+    // TODO:
+    func cvc_didTapUnknownThreadWarningContact() {}
+}
+
+extension MessageDetailViewController: UINavigationControllerDelegate {
+    func navigationController(_ navigationController: UINavigationController, interactionControllerFor animationController: UIViewControllerAnimatedTransitioning) -> UIViewControllerInteractiveTransitioning? {
+        return (animationController as? AnimationController)?.percentDrivenTransition
+    }
+
+    func navigationController(_ navigationController: UINavigationController, animationControllerFor operation: UINavigationController.Operation, from fromVC: UIViewController, to toVC: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+        let animationController = AnimationController(operation: operation)
+        if operation == .push { animationController.percentDrivenTransition = pushPercentDrivenTransition }
+        if operation == .pop { animationController.percentDrivenTransition = popPercentDrivenTransition }
+        return animationController
+    }
+}
+
+private class AnimationController: NSObject, UIViewControllerAnimatedTransitioning {
+    weak var percentDrivenTransition: UIPercentDrivenInteractiveTransition?
+
+    let operation: UINavigationController.Operation
+    required init(operation: UINavigationController.Operation) {
+        self.operation = operation
+        super.init()
+    }
+
+    func transitionDuration(using transitionContext: UIViewControllerContextTransitioning?) -> TimeInterval {
+        0.35
+    }
+
+    func animateTransition(using transitionContext: UIViewControllerContextTransitioning) {
+        guard let fromView = transitionContext.view(forKey: .from),
+              let toView = transitionContext.view(forKey: .to) else {
+            owsFailDebug("Missing view controllers.")
+            return transitionContext.completeTransition(false)
+        }
+
+        let containerView = transitionContext.containerView
+        let directionMultiplier: CGFloat = CurrentAppContext().isRTL ? -1 : 1
+
+        let bottomViewHiddenTransform = CGAffineTransform(translationX: (fromView.width / 3) * directionMultiplier, y: 0)
+        let topViewHiddenTransform = CGAffineTransform(translationX: -fromView.width * directionMultiplier, y: 0)
+
+        let bottomViewOverlay = UIView()
+        bottomViewOverlay.backgroundColor = .ows_blackAlpha10
+
+        let topView: UIView
+        let bottomView: UIView
+
+        let isPushing = operation == .push
+        let isInteractive = percentDrivenTransition != nil
+
+        if isPushing {
+            topView = fromView
+            bottomView = toView
+            bottomView.transform = bottomViewHiddenTransform
+            bottomViewOverlay.alpha = 1
+        } else {
+            topView = toView
+            bottomView = fromView
+            topView.transform = topViewHiddenTransform
+            bottomViewOverlay.alpha = 0
+        }
+
+        containerView.addSubview(bottomView)
+        containerView.addSubview(topView)
+
+        bottomView.addSubview(bottomViewOverlay)
+        bottomViewOverlay.frame = bottomView.bounds
+
+        let animationOptions: UIView.AnimationOptions
+        if percentDrivenTransition != nil {
+            animationOptions = .curveLinear
+        } else {
+            animationOptions = .curveEaseInOut
+        }
+
+        UIView.animate(withDuration: transitionDuration(using: transitionContext), delay: 0, options: animationOptions) {
+            if isPushing {
+                topView.transform = topViewHiddenTransform
+                bottomView.transform = .identity
+                bottomViewOverlay.alpha = 0
+            } else {
+                topView.transform = .identity
+                bottomView.transform = bottomViewHiddenTransform
+                bottomViewOverlay.alpha = 1
+            }
+        } completion: { _ in
+            bottomView.transform = .identity
+            topView.transform = .identity
+            bottomViewOverlay.removeFromSuperview()
+
+            if transitionContext.transitionWasCancelled {
+                toView.removeFromSuperview()
+            } else {
+                fromView.removeFromSuperview()
+
+                // When completing the transition, the first responder chain gets
+                // messed with. We don't want the keyboard to present when returning
+                // from message details, so we dismiss it when we leave the view.
+                if let fromViewController = transitionContext.viewController(forKey: .from) as? ConversationViewController {
+                    fromViewController.dismissKeyBoard()
+                }
+            }
+
+            transitionContext.completeTransition(!transitionContext.transitionWasCancelled)
+        }
     }
 }

@@ -1,8 +1,8 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSAttachment.h"
+#import <SignalServiceKit/TSAttachment.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -23,15 +23,26 @@ typedef NS_ENUM(NSUInteger, TSAttachmentPointerState) {
     TSAttachmentPointerStateDownloading = 1,
     TSAttachmentPointerStateFailed = 2,
     TSAttachmentPointerStatePendingMessageRequest = 3,
+    // Either:
+    //
+    // * Download of this attachment is blocking by the auto-download
+    //   preferences.
+    // * Download was manually paused/stopped and needs to be manually
+    //   resumed.
+    TSAttachmentPointerStatePendingManualDownload = 4,
 };
+
+NSString *NSStringForTSAttachmentPointerState(TSAttachmentPointerState value);
+
+#pragma mark -
 
 /**
  * A TSAttachmentPointer is a yet-to-be-downloaded attachment.
  */
 @interface TSAttachmentPointer : TSAttachment
 
-@property (nonatomic) TSAttachmentPointerType pointerType;
-@property (atomic) TSAttachmentPointerState state;
+@property (nonatomic, readonly) TSAttachmentPointerType pointerType;
+@property (nonatomic, readonly) TSAttachmentPointerState state;
 
 // Though now required, `digest` may be null for pre-existing records or from
 // messages received from other clients
@@ -142,6 +153,19 @@ NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(grdbId:uniqueId:albumMessageId:atta
 // Marks attachment as needing "lazy backup restore."
 - (void)markForLazyRestoreWithFragment:(OWSBackupFragment *)lazyRestoreFragment
                            transaction:(SDSAnyWriteTransaction *)transaction;
+
+#if TESTABLE_BUILD
+- (void)setAttachmentPointerStateDebug:(TSAttachmentPointerState)state;
+#endif
+
+- (void)updateWithAttachmentPointerState:(TSAttachmentPointerState)state
+                             transaction:(SDSAnyWriteTransaction *)transaction
+    NS_SWIFT_NAME(updateAttachmentPointerState(_:transaction:));
+
+- (void)updateAttachmentPointerStateFrom:(TSAttachmentPointerState)oldState
+                                      to:(TSAttachmentPointerState)newState
+                             transaction:(SDSAnyWriteTransaction *)transaction
+    NS_SWIFT_NAME(updateAttachmentPointerState(from:to:transaction:));
 
 @end
 

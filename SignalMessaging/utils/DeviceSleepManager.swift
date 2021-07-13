@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -19,7 +19,7 @@ import SignalServiceKit
 public class DeviceSleepManager: NSObject {
 
     @objc
-    public static let sharedInstance = DeviceSleepManager()
+    public static let shared = DeviceSleepManager()
 
     let serialQueue = DispatchQueue(label: "DeviceSleepManager")
 
@@ -45,6 +45,16 @@ public class DeviceSleepManager: NSObject {
                                                selector: #selector(didEnterBackground),
                                                name: .OWSApplicationDidEnterBackground,
                                                object: nil)
+
+        if CurrentAppContext().isMainApp {
+            // Prevent the device from sleeping during app startup,
+            // e.g. during long-running database migrations.
+            let launchBlockObject = self
+            addBlock(blockObject: launchBlockObject)
+            AppReadiness.runNowOrWhenAppDidBecomeReadySync {
+                self.removeBlock(blockObject: launchBlockObject)
+            }
+        }
     }
 
     deinit {

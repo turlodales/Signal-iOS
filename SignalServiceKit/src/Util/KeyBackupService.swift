@@ -1,14 +1,14 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import PromiseKit
-import Argon2
+import SignalArgon2
 
 @objc(OWSKeyBackupService)
 public class KeyBackupService: NSObject {
-    public enum KBSError: Error {
+    public enum KBSError: Error, Equatable {
         case assertion
         case invalidPin(triesRemaining: UInt32)
         case backupMissing
@@ -24,43 +24,30 @@ public class KeyBackupService: NSObject {
         }
     }
 
-    // PRAGMA MARK: - Depdendencies
-    static var networkManager: TSNetworkManager {
-        return TSNetworkManager.shared()
-    }
-
-    static var databaseStorage: SDSDatabaseStorage {
-        return .shared
-    }
-
-    static var tsAccountManager: TSAccountManager {
-        return .sharedInstance()
-    }
-
-    static var storageServiceManager: StorageServiceManagerProtocol {
-        return SSKEnvironment.shared.storageServiceManager
-    }
-
-    static var syncManager: SyncManagerProtocol {
-        return SSKEnvironment.shared.syncManager
-    }
-
     // PRAGMA MARK: - Pin Management
 
     static let maximumKeyAttempts: UInt32 = 10
 
-    /// Indicates whether or not we have a master key stored in KBS
+    /// Indicates whether or not we have a master key locally
     @objc
     public static var hasMasterKey: Bool {
-        return cacheQueue.sync { cachedMasterKey != nil }
+        return getOrLoadStateWithSneakyTransaction().masterKey != nil
+    }
+
+    public static var currentEnclave: KeyBackupEnclave { return TSConstants.keyBackupEnclave }
+
+    /// Indicates whether or not we have a master key stored in KBS
+    @objc
+    public static var hasBackedUpMasterKey: Bool {
+        return getOrLoadStateWithSneakyTransaction().isMasterKeyBackedUp
     }
 
     public static func hasMasterKey(transaction: SDSAnyReadTransaction) -> Bool {
-        return keyValueStore.getData(masterKeyIdentifer, transaction: transaction) != nil
+        return getOrLoadState(transaction: transaction).masterKey != nil
     }
 
     public static var currentPinType: PinType? {
-        return cacheQueue.sync { cachedPinType }
+        return getOrLoadStateWithSneakyTransaction().pinType
     }
 
     /// Indicates whether your pin is valid when compared to your stored keys.
@@ -73,7 +60,7 @@ public class KeyBackupService: NSObject {
                 DispatchQueue.main.async { resultHandler(isValid) }
             }
 
-            guard let encodedVerificationString = cacheQueue.sync(execute: { cachedEncodedVerificationString }) else {
+            guard let encodedVerificationString = getOrLoadStateWithSneakyTransaction().encodedVerificationString else {
                 owsFailDebug("Attempted to verify pin locally when we don't have a verification string")
                 return
             }
@@ -98,10 +85,56 @@ public class KeyBackupService: NSObject {
 
     /// Loads the users key, if any, from the KBS into the database.
     public static func restoreKeys(with pin: String, and auth: RemoteAttestationAuth? = nil) -> Promise<Void> {
-        return fetchBackupId(auth: auth).map(on: .global()) { backupId in
+        // When restoring your backup we want to check the current enclave first,
+        // and then fallback to previous enclaves if the current enclave has no
+        // record of you. It's important that these are ordered from neweset enclave
+        // to oldest enclave, so we start with the newest enclave and then progressively
+        // check older enclaves.
+        let enclavesToCheck = [TSConstants.keyBackupEnclave] + TSConstants.keyBackupPreviousEnclaves
+        return restoreKeys(pin: pin, auth: auth, enclavesToCheck: enclavesToCheck)
+    }
+
+    private static func restoreKeys(
+        pin: String,
+        auth: RemoteAttestationAuth?,
+        enclavesToCheck: [KeyBackupEnclave]
+    ) -> Promise<Void> {
+        guard let enclave = enclavesToCheck.first else {
+            owsFailDebug("Unexpectedly tried to restore keys with no specified enclaves")
+            return Promise(error: KBSError.assertion)
+        }
+        return restoreKeys(
+            pin: pin,
+            auth: auth,
+            enclave: enclave
+        ).recover { error -> Promise<Void> in
+            if let error = error as? KBSError, error == .backupMissing, enclavesToCheck.count > 1 {
+                // There's no backup on this enclave, but we have more enclaves we can try.
+                return restoreKeys(pin: pin, auth: auth, enclavesToCheck: Array(enclavesToCheck.dropFirst()))
+            }
+
+            throw error
+        }
+    }
+
+    private static func restoreKeys(
+        pin: String,
+        auth: RemoteAttestationAuth?,
+        enclave: KeyBackupEnclave
+    ) -> Promise<Void> {
+        Logger.info("Attempting KBS restore from enclave \(enclave.name)")
+
+        return fetchBackupId(
+            auth: auth,
+            enclave: enclave
+        ).map(on: .global()) { backupId in
             return try deriveEncryptionKeyAndAccessKey(pin: pin, backupId: backupId)
         }.then { encryptionKey, accessKey in
-            restoreKeyRequest(accessKey: accessKey, with: auth).map { ($0, encryptionKey, accessKey) }
+            restoreKeyRequest(
+                accessKey: accessKey,
+                enclave: enclave,
+                auth: auth
+            ).map { ($0, encryptionKey, accessKey) }
         }.map(on: .global()) { response, encryptionKey, accessKey -> (Data, Data, Data) in
             guard let status = response.status else {
                 owsFailDebug("KBS restore is missing status")
@@ -116,7 +149,11 @@ public class KeyBackupService: NSObject {
                     throw KBSError.assertion
                 }
 
-                try Token.updateNext(data: tokenData, tries: response.tries)
+                try Token.updateNext(
+                    data: tokenData,
+                    tries: response.tries,
+                    enclaveName: enclave.name
+                )
             }
 
             switch status {
@@ -144,8 +181,15 @@ public class KeyBackupService: NSObject {
             }
         }.then { masterKey, encryptedMasterKey, accessKey in
             // Backup our keys again, even though we just fetched them.
-            // This resets the number of remaining attempts.
-            backupKeyRequest(accessKey: accessKey, encryptedMasterKey: encryptedMasterKey, and: auth).map { ($0, masterKey) }
+            // This resets the number of remaining attempts. We always
+            // backup to the current enclave, even if we restored from
+            // a previous enclave.
+            return backupKeyRequest(
+                accessKey: accessKey,
+                encryptedMasterKey: encryptedMasterKey,
+                enclave: currentEnclave,
+                auth: auth
+            ).map { ($0, masterKey) }
         }.done(on: .global()) { response, masterKey in
             guard let status = response.status else {
                 owsFailDebug("KBS backup is missing status")
@@ -158,7 +202,12 @@ public class KeyBackupService: NSObject {
             }
 
             // We should always receive a new token to use on our next request.
-            try Token.updateNext(data: tokenData)
+            // Since the backup request is always for the current enclave, the
+            // token is also always for the current enclave.
+            try Token.updateNext(
+                data: tokenData,
+                enclaveName: currentEnclave.name
+            )
 
             switch status {
             case .alreadyExists:
@@ -172,12 +221,34 @@ public class KeyBackupService: NSObject {
             case .ok:
                 let encodedVerificationString = try deriveEncodedVerificationString(pin: pin)
 
-                // We successfully stored the new keys in KBS, save them in the database
+                // We successfully stored the new keys in KBS, save them in the database.
+                // Since the backup request is always for the current enclave, we want to
+                // record the current enclave's name.
                 databaseStorage.write { transaction in
-                    store(masterKey, pinType: PinType(forPin: pin), encodedVerificationString: encodedVerificationString, transaction: transaction)
+                    store(
+                        masterKey: masterKey,
+                        isMasterKeyBackedUp: true,
+                        pinType: PinType(forPin: pin),
+                        encodedVerificationString: encodedVerificationString,
+                        enclaveName: currentEnclave.name,
+                        transaction: transaction
+                    )
                 }
             }
-        }.recover { error in
+        }.then { () -> Promise<Void> in
+            // If we restored from an enclave that's not the current enclave,
+            // we need to delete the keys from the old enclave.
+            guard enclave != currentEnclave else { return Promise.value(()) }
+            Logger.info("Deleting restored keys from old enclave")
+            return deleteKeyRequest(
+                enclave: enclave
+            ).done { _ in
+                Logger.info("Successfully deleted keys from previous enclave")
+            }.recover { error in
+                owsFailDebug("Failed to delete keys from previous enclave \(error)")
+                throw error
+            }
+        }.recover(on: .global()) { error in
             guard let kbsError = error as? KBSError else {
                 owsFailDebug("Unexpectedly surfacing a non KBS error \(error)")
                 throw error
@@ -187,16 +258,23 @@ public class KeyBackupService: NSObject {
         }
     }
 
-    @objc(generateAndBackupKeysWithPin:)
-    static func objc_generateAndBackupKeys(with pin: String) -> AnyPromise {
-        return AnyPromise(generateAndBackupKeys(with: pin))
+    @objc(generateAndBackupKeysWithPin:rotateMasterKey:)
+    @available(swift, obsoleted: 1.0)
+    static func generateAndBackupKeys(with pin: String, rotateMasterKey: Bool) -> AnyPromise {
+        return AnyPromise(generateAndBackupKeys(with: pin, rotateMasterKey: rotateMasterKey))
     }
 
     /// Backs up the user's master key to KBS and stores it locally in the database.
     /// If the user doesn't have a master key already a new one is generated.
-    public static func generateAndBackupKeys(with pin: String) -> Promise<Void> {
-        return fetchBackupId(auth: nil).map(on: .global()) { backupId -> (Data, Data, Data) in
-            let masterKey = cacheQueue.sync { cachedMasterKey } ?? generateMasterKey()
+    public static func generateAndBackupKeys(with pin: String, rotateMasterKey: Bool) -> Promise<Void> {
+        return fetchBackupId(
+            auth: nil,
+            enclave: currentEnclave
+        ).map(on: .global()) { backupId -> (Data, Data, Data) in
+            let masterKey: Data = {
+                if rotateMasterKey { return generateMasterKey() }
+                return getOrLoadStateWithSneakyTransaction().masterKey ?? generateMasterKey()
+            }()
             let (encryptionKey, accessKey) = try deriveEncryptionKeyAndAccessKey(pin: pin, backupId: backupId)
             let encryptedMasterKey = try encryptMasterKey(masterKey, encryptionKey: encryptionKey)
 
@@ -204,7 +282,8 @@ public class KeyBackupService: NSObject {
         }.then { masterKey, encryptedMasterKey, accessKey -> Promise<(KeyBackupProtoBackupResponse, Data)> in
             backupKeyRequest(
                 accessKey: accessKey,
-                encryptedMasterKey: encryptedMasterKey
+                encryptedMasterKey: encryptedMasterKey,
+                enclave: currentEnclave
             ).map { ($0, masterKey) }
         }.done(on: .global()) { response, masterKey in
             guard let status = response.status else {
@@ -218,13 +297,17 @@ public class KeyBackupService: NSObject {
             }
 
             // We should always receive a new token to use on our next request. Store it now.
-            try Token.updateNext(data: tokenData)
+            try Token.updateNext(
+                data: tokenData,
+                enclaveName: currentEnclave.name
+            )
 
             switch status {
             case .alreadyExists:
                 // the given token has already been spent. we'll use the new token
                 // on the next attempt.
                 owsFailDebug("attempted restore with spent token")
+                throw KBSError.assertion
             case .notYetValid:
                 owsFailDebug("the server thinks we provided a `validFrom` in the future")
                 throw KBSError.assertion
@@ -233,13 +316,23 @@ public class KeyBackupService: NSObject {
 
                 // We successfully stored the new keys in KBS, save them in the database
                 databaseStorage.write { transaction in
-                    store(masterKey, pinType: PinType(forPin: pin), encodedVerificationString: encodedVerificationString, transaction: transaction)
+                    store(
+                        masterKey: masterKey,
+                        isMasterKeyBackedUp: true,
+                        pinType: PinType(forPin: pin),
+                        encodedVerificationString: encodedVerificationString,
+                        enclaveName: currentEnclave.name,
+                        transaction: transaction
+                    )
                 }
             }
-        }.recover { error in
+        }.recover(on: .global()) { error in
             Logger.error("recording backupKeyRequest errored: \(error)")
-            databaseStorage.write {
-                self.keyValueStore.setBool(true, key: hasBackupKeyRequestFailedIdentifier, transaction: $0)
+
+            databaseStorage.write { transaction in
+                keyValueStore.setBool(true, key: hasBackupKeyRequestFailedIdentifier, transaction: transaction)
+
+                reloadState(transaction: transaction)
             }
 
             guard let kbsError = error as? KBSError else {
@@ -252,14 +345,14 @@ public class KeyBackupService: NSObject {
     }
 
     @objc(deleteKeys)
-    static func objc_deleteKeys() -> AnyPromise {
+    public static func objc_deleteKeys() -> AnyPromise {
         return AnyPromise(deleteKeys())
     }
 
     /// Remove the keys locally from the device and from the KBS,
     /// they will not be able to be restored.
     public static func deleteKeys() -> Promise<Void> {
-        return deleteKeyRequest().ensure {
+        return deleteKeyRequest(enclave: currentEnclave).ensure {
             // Even if the request to delete our keys from KBS failed,
             // purge them from the database.
             databaseStorage.write { clearKeys(transaction: $0) }
@@ -301,7 +394,7 @@ public class KeyBackupService: NSObject {
             default:
                 // Most keys derive directly from the master key.
                 // Only a few exceptions derive from another derived key.
-                guard let masterKey = cacheQueue.sync(execute: { cachedMasterKey }) else { return nil }
+                guard let masterKey = getOrLoadStateWithSneakyTransaction().masterKey else { return nil }
                 return masterKey
             }
         }
@@ -312,7 +405,7 @@ public class KeyBackupService: NSObject {
             // the derived key via a sync message, since we won't know about
             // the master key.
             if (!tsAccountManager.isPrimaryDevice || CurrentAppContext().isRunningTests),
-                let cachedData = cacheQueue.sync(execute: { cachedSyncedDerivedKeys[self] }) {
+                let cachedData = getOrLoadStateWithSneakyTransaction().syncedDerivedKeys[self] {
                 return cachedData
             }
 
@@ -325,7 +418,7 @@ public class KeyBackupService: NSObject {
                 return nil
             }
 
-            return Cryptography.computeSHA256HMAC(data, withHMACKey: dataToDeriveFrom)
+            return Cryptography.computeSHA256HMAC(data, key: dataToDeriveFrom)
         }
 
         public var isAvailable: Bool { return data != nil }
@@ -360,7 +453,7 @@ public class KeyBackupService: NSObject {
             initializationVectorLength: kAESGCM256_DefaultIVLength,
             key: key
         ) else {
-            owsFailDebug("failed to decrypt data")
+            Logger.error("failed to decrypt data")
             throw KBSError.assertion
         }
 
@@ -368,7 +461,7 @@ public class KeyBackupService: NSObject {
     }
 
     @objc
-    static func deriveRegistrationLockToken() -> String? {
+    public static func deriveRegistrationLockToken() -> String? {
         return DerivedKey.registrationLock.data?.hexadecimalString
     }
 
@@ -467,7 +560,7 @@ public class KeyBackupService: NSObject {
         return masterKey
     }
 
-    // PRAGMA MARK: - Storage
+    // PRAGMA MARK: - State
 
     public static var keyValueStore: SDSKeyValueStore {
         return SDSKeyValueStore(collection: "kOWSKeyBackupService_Keys")
@@ -478,33 +571,127 @@ public class KeyBackupService: NSObject {
     private static let encodedVerificationStringIdentifier = "encodedVerificationString"
     private static let hasBackupKeyRequestFailedIdentifier = "hasBackupKeyRequestFailed"
     private static let hasPendingRestorationIdentifier = "hasPendingRestoration"
+    private static let isMasterKeyBackedUpIdentifer = "isMasterKeyBackedUp"
+    private static let enclaveNameIdentifier = "enclaveName"
     private static let cacheQueue = DispatchQueue(label: "org.signal.KeyBackupService")
 
-    @objc
-    public static func warmCaches() {
-        var masterKey: Data?
-        var pinType: PinType?
-        var encodedVerificationString: String?
+    private static var cachedState: State?
+    private struct State {
+        let masterKey: Data?
+        let pinType: PinType?
+        let encodedVerificationString: String?
+        let hasBackupKeyRequestFailed: Bool
+        let hasPendingRestoration: Bool
+        let isMasterKeyBackedUp: Bool
+        let syncedDerivedKeys: [DerivedKey: Data]
+        let enclaveName: String?
 
-        var syncedDerivedKeys = [DerivedKey: Data]()
-
-        databaseStorage.read { transaction in
+        init(transaction: SDSAnyReadTransaction) {
             masterKey = keyValueStore.getData(masterKeyIdentifer, transaction: transaction)
+
             if let rawPinType = keyValueStore.getInt(pinTypeIdentifier, transaction: transaction) {
                 pinType = PinType(rawValue: rawPinType)
+            } else {
+                pinType = nil
             }
-            encodedVerificationString = keyValueStore.getString(encodedVerificationStringIdentifier, transaction: transaction)
 
+            encodedVerificationString = keyValueStore.getString(
+                encodedVerificationStringIdentifier,
+                transaction: transaction
+            )
+
+            hasBackupKeyRequestFailed = keyValueStore.getBool(
+                hasBackupKeyRequestFailedIdentifier,
+                defaultValue: false,
+                transaction: transaction
+            )
+
+            hasPendingRestoration = keyValueStore.getBool(
+                hasPendingRestorationIdentifier,
+                defaultValue: false,
+                transaction: transaction
+            )
+
+            isMasterKeyBackedUp = keyValueStore.getBool(
+                isMasterKeyBackedUpIdentifer,
+                defaultValue: false,
+                transaction: transaction
+            )
+
+            var syncedDerivedKeys = [DerivedKey: Data]()
             for type in DerivedKey.syncableKeys {
                 syncedDerivedKeys[type] = keyValueStore.getData(type.rawValue, transaction: transaction)
             }
+            self.syncedDerivedKeys = syncedDerivedKeys
+
+            enclaveName = keyValueStore.getString(enclaveNameIdentifier, transaction: transaction)
+        }
+    }
+
+    private static func getOrLoadState(transaction: SDSAnyReadTransaction) -> State {
+        if let cachedState = cacheQueue.sync(execute: { cachedState }) { return cachedState }
+        return loadState(transaction: transaction)
+    }
+
+    private static func getOrLoadStateWithSneakyTransaction() -> State {
+        if let cachedState = cacheQueue.sync(execute: { cachedState }) { return cachedState }
+        return databaseStorage.read { loadState(transaction: $0) }
+    }
+
+    @discardableResult
+    private static func loadState(transaction: SDSAnyReadTransaction) -> State {
+        let state = State(transaction: transaction)
+        cacheQueue.sync { cachedState = state }
+        return state
+    }
+
+    private static func reloadState(transaction: SDSAnyReadTransaction) {
+        _ = loadState(transaction: transaction)
+    }
+
+    @objc
+    public static func warmCaches() {
+        let state = getOrLoadStateWithSneakyTransaction()
+        migrateEnclavesIfNecessary(state: state)
+    }
+
+    private static func migrateEnclavesIfNecessary(state: State) {
+        guard state.enclaveName != currentEnclave.name,
+            state.masterKey != nil,
+            tsAccountManager.isRegisteredAndReady else { return }
+        guard state.isMasterKeyBackedUp else {
+            Logger.warn("Can't migrate KBS enclave because pins are not enabled.")
+            return
+        }
+        guard let pin = OWS2FAManager.shared.pinCode else {
+            owsFailDebug("Can't migrate KBS enclave because local pin is missing")
+            return
         }
 
-        cacheQueue.sync {
-            cachedMasterKey = masterKey
-            cachedPinType = pinType
-            cachedEncodedVerificationString = encodedVerificationString
-            cachedSyncedDerivedKeys = syncedDerivedKeys
+        Logger.info("Migrating from KBS enclave \(String(describing: state.enclaveName)) to \(currentEnclave.name)")
+
+        generateAndBackupKeys(
+            with: pin,
+            rotateMasterKey: false
+        ).then { () -> Promise<Void> in
+            guard let previousEnclave = TSConstants.keyBackupPreviousEnclaves.first(where: { $0.name == state.enclaveName }) else {
+                // This can happen in legitimate cases, for example the user waited so
+                // long to update to an app that supports the new enclave, that the old
+                // enclave is no longer supported. In practice, this should be very rare.
+                Logger.warn("Can't identify previous enclave, skipping delete")
+                return Promise.value(())
+            }
+
+            return deleteKeyRequest(enclave: previousEnclave).asVoid().recover { error in
+                // We ignore errors from the delete key request, because the migration was
+                // successful. Most likely, this will happen because the old enclave is no
+                // longer passing attestation. We just do our best to try and clean up.
+                owsFailDebug("Failed to delete keys from previous enclave during migration \(error)")
+            }
+        }.done {
+            Logger.info("Successfuly migrated KBS enclave")
+        }.catch { error in
+            owsFailDebug("Failed to migrate KBS enclave \(error)")
         }
     }
 
@@ -516,58 +703,83 @@ public class KeyBackupService: NSObject {
 
         keyValueStore.removeValues(forKeys: [
             masterKeyIdentifer,
+            isMasterKeyBackedUpIdentifer,
             pinTypeIdentifier,
             encodedVerificationStringIdentifier
         ], transaction: transaction)
 
-        cacheQueue.sync {
-            cachedMasterKey = nil
-            cachedPinType = nil
-            cachedEncodedVerificationString = nil
-            cachedSyncedDerivedKeys = [:]
+        for type in DerivedKey.syncableKeys {
+            keyValueStore.removeValue(forKey: type.rawValue, transaction: transaction)
         }
+
+        reloadState(transaction: transaction)
     }
 
-    // Should only be interacted with on the serial cache queue
-    // Always contains an in memory reference to our current masterKey
-    private static var cachedMasterKey: Data?
-    // Always contains an in memory reference to our current PIN's type
-    private static var cachedPinType: PinType?
-    // Always contains an in memory reference to our encoded PIN verification string
-    private static var cachedEncodedVerificationString: String?
-    // Always contains an in memory reference to our received derived keys
-    static var cachedSyncedDerivedKeys = [DerivedKey: Data]()
+    static func store(
+        masterKey: Data,
+        isMasterKeyBackedUp: Bool,
+        pinType: PinType,
+        encodedVerificationString: String,
+        enclaveName: String,
+        transaction: SDSAnyWriteTransaction
+    ) {
+        owsAssertDebug(tsAccountManager.isPrimaryDevice)
 
-    static func store(_ masterKey: Data, pinType: PinType, encodedVerificationString: String, transaction: SDSAnyWriteTransaction) {
-        var previousMasterKey: Data?
-        var previousPinType: PinType?
-        var previousEncodedVerificationString: String?
+        let previousState = getOrLoadState(transaction: transaction)
 
-        cacheQueue.sync {
-            previousMasterKey = cachedMasterKey
-            previousPinType = cachedPinType
-            previousEncodedVerificationString = cachedEncodedVerificationString
-        }
+        guard masterKey != previousState.masterKey
+            || isMasterKeyBackedUp != previousState.isMasterKeyBackedUp
+            || pinType != previousState.pinType
+            || encodedVerificationString != previousState.encodedVerificationString else { return }
 
-        guard masterKey != previousMasterKey
-            || pinType != previousPinType
-            || encodedVerificationString != previousEncodedVerificationString else { return }
+        keyValueStore.setData(
+            masterKey,
+            key: masterKeyIdentifer,
+            transaction: transaction
+        )
 
-        keyValueStore.setData(masterKey, key: masterKeyIdentifer, transaction: transaction)
-        keyValueStore.setInt(pinType.rawValue, key: pinTypeIdentifier, transaction: transaction)
-        keyValueStore.setString(encodedVerificationString, key: encodedVerificationStringIdentifier, transaction: transaction)
-        keyValueStore.setBool(false, key: hasBackupKeyRequestFailedIdentifier, transaction: transaction)
+        keyValueStore.setBool(
+            isMasterKeyBackedUp,
+            key: isMasterKeyBackedUpIdentifer,
+            transaction: transaction
+        )
 
-        cacheQueue.sync {
-            cachedMasterKey = masterKey
-            cachedPinType = pinType
-            cachedEncodedVerificationString = encodedVerificationString
-        }
+        keyValueStore.setInt(
+            pinType.rawValue,
+            key: pinTypeIdentifier,
+            transaction: transaction
+        )
+
+        keyValueStore.setString(
+            encodedVerificationString,
+            key: encodedVerificationStringIdentifier,
+            transaction: transaction
+        )
+
+        keyValueStore.setString(
+            enclaveName,
+            key: enclaveNameIdentifier,
+            transaction: transaction
+        )
+
+        // Clear failed status
+        keyValueStore.setBool(
+            false,
+            key: hasBackupKeyRequestFailedIdentifier,
+            transaction: transaction
+        )
+
+        reloadState(transaction: transaction)
 
         // Only continue if we didn't previously have a master key or our master key has changed
-        guard masterKey != previousMasterKey, tsAccountManager.isRegisteredAndReady else { return }
+        guard masterKey != previousState.masterKey, tsAccountManager.isRegisteredAndReady else { return }
 
         // Trigger a re-creation of the storage manifest, our keys have changed
+        storageServiceManager.resetLocalData(transaction: transaction)
+
+        // If the app is ready start that restoration.
+        guard AppReadiness.isAppReady else { return }
+
         storageServiceManager.restoreOrCreateManifestIfNecessary()
 
         // Sync our new keys with linked devices.
@@ -584,7 +796,8 @@ public class KeyBackupService: NSObject {
         }
 
         keyValueStore.setData(data, key: type.rawValue, transaction: transaction)
-        cacheQueue.sync { cachedSyncedDerivedKeys[type] = data }
+
+        reloadState(transaction: transaction)
 
         // Trigger a re-fetch of the storage manifest, our keys have changed
         if type == .storageService, data != nil {
@@ -592,13 +805,56 @@ public class KeyBackupService: NSObject {
         }
     }
 
+    public static func hasBackupKeyRequestFailed(transaction: SDSAnyReadTransaction) -> Bool {
+        getOrLoadState(transaction: transaction).hasBackupKeyRequestFailed
+    }
+
+    public static func hasPendingRestoration(transaction: SDSAnyReadTransaction) -> Bool {
+        getOrLoadState(transaction: transaction).hasPendingRestoration
+    }
+
+    public static func recordPendingRestoration(transaction: SDSAnyWriteTransaction) {
+        keyValueStore.setBool(true, key: hasPendingRestorationIdentifier, transaction: transaction)
+
+        reloadState(transaction: transaction)
+    }
+
+    public static func clearPendingRestoration(transaction: SDSAnyWriteTransaction) {
+        keyValueStore.removeValue(forKey: hasPendingRestorationIdentifier, transaction: transaction)
+
+        reloadState(transaction: transaction)
+    }
+
+    public static func setMasterKeyBackedUp(_ value: Bool, transaction: SDSAnyWriteTransaction) {
+        keyValueStore.setBool(value, key: isMasterKeyBackedUpIdentifer, transaction: transaction)
+
+        reloadState(transaction: transaction)
+    }
+
+    public static func useDeviceLocalMasterKey(transaction: SDSAnyWriteTransaction) {
+        store(
+            masterKey: generateMasterKey(),
+            isMasterKeyBackedUp: false,
+            pinType: .alphanumeric,
+            encodedVerificationString: "",
+            enclaveName: "",
+            transaction: transaction
+        )
+
+        OWS2FAManager.shared.markDisabled(transaction: transaction)
+    }
+
     // PRAGMA MARK: - Requests
 
     private static func enclaveRequest<RequestType: KBSRequestOption>(
-        with auth: RemoteAttestationAuth? = nil,
-        and requestOptionBuilder: @escaping (Token) throws -> RequestType
+        auth: RemoteAttestationAuth? = nil,
+        enclave: KeyBackupEnclave,
+        requestOptionBuilder: @escaping (Token) throws -> RequestType
     ) -> Promise<RequestType.ResponseOptionType> {
-        return RemoteAttestation.performForKeyBackup(auth: auth).then { remoteAttestation in
+        return RemoteAttestation.performForKeyBackup(
+            auth: auth,
+            enclave: enclave
+        ).then { remoteAttestation in
             fetchToken(for: remoteAttestation).map { ($0, remoteAttestation) }
         }.map(on: DispatchQueue.global()) { tokenResponse, remoteAttestation -> (TSRequest, RemoteAttestation) in
             let requestOption = try requestOptionBuilder(tokenResponse)
@@ -666,7 +922,7 @@ public class KeyBackupService: NSObject {
                 throw KBSError.assertion
             }
 
-            let kbResponse = try KeyBackupProtoResponse.parseData(encryptionResult)
+            let kbResponse = try KeyBackupProtoResponse(serializedData: encryptionResult)
 
             guard let typedResponse = RequestType.responseOption(from: kbResponse) else {
                 owsFailDebug("missing KBS response object")
@@ -677,9 +933,14 @@ public class KeyBackupService: NSObject {
         }
     }
 
-    private static func backupKeyRequest(accessKey: Data, encryptedMasterKey: Data, and auth: RemoteAttestationAuth? = nil) -> Promise<KeyBackupProtoBackupResponse> {
-        return enclaveRequest(with: auth) { token -> KeyBackupProtoBackupRequest in
-            guard let serviceId = Data.data(fromHex: TSConstants.keyBackupServiceId) else {
+    private static func backupKeyRequest(
+        accessKey: Data,
+        encryptedMasterKey: Data,
+        enclave: KeyBackupEnclave,
+        auth: RemoteAttestationAuth? = nil
+    ) -> Promise<KeyBackupProtoBackupResponse> {
+        return enclaveRequest(auth: auth, enclave: enclave) { token -> KeyBackupProtoBackupRequest in
+            guard let serviceId = Data.data(fromHex: enclave.serviceId) else {
                 owsFailDebug("failed to encode service id")
                 throw KBSError.assertion
             }
@@ -705,9 +966,13 @@ public class KeyBackupService: NSObject {
         }
     }
 
-    private static func restoreKeyRequest(accessKey: Data, with auth: RemoteAttestationAuth? = nil) -> Promise<KeyBackupProtoRestoreResponse> {
-        return enclaveRequest(with: auth) { token -> KeyBackupProtoRestoreRequest in
-            guard let serviceId = Data.data(fromHex: TSConstants.keyBackupServiceId) else {
+    private static func restoreKeyRequest(
+        accessKey: Data,
+        enclave: KeyBackupEnclave,
+        auth: RemoteAttestationAuth? = nil
+    ) -> Promise<KeyBackupProtoRestoreResponse> {
+        return enclaveRequest(auth: auth, enclave: enclave) { token -> KeyBackupProtoRestoreRequest in
+            guard let serviceId = Data.data(fromHex: enclave.serviceId) else {
                 owsFailDebug("failed to encode service id")
                 throw KBSError.assertion
             }
@@ -731,9 +996,9 @@ public class KeyBackupService: NSObject {
         }
     }
 
-    private static func deleteKeyRequest() -> Promise<KeyBackupProtoDeleteResponse> {
-        return enclaveRequest { token -> KeyBackupProtoDeleteRequest in
-            guard let serviceId = Data.data(fromHex: TSConstants.keyBackupServiceId) else {
+    private static func deleteKeyRequest(enclave: KeyBackupEnclave) -> Promise<KeyBackupProtoDeleteResponse> {
+        return enclaveRequest(enclave: enclave) { token -> KeyBackupProtoDeleteRequest in
+            guard let serviceId = Data.data(fromHex: enclave.serviceId) else {
                 owsFailDebug("failed to encode service id")
                 throw KBSError.assertion
             }
@@ -751,22 +1016,6 @@ public class KeyBackupService: NSObject {
         }
     }
 
-    public static func hasBackupKeyRequestFailed(transaction: SDSAnyReadTransaction) -> Bool {
-        keyValueStore.getBool(hasBackupKeyRequestFailedIdentifier, defaultValue: false, transaction: transaction)
-    }
-
-    public static func hasPendingRestoration(transaction: SDSAnyReadTransaction) -> Bool {
-        keyValueStore.getBool(hasPendingRestorationIdentifier, defaultValue: false, transaction: transaction)
-    }
-
-    public static func recordPendingRestoration(transaction: SDSAnyWriteTransaction) {
-        keyValueStore.setBool(true, key: hasPendingRestorationIdentifier, transaction: transaction)
-    }
-
-    public static func clearPendingRestoration(transaction: SDSAnyWriteTransaction) {
-        keyValueStore.removeValue(forKey: hasPendingRestorationIdentifier, transaction: transaction)
-    }
-
     // PRAGMA MARK: - Token
 
     public static var tokenStore: SDSKeyValueStore {
@@ -781,12 +1030,14 @@ public class KeyBackupService: NSObject {
         private static let backupIdKey = "backupIdKey"
         private static let dataKey = "dataKey"
         private static let triesKey = "triesKey"
+        private static let enclaveNameKey = "enclaveNameKey"
 
         let backupId: Data
         let data: Data
         let tries: UInt32
+        let enclaveName: String
 
-        private init(backupId: Data, data: Data, tries: UInt32) throws {
+        private init(backupId: Data, data: Data, tries: UInt32, enclaveName: String) throws {
             guard backupId.count == 32 else {
                 owsFailDebug("invalid backupId")
                 throw KBSError.assertion
@@ -800,13 +1051,14 @@ public class KeyBackupService: NSObject {
             self.data = data
 
             self.tries = tries
+            self.enclaveName = enclaveName
         }
 
         /// Update the token to use for the next enclave request.
         /// If backupId or tries are nil, attempts to use the previously known value.
         /// If we don't have a cached value (we've never stored a token before), an error is thrown.
         @discardableResult
-        static func updateNext(backupId: Data? = nil, data: Data, tries: UInt32? = nil) throws -> Token {
+        static func updateNext(backupId: Data? = nil, data: Data, tries: UInt32? = nil, enclaveName: String) throws -> Token {
             guard let backupId = backupId ?? databaseStorage.read(block: { transaction in
                 keyValueStore.getData(backupIdKey, transaction: transaction)
             }) else {
@@ -821,14 +1073,14 @@ public class KeyBackupService: NSObject {
                 throw KBSError.assertion
             }
 
-            let token = try Token(backupId: backupId, data: data, tries: tries)
+            let token = try Token(backupId: backupId, data: data, tries: tries, enclaveName: enclaveName)
             token.recordAsCurrent()
             return token
         }
 
         /// Update the token to use for the next enclave request.
         @discardableResult
-        static func updateNext(responseObject: Any?) throws -> Token {
+        static func updateNext(responseObject: Any?, enclaveName: String) throws -> Token {
             guard let paramParser = ParamParser(responseObject: responseObject) else {
                 owsFailDebug("Unexpectedly missing response object")
                 throw KBSError.assertion
@@ -838,7 +1090,7 @@ public class KeyBackupService: NSObject {
             let data = try paramParser.requiredBase64EncodedData(key: "token")
             let tries: UInt32 = try paramParser.required(key: "tries")
 
-            let token = try Token(backupId: backupId, data: data, tries: tries)
+            let token = try Token(backupId: backupId, data: data, tries: tries, enclaveName: enclaveName)
             token.recordAsCurrent()
             return token
         }
@@ -851,11 +1103,18 @@ public class KeyBackupService: NSObject {
             keyValueStore.setData(nil, key: backupIdKey, transaction: transaction)
             keyValueStore.setData(nil, key: dataKey, transaction: transaction)
             keyValueStore.setObject(nil, key: triesKey, transaction: transaction)
+            keyValueStore.setObject(nil, key: enclaveNameKey, transaction: transaction)
         }
 
         /// The token to use when making the next enclave request.
-        static var next: Token? {
+        static func next(enclaveName: String) -> Token? {
             return databaseStorage.read { transaction in
+                // If the cached token is for another enclave, we can't use it. This
+                // can happen when migrating from one enclave to another.
+                guard keyValueStore.getString(enclaveNameKey, transaction: transaction) == enclaveName else {
+                    return nil
+                }
+
                 guard let backupId = keyValueStore.getData(backupIdKey, transaction: transaction),
                     let data = keyValueStore.getData(dataKey, transaction: transaction),
                     let tries = keyValueStore.getUInt32(triesKey, transaction: transaction) else {
@@ -863,7 +1122,7 @@ public class KeyBackupService: NSObject {
                 }
 
                 do {
-                    return try Token(backupId: backupId, data: data, tries: tries)
+                    return try Token(backupId: backupId, data: data, tries: tries, enclaveName: enclaveName)
                 } catch {
                     // This should never happen, but if for some reason our stored token gets
                     // corrupted we'll return nil which will trigger us to fetch a fresh one
@@ -879,14 +1138,20 @@ public class KeyBackupService: NSObject {
                 Token.keyValueStore.setData(self.backupId, key: Token.backupIdKey, transaction: transaction)
                 Token.keyValueStore.setData(self.data, key: Token.dataKey, transaction: transaction)
                 Token.keyValueStore.setUInt32(self.tries, key: Token.triesKey, transaction: transaction)
+                Token.keyValueStore.setString(self.enclaveName, key: Token.enclaveNameKey, transaction: transaction)
             }
         }
     }
 
-    private static func fetchBackupId(auth: RemoteAttestationAuth?) -> Promise<Data> {
-        if let currentToken = Token.next { return Promise.value(currentToken.backupId) }
+    private static func fetchBackupId(auth: RemoteAttestationAuth?, enclave: KeyBackupEnclave) -> Promise<Data> {
+        if let currentToken = Token.next(
+            enclaveName: enclave.name
+        ) { return Promise.value(currentToken.backupId) }
 
-        return RemoteAttestation.performForKeyBackup(auth: auth).then { remoteAttestation in
+        return RemoteAttestation.performForKeyBackup(
+            auth: auth,
+            enclave: enclave
+        ).then { remoteAttestation in
             fetchToken(for: remoteAttestation).map { $0.backupId }
         }
     }
@@ -894,7 +1159,9 @@ public class KeyBackupService: NSObject {
     private static func fetchToken(for remoteAttestation: RemoteAttestation) -> Promise<Token> {
         // If we already have a token stored, we need to use it before fetching another.
         // We only stop using this token once the enclave informs us it is spent.
-        if let currentToken = Token.next { return Promise.value(currentToken) }
+        if let currentToken = Token.next(
+            enclaveName: remoteAttestation.enclaveName
+        ) { return Promise.value(currentToken) }
 
         // Fetch a new token
 
@@ -906,7 +1173,7 @@ public class KeyBackupService: NSObject {
         )
 
         return networkManager.makePromise(request: request).map(on: DispatchQueue.global()) { _, responseObject in
-            try Token.updateNext(responseObject: responseObject)
+            try Token.updateNext(responseObject: responseObject, enclaveName: remoteAttestation.enclaveName)
         }
     }
 }

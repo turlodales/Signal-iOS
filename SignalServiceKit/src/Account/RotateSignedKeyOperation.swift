@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -7,17 +7,6 @@ import PromiseKit
 
 @objc(SSKRotateSignedPreKeyOperation)
 public class RotateSignedPreKeyOperation: OWSOperation {
-    private var tsAccountManager: TSAccountManager {
-        return TSAccountManager.sharedInstance()
-    }
-
-    private var accountServiceClient: AccountServiceClient {
-        return SSKEnvironment.shared.accountServiceClient
-    }
-
-    private var signedPreKeyStore: SSKSignedPreKeyStore {
-        return SSKEnvironment.shared.signedPreKeyStore
-    }
 
     public override func run() {
         Logger.debug("")
@@ -29,21 +18,31 @@ public class RotateSignedPreKeyOperation: OWSOperation {
 
         let signedPreKeyRecord: SignedPreKeyRecord = self.signedPreKeyStore.generateRandomSignedRecord()
 
-        self.signedPreKeyStore.storeSignedPreKey(signedPreKeyRecord.id, signedPreKeyRecord: signedPreKeyRecord)
-        firstly {
+        firstly(on: .global()) { () -> Promise<Void> in
+            self.messageProcessor.fetchingAndProcessingCompletePromise()
+        }.then(on: .global()) { () -> Promise<Void> in
+            self.databaseStorage.write { transaction in
+                self.signedPreKeyStore.storeSignedPreKey(signedPreKeyRecord.id,
+                                                         signedPreKeyRecord: signedPreKeyRecord,
+                                                         transaction: transaction)
+            }
             return self.accountServiceClient.setSignedPreKey(signedPreKeyRecord)
-        }.done(on: DispatchQueue.global()) {
+        }.done(on: .global()) { () in
             Logger.info("Successfully uploaded signed PreKey")
             signedPreKeyRecord.markAsAcceptedByService()
-            self.signedPreKeyStore.storeSignedPreKey(signedPreKeyRecord.id, signedPreKeyRecord: signedPreKeyRecord)
+            self.databaseStorage.write { transaction in
+                self.signedPreKeyStore.storeSignedPreKey(signedPreKeyRecord.id,
+                                                         signedPreKeyRecord: signedPreKeyRecord,
+                                                         transaction: transaction)
+            }
             self.signedPreKeyStore.setCurrentSignedPrekeyId(signedPreKeyRecord.id)
 
             TSPreKeyManager.clearPreKeyUpdateFailureCount()
             TSPreKeyManager.clearSignedPreKeyRecords()
 
-            Logger.debug("done")
+            Logger.info("done")
             self.reportSuccess()
-        }.catch { error in
+        }.catch(on: .global()) { error in
             self.reportError(withUndefinedRetry: error)
         }
     }

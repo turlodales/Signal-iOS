@@ -1,12 +1,12 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import AVFoundation
 
 @objc
-public protocol OWSVideoPlayerDelegate: class {
+public protocol OWSVideoPlayerDelegate: AnyObject {
     func videoPlayerDidPlayToCompletion(_ videoPlayer: OWSVideoPlayer)
 }
 
@@ -42,12 +42,6 @@ public class OWSVideoPlayer: NSObject {
 
     deinit {
         endAudioActivity()
-    }
-
-    // MARK: Dependencies
-
-    var audioSession: OWSAudioSession {
-        return Environment.shared.audioSession
     }
 
     // MARK: Playback Controls

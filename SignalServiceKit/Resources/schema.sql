@@ -30,6 +30,11 @@ CREATE
             ,"groupModel" BLOB
             ,"hasDismissedOffers" INTEGER
             ,"isMarkedUnread" BOOLEAN NOT NULL DEFAULT 0
+            ,"lastVisibleSortIdOnScreenPercentage" DOUBLE NOT NULL DEFAULT 0
+            ,"lastVisibleSortId" INTEGER NOT NULL DEFAULT 0
+            ,"messageDraftBodyRanges" BLOB
+            ,"mentionNotificationMode" INTEGER NOT NULL DEFAULT 0
+            ,"mutedUntilTimestamp" INTEGER NOT NULL DEFAULT 0
         )
 ;
 
@@ -97,6 +102,19 @@ CREATE
             ,"wasReceivedByUD" INTEGER
             ,"infoMessageUserInfo" BLOB
             ,"wasRemotelyDeleted" BOOLEAN
+            ,"bodyRanges" BLOB
+            ,"offerType" INTEGER
+            ,"serverDeliveryTimestamp" INTEGER
+            ,"eraId" TEXT
+            ,"hasEnded" BOOLEAN
+            ,"creatorUuid" TEXT
+            ,"joinedMemberUuids" BLOB
+            ,"wasIdentityVerified" BOOLEAN
+            ,"paymentCancellation" BLOB
+            ,"paymentNotification" BLOB
+            ,"paymentRequest" BLOB
+            ,"viewed" BOOLEAN
+            ,"serverGuid" TEXT
         )
 ;
 
@@ -138,6 +156,7 @@ CREATE
                 ON CONFLICT FAIL
             ,"emojiString" TEXT
             ,"info" BLOB NOT NULL
+            ,"contentType" TEXT
         )
 ;
 
@@ -198,6 +217,7 @@ CREATE
             ,"uploadTimestamp" INTEGER NOT NULL DEFAULT 0
             ,"cdnKey" TEXT NOT NULL DEFAULT ''
             ,"cdnNumber" INTEGER NOT NULL DEFAULT 0
+            ,"isAnimatedCached" INTEGER
         )
 ;
 
@@ -220,6 +240,7 @@ CREATE
             ,"threadId" TEXT
             ,"attachmentId" TEXT
             ,"isMediaMessage" BOOLEAN
+            ,"serverDeliveryTimestamp" INTEGER
         )
 ;
 
@@ -240,6 +261,7 @@ CREATE
             ,"envelopeData" BLOB NOT NULL
             ,"plaintextData" BLOB
             ,"wasReceivedByUD" INTEGER NOT NULL
+            ,"serverDeliveryTimestamp" INTEGER NOT NULL DEFAULT 0
         )
 ;
 
@@ -323,12 +345,23 @@ CREATE
             ,"username" TEXT
             ,"familyName" TEXT
             ,"isUuidCapable" BOOLEAN NOT NULL DEFAULT 0
+            ,"lastFetchDate" DOUBLE
+            ,"lastMessagingDate" DOUBLE
+            ,"bio" TEXT
+            ,"bioEmoji" TEXT
         )
 ;
 
 CREATE
     INDEX "index_model_OWSUserProfile_on_uniqueId"
         ON "model_OWSUserProfile"("uniqueId"
+)
+;
+
+CREATE
+    INDEX "index_model_OWSUserProfile_on_lastFetchDate_and_lastMessagingDate"
+        ON "model_OWSUserProfile"("lastFetchDate"
+    ,"lastMessagingDate"
 )
 ;
 
@@ -787,6 +820,7 @@ CREATE
             ,"plaintextData" BLOB
             ,"wasReceivedByUD" INTEGER NOT NULL
             ,"groupId" BLOB
+            ,"serverDeliveryTimestamp" INTEGER NOT NULL DEFAULT 0
         )
 ;
 
@@ -816,14 +850,6 @@ CREATE
 ;
 
 CREATE
-    INDEX "index_model_TSInteraction_on_threadUniqueId_recordType_messageType"
-        ON "model_TSInteraction"("threadUniqueId"
-    ,"recordType"
-    ,"messageType"
-)
-;
-
-CREATE
     TABLE
         IF NOT EXISTS "pending_read_receipts" (
             "id" INTEGER PRIMARY KEY AUTOINCREMENT
@@ -837,13 +863,6 @@ CREATE
 CREATE
     INDEX "index_pending_read_receipts_on_threadId"
         ON "pending_read_receipts"("threadId"
-)
-;
-
-CREATE
-    INDEX "index_model_TSInteraction_on_threadUniqueId_and_attachmentIds"
-        ON "model_TSInteraction"("threadUniqueId"
-    ,"attachmentIds"
 )
 ;
 
@@ -871,5 +890,225 @@ CREATE
 CREATE
     INDEX "index_model_TSAttachment_on_uniqueId"
         ON "model_TSAttachment"("uniqueId"
+)
+;
+
+CREATE
+    INDEX "index_model_TSInteraction_on_uniqueThreadId_recordType_messageType"
+        ON "model_TSInteraction"("uniqueThreadId"
+    ,"recordType"
+    ,"messageType"
+)
+;
+
+CREATE
+    INDEX "index_model_TSInteraction_on_uniqueThreadId_and_attachmentIds"
+        ON "model_TSInteraction"("uniqueThreadId"
+    ,"attachmentIds"
+)
+;
+
+CREATE
+    TABLE
+        IF NOT EXISTS "model_TSMention" (
+            "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL
+            ,"recordType" INTEGER NOT NULL
+            ,"uniqueId" TEXT NOT NULL UNIQUE
+                ON CONFLICT FAIL
+            ,"uniqueMessageId" TEXT NOT NULL
+            ,"uniqueThreadId" TEXT NOT NULL
+            ,"uuidString" TEXT NOT NULL
+            ,"creationTimestamp" DOUBLE NOT NULL
+        )
+;
+
+CREATE
+    INDEX "index_model_TSMention_on_uniqueId"
+        ON "model_TSMention"("uniqueId"
+)
+;
+
+CREATE
+    INDEX "index_model_TSMention_on_uuidString_and_uniqueThreadId"
+        ON "model_TSMention"("uuidString"
+    ,"uniqueThreadId"
+)
+;
+
+CREATE
+    UNIQUE INDEX "index_model_TSMention_on_uniqueMessageId_and_uuidString"
+        ON "model_TSMention"("uniqueMessageId"
+    ,"uuidString"
+)
+;
+
+CREATE
+    INDEX "index_model_TSThread_on_isMarkedUnread_and_shouldThreadBeVisible"
+        ON "model_TSThread"("isMarkedUnread"
+    ,"shouldThreadBeVisible"
+)
+;
+
+CREATE
+    INDEX "index_model_TSInteraction_on_uniqueThreadId_and_hasEnded_and_recordType"
+        ON "model_TSInteraction"("uniqueThreadId"
+    ,"hasEnded"
+    ,"recordType"
+)
+;
+
+CREATE
+    INDEX "index_model_TSInteraction_on_uniqueThreadId_and_eraId_and_recordType"
+        ON "model_TSInteraction"("uniqueThreadId"
+    ,"eraId"
+    ,"recordType"
+)
+;
+
+CREATE
+    TABLE
+        IF NOT EXISTS "model_TSPaymentModel" (
+            "id" INTEGER PRIMARY KEY AUTOINCREMENT
+            ,"recordType" INTEGER NOT NULL
+            ,"uniqueId" TEXT NOT NULL UNIQUE
+                ON CONFLICT FAIL
+            ,"addressUuidString" TEXT
+            ,"createdTimestamp" INTEGER NOT NULL
+            ,"isUnread" BOOLEAN NOT NULL
+            ,"mcLedgerBlockIndex" INTEGER NOT NULL
+            ,"mcReceiptData" BLOB
+            ,"mcTransactionData" BLOB
+            ,"memoMessage" TEXT
+            ,"mobileCoin" BLOB
+            ,"paymentAmount" BLOB
+            ,"paymentFailure" INTEGER NOT NULL
+            ,"paymentState" INTEGER NOT NULL
+            ,"paymentType" INTEGER NOT NULL
+            ,"requestUuidString" TEXT
+        )
+;
+
+CREATE
+    INDEX "index_model_TSPaymentModel_on_uniqueId"
+        ON "model_TSPaymentModel"("uniqueId"
+)
+;
+
+CREATE
+    INDEX "index_model_TSPaymentModel_on_paymentState"
+        ON "model_TSPaymentModel"("paymentState"
+)
+;
+
+CREATE
+    INDEX "index_model_TSPaymentModel_on_mcLedgerBlockIndex"
+        ON "model_TSPaymentModel"("mcLedgerBlockIndex"
+)
+;
+
+CREATE
+    INDEX "index_model_TSPaymentModel_on_mcReceiptData"
+        ON "model_TSPaymentModel"("mcReceiptData"
+)
+;
+
+CREATE
+    INDEX "index_model_TSPaymentModel_on_mcTransactionData"
+        ON "model_TSPaymentModel"("mcTransactionData"
+)
+;
+
+CREATE
+    INDEX "index_model_TSPaymentModel_on_isUnread"
+        ON "model_TSPaymentModel"("isUnread"
+)
+;
+
+CREATE
+    TABLE
+        IF NOT EXISTS "model_TSGroupMember" (
+            "id" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL
+            ,"recordType" INTEGER NOT NULL
+            ,"uniqueId" TEXT NOT NULL UNIQUE
+                ON CONFLICT FAIL
+            ,"groupThreadId" TEXT NOT NULL
+            ,"phoneNumber" TEXT
+            ,"uuidString" TEXT
+            ,"lastInteractionTimestamp" INTEGER NOT NULL DEFAULT 0
+        )
+;
+
+CREATE
+    INDEX "index_model_TSGroupMember_on_uniqueId"
+        ON "model_TSGroupMember"("uniqueId"
+)
+;
+
+CREATE
+    INDEX "index_model_TSGroupMember_on_groupThreadId"
+        ON "model_TSGroupMember"("groupThreadId"
+)
+;
+
+CREATE
+    UNIQUE INDEX "index_model_TSGroupMember_on_uuidString_and_groupThreadId"
+        ON "model_TSGroupMember"("uuidString"
+    ,"groupThreadId"
+)
+;
+
+CREATE
+    UNIQUE INDEX "index_model_TSGroupMember_on_phoneNumber_and_groupThreadId"
+        ON "model_TSGroupMember"("phoneNumber"
+    ,"groupThreadId"
+)
+;
+
+CREATE
+    TABLE
+        IF NOT EXISTS "pending_viewed_receipts" (
+            "id" INTEGER PRIMARY KEY AUTOINCREMENT
+            ,"threadId" INTEGER NOT NULL
+            ,"messageTimestamp" INTEGER NOT NULL
+            ,"authorPhoneNumber" TEXT
+            ,"authorUuid" TEXT
+        )
+;
+
+CREATE
+    INDEX "index_pending_viewed_receipts_on_threadId"
+        ON "pending_viewed_receipts"("threadId"
+)
+;
+
+CREATE
+    TABLE
+        IF NOT EXISTS "thread_associated_data" (
+            "id" INTEGER PRIMARY KEY AUTOINCREMENT
+            ,"threadUniqueId" TEXT NOT NULL UNIQUE
+                ON CONFLICT FAIL
+            ,"isArchived" BOOLEAN NOT NULL DEFAULT 0
+            ,"isMarkedUnread" BOOLEAN NOT NULL DEFAULT 0
+            ,"mutedUntilTimestamp" INTEGER NOT NULL DEFAULT 0
+        )
+;
+
+CREATE
+    UNIQUE INDEX "index_thread_associated_data_on_threadUniqueId"
+        ON "thread_associated_data"("threadUniqueId"
+)
+;
+
+CREATE
+    INDEX "index_thread_associated_data_on_threadUniqueId_and_isMarkedUnread"
+        ON "thread_associated_data"("threadUniqueId"
+    ,"isMarkedUnread"
+)
+;
+
+CREATE
+    INDEX "index_thread_associated_data_on_threadUniqueId_and_isArchived"
+        ON "thread_associated_data"("threadUniqueId"
+    ,"isArchived"
 )
 ;

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -35,17 +35,17 @@ public class MediaMessageView: UIView, OWSAudioPlayerDelegate {
     public var videoPlayButton: UIImageView?
 
     @objc
-    public var audioProgressSeconds: CGFloat = 0
+    public var audioProgressSeconds: TimeInterval = 0
 
     @objc
-    public var audioDurationSeconds: CGFloat = 0
+    public var audioDurationSeconds: TimeInterval = 0
 
     @objc
     public var contentView: UIView?
 
     // MARK: Initializers
 
-    @available(*, unavailable, message:"use other constructor instead.")
+    @available(*, unavailable, message: "use other constructor instead.")
     required public init?(coder aDecoder: NSCoder) {
         notImplemented()
     }
@@ -69,7 +69,9 @@ public class MediaMessageView: UIView, OWSAudioPlayerDelegate {
     // MARK: - Create Views
 
     private func createViews() {
-        if attachment.isAnimatedImage {
+        if attachment.isLoopingVideo {
+            createLoopingVideoPreview()
+        } else if attachment.isAnimatedImage {
             createAnimatedPreview()
         } else if attachment.isImage {
             createImagePreview()
@@ -122,7 +124,9 @@ public class MediaMessageView: UIView, OWSAudioPlayerDelegate {
             return
         }
 
-        audioPlayer = OWSAudioPlayer(mediaUrl: dataUrl, audioBehavior: .playback, delegate: self)
+        let audioPlayer = OWSAudioPlayer(mediaUrl: dataUrl, audioBehavior: .playback)
+        audioPlayer.delegate = self
+        self.audioPlayer = audioPlayer
 
         var subviews = [UIView]()
 
@@ -158,6 +162,21 @@ public class MediaMessageView: UIView, OWSAudioPlayerDelegate {
         }
         stackView.autoPinEdge(toSuperviewEdge: .top, withInset: 0, relation: .greaterThanOrEqual)
         stackView.autoPinEdge(toSuperviewEdge: .bottom, withInset: 0, relation: .greaterThanOrEqual)
+    }
+
+    private func createLoopingVideoPreview() {
+        guard let url = attachment.dataUrl,
+              let video = LoopingVideo(url: url),
+              let previewImage = attachment.videoPreview() else {
+            createGenericPreview()
+            return
+        }
+        let loopingVideoView = LoopingVideoView()
+        loopingVideoView.video = video
+        loopingVideoView.placeholderProvider = { previewImage }
+
+        addSubviewWithScaleAspectFitLayout(view: loopingVideoView, aspectRatio: previewImage.size.aspectRatio)
+        contentView = loopingVideoView
     }
 
     private func createAnimatedPreview() {
@@ -406,7 +425,7 @@ public class MediaMessageView: UIView, OWSAudioPlayerDelegate {
         }
     }
 
-    public func setAudioProgress(_ progress: CGFloat, duration: CGFloat) {
+    public func setAudioProgress(_ progress: TimeInterval, duration: TimeInterval) {
         audioProgressSeconds = progress
         audioDurationSeconds = duration
     }

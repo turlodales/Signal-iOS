@@ -1,11 +1,11 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSOutgoingSentMessageTranscript.h"
-#import "TSOutgoingMessage.h"
-#import "TSThread.h"
+#import <SignalServiceKit/OWSOutgoingSentMessageTranscript.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSOutgoingMessage.h>
+#import <SignalServiceKit/TSThread.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -107,15 +107,41 @@ NS_ASSUME_NONNULL_BEGIN
 
         if (self.messageThread.isGroupThread) {
             TSGroupThread *groupThread = (TSGroupThread *)self.messageThread;
-            SSKProtoGroupContextBuilder *groupBuilder = [SSKProtoGroupContext builderWithId:groupThread.groupModel.groupId];
-            [groupBuilder setType:SSKProtoGroupContextTypeDeliver];
-            NSError *error;
-            SSKProtoGroupContext *_Nullable groupContextProto = [groupBuilder buildAndReturnError:&error];
-            if (error || !groupContextProto) {
-                OWSFailDebug(@"could not build protobuf: %@.", error);
-                return nil;
+
+            switch (groupThread.groupModel.groupsVersion) {
+                case GroupsVersionV1: {
+                    SSKProtoGroupContextBuilder *groupBuilder =
+                        [SSKProtoGroupContext builderWithId:groupThread.groupModel.groupId];
+                    [groupBuilder setType:SSKProtoGroupContextTypeDeliver];
+                    NSError *error;
+                    SSKProtoGroupContext *_Nullable groupContextProto = [groupBuilder buildAndReturnError:&error];
+                    if (error || !groupContextProto) {
+                        OWSFailDebug(@"could not build protobuf: %@.", error);
+                        return nil;
+                    }
+                    [dataBuilder setGroup:groupContextProto];
+                    break;
+                }
+                case GroupsVersionV2: {
+                    if (![groupThread.groupModel isKindOfClass:[TSGroupModelV2 class]]) {
+                        OWSFailDebug(@"Invalid group model.");
+                        return nil;
+                    }
+                    TSGroupModelV2 *groupModel = (TSGroupModelV2 *)groupThread.groupModel;
+
+                    NSError *error;
+                    SSKProtoGroupContextV2 *_Nullable groupContextV2 =
+                        [self.groupsV2 buildGroupContextV2ProtoWithGroupModel:groupModel
+                                                       changeActionsProtoData:nil
+                                                                        error:&error];
+                    if (groupContextV2 == nil || error != nil) {
+                        OWSFailDebug(@"Error: %@", error);
+                        return nil;
+                    }
+                    [dataBuilder setGroupV2:groupContextV2];
+                    break;
+                }
             }
-            [dataBuilder setGroup:groupContextProto];
         }
         
         NSError *error;

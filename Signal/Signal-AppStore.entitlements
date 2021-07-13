@@ -7,24 +7,16 @@
 	<key>com.apple.developer.associated-domains</key>
 	<array>
 		<string>applinks:signal.art</string>
+		<string>applinks:signal.group</string>
 	</array>
 	<key>com.apple.developer.default-data-protection</key>
 	<string>NSFileProtectionComplete</string>
-	<key>com.apple.developer.icloud-container-identifiers</key>
+	<key>com.apple.developer.in-app-payments</key>
 	<array>
-		<string>iCloud.$(CFBundleIdentifier)</string>
-	</array>
-	<key>com.apple.developer.icloud-services</key>
-	<array>
-		<string>CloudDocuments</string>
-		<string>CloudKit</string>
+		<string>merchant.org.signalfoundation</string>
 	</array>
 	<key>com.apple.developer.pushkit.unrestricted-voip</key>
 	<true/>
-	<key>com.apple.developer.ubiquity-container-identifiers</key>
-	<array>
-		<string>iCloud.$(CFBundleIdentifier)</string>
-	</array>
 	<key>com.apple.security.application-groups</key>
 	<array>
 		<string>group.org.whispersystems.signal.group</string>

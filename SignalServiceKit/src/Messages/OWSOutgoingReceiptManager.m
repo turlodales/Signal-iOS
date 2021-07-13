@@ -1,23 +1,24 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSOutgoingReceiptManager.h"
-#import "AppReadiness.h"
-#import "OWSError.h"
-#import "OWSMessageSender.h"
-#import "OWSReceiptsForSenderMessage.h"
-#import "SSKEnvironment.h"
-#import "TSContactThread.h"
-#import "TSYapDatabaseObject.h"
 #import <PromiseKit/AnyPromise.h>
+#import <SignalServiceKit/AppReadiness.h>
+#import <SignalServiceKit/MessageSender.h>
+#import <SignalServiceKit/OWSError.h>
+#import <SignalServiceKit/OWSOutgoingReceiptManager.h>
+#import <SignalServiceKit/OWSReceiptsForSenderMessage.h>
+#import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSContactThread.h>
+#import <SignalServiceKit/TSYapDatabaseObject.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSUInteger, OWSReceiptType) {
     OWSReceiptType_Delivery,
     OWSReceiptType_Read,
+    OWSReceiptType_Viewed,
 };
 
 @interface OWSOutgoingReceiptManager ()
@@ -31,15 +32,6 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
 
 @implementation OWSOutgoingReceiptManager
 
-#pragma mark - Dependencies
-
-- (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
-
-#pragma mark -
-
 + (SDSKeyValueStore *)deliveryReceiptStore
 {
     return [[SDSKeyValueStore alloc] initWithCollection:@"kOutgoingDeliveryReceiptManagerCollection"];
@@ -50,14 +42,12 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
     return [[SDSKeyValueStore alloc] initWithCollection:@"kOutgoingReadReceiptManagerCollection"];
 }
 
-#pragma mark -
-
-+ (instancetype)sharedManager
++ (SDSKeyValueStore *)viewedReceiptStore
 {
-    OWSAssert(SSKEnvironment.shared.outgoingReceiptManager);
-
-    return SSKEnvironment.shared.outgoingReceiptManager;
+    return [[SDSKeyValueStore alloc] initWithCollection:@"kOutgoingViewedReceiptManagerCollection"];
 }
+
+#pragma mark -
 
 - (instancetype)init
 {
@@ -75,9 +65,7 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
                                                object:nil];
 
     // Start processing.
-    [AppReadiness runNowOrWhenAppDidBecomeReadyPolite:^{
-        [self process];
-    }];
+    AppReadinessRunNowOrWhenAppDidBecomeReadyAsync(^{ [self process]; });
 
     return self;
 }
@@ -86,22 +74,6 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
 {
     [[NSNotificationCenter defaultCenter] removeObserver:self];
 }
-
-#pragma mark - Dependencies
-
-- (OWSMessageSender *)messageSender
-{
-    OWSAssertDebug(SSKEnvironment.shared.messageSender);
-
-    return SSKEnvironment.shared.messageSender;
-}
-
-- (id<SSKReachabilityManager>)reachabilityManager
-{
-    return SSKEnvironment.shared.reachabilityManager;
-}
-
-#pragma mark -
 
 - (dispatch_queue_t)serialQueue
 {
@@ -136,6 +108,7 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
         NSMutableArray<AnyPromise *> *sendPromises = [NSMutableArray array];
         [sendPromises addObjectsFromArray:[self sendReceiptsForReceiptType:OWSReceiptType_Delivery]];
         [sendPromises addObjectsFromArray:[self sendReceiptsForReceiptType:OWSReceiptType_Read]];
+        [sendPromises addObjectsFromArray:[self sendReceiptsForReceiptType:OWSReceiptType_Viewed]];
 
         if (sendPromises.count < 1) {
             // No work to do; abort.
@@ -208,6 +181,12 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
             continue;
         }
 
+        if ([self.blockingManager isAddressBlocked:address]) {
+            OWSLogWarn(@"Skipping send for blocked address: %@", address);
+            [self dequeueReceiptsForAddress:address timestamps:timestamps receiptType:receiptType];
+            continue;
+        }
+
         TSThread *thread = [TSContactThread getOrCreateThreadWithContactAddress:address];
         OWSReceiptsForSenderMessage *message;
         NSString *receiptName;
@@ -222,6 +201,11 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
                 message = [OWSReceiptsForSenderMessage readReceiptsForSenderMessageWithThread:thread
                                                                             messageTimestamps:timestamps.allObjects];
                 receiptName = @"Read";
+                break;
+            case OWSReceiptType_Viewed:
+                message = [OWSReceiptsForSenderMessage viewedReceiptsForSenderMessageWithThread:thread
+                                                                              messageTimestamps:timestamps.allObjects];
+                receiptName = @"Viewed";
                 break;
         }
 
@@ -270,11 +254,25 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
     [self enqueueReceiptForAddress:address timestamp:timestamp receiptType:OWSReceiptType_Read transaction:transaction];
 }
 
+- (void)enqueueViewedReceiptForAddress:(SignalServiceAddress *)address
+                             timestamp:(uint64_t)timestamp
+                           transaction:(SDSAnyWriteTransaction *)transaction
+{
+    [self enqueueReceiptForAddress:address
+                         timestamp:timestamp
+                       receiptType:OWSReceiptType_Viewed
+                       transaction:transaction];
+}
+
 - (void)enqueueReceiptForAddress:(SignalServiceAddress *)address
                        timestamp:(uint64_t)timestamp
                      receiptType:(OWSReceiptType)receiptType
                      transaction:(SDSAnyWriteTransaction *)transaction
 {
+    if (receiptType == OWSReceiptType_Viewed && !RemoteConfig.viewedReceiptSending) {
+        return;
+    }
+
     SDSKeyValueStore *store = [self storeForReceiptType:receiptType];
 
     OWSAssertDebug(address.isValid);
@@ -315,9 +313,10 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
 
     [store setObject:newTimestamps key:identifier transaction:transaction];
 
-    [transaction addAsyncCompletion:^{
-        [self process];
-    }];
+    [transaction addAsyncCompletionWithQueue:dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0)
+                                       block:^{
+                                           [self process];
+                                       }];
 }
 
 - (void)dequeueReceiptsForAddress:(SignalServiceAddress *)address
@@ -331,7 +330,7 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
         OWSFailDebug(@"Invalid timestamps.");
         return;
     }
-    [self.databaseStorage asyncWriteWithBlock:^(SDSAnyWriteTransaction *transaction) {
+    DatabaseStorageAsyncWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
         NSString *identifier = address.uuidString ?: address.phoneNumber;
 
         NSSet<NSNumber *> *_Nullable oldUUIDTimestamps;
@@ -368,7 +367,7 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
         } else {
             [store removeValueForKey:identifier transaction:transaction];
         }
-    }];
+    });
 }
 
 - (void)reachabilityChanged
@@ -385,6 +384,8 @@ typedef NS_ENUM(NSUInteger, OWSReceiptType) {
             return OWSOutgoingReceiptManager.deliveryReceiptStore;
         case OWSReceiptType_Read:
             return OWSOutgoingReceiptManager.readReceiptStore;
+        case OWSReceiptType_Viewed:
+            return OWSOutgoingReceiptManager.viewedReceiptStore;
     }
 }
 

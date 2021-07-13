@@ -11,13 +11,10 @@ extension NSError {
     // Use HTTPStatusCodeForError() instead.
     @objc
     public func afHttpStatusCode() -> NSNumber? {
-        guard domain == AFURLResponseSerializationErrorDomain else {
+        guard let statusCode = afFailingHTTPURLResponse?.statusCode else {
             return nil
         }
-        guard let response = userInfo[AFNetworkingOperationFailingURLResponseErrorKey] as? HTTPURLResponse else {
-            return nil
-        }
-        return NSNumber(value: response.statusCode)
+        return NSNumber(value: statusCode)
     }
 
     @objc
@@ -30,6 +27,18 @@ extension NSError {
             return false
         }
         return 400 <= statusCode && statusCode <= 499
+    }
+
+    @objc
+    public func afRetryAfterDate() -> Date? {
+        return afFailingHTTPURLResponse?.retryAfterDate()
+    }
+
+    private var afFailingHTTPURLResponse: HTTPURLResponse? {
+        guard domain == AFURLResponseSerializationErrorDomain else {
+            return nil
+        }
+        return userInfo[AFNetworkingOperationFailingURLResponseErrorKey] as? HTTPURLResponse
     }
 }
 
@@ -50,6 +59,12 @@ public extension OperationError {
 extension NSError: OperationError { }
 
 extension OWSAssertionError: OperationError {
+    public var isRetryable: Bool {
+        return false
+    }
+}
+
+extension OWSGenericError: OperationError {
     public var isRetryable: Bool {
         return false
     }
@@ -93,5 +108,33 @@ extension OWSOperation {
     /// @param `error` may or may not have defined it's retry behavior.
     public func reportError(withUndefinedRetry error: Error) {
         __reportError(error)
+    }
+}
+
+// MARK: -
+
+public extension Error {
+
+    // This only only handles the common case wherein:
+    //
+    // * Only network failures should be retried.
+    // * Network failures can be discriminated using IsNetworkConnectivityFailure().
+    //
+    // There are some cases where those assumptions don't hold
+    // and withDefaultRetry() should not be used in those cases.
+    var withDefaultRetry: NSError {
+        IsNetworkConnectivityFailure(self) ? asRetryableError : asUnretryableError
+    }
+
+    var asRetryableError: NSError {
+        let nsError = self as NSError
+        nsError.isRetryable = true
+        return nsError
+    }
+
+    var asUnretryableError: NSError {
+        let nsError = self as NSError
+        nsError.isRetryable = false
+        return nsError
     }
 }

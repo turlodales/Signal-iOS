@@ -1,8 +1,9 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "InstalledSticker.h"
+#import <SignalServiceKit/InstalledSticker.h>
+#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -13,7 +14,9 @@ NS_ASSUME_NONNULL_BEGIN
     return [super initWithCoder:coder];
 }
 
-- (instancetype)initWithInfo:(StickerInfo *)info emojiString:(nullable NSString *)emojiString
+- (instancetype)initWithInfo:(StickerInfo *)info
+                 contentType:(nullable NSString *)contentType
+                 emojiString:(nullable NSString *)emojiString
 {
     OWSAssertDebug(info.packId.length > 0);
     OWSAssertDebug(info.packKey.length > 0);
@@ -25,6 +28,9 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     _info = info;
+    if (contentType.length > 0) {
+        _contentType = contentType;
+    }
     _emojiString = emojiString;
 
     return self;
@@ -53,6 +59,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithGrdbId:(int64_t)grdbId
                       uniqueId:(NSString *)uniqueId
+                     contentType:(nullable NSString *)contentType
                      emojiString:(nullable NSString *)emojiString
                             info:(StickerInfo *)info
 {
@@ -63,6 +70,7 @@ NS_ASSUME_NONNULL_BEGIN
         return self;
     }
 
+    _contentType = contentType;
     _emojiString = emojiString;
     _info = info;
 
@@ -76,6 +84,29 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSString *)uniqueIdForStickerInfo:(StickerInfo *)info
 {
     return info.asKey;
+}
+
+#pragma mark -
+
+- (void)anyDidInsertWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    [super anyDidInsertWithTransaction:transaction];
+
+    [self.modelReadCaches.installedStickerCache didInsertOrUpdateInstalledSticker:self transaction:transaction];
+}
+
+- (void)anyDidUpdateWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    [super anyDidUpdateWithTransaction:transaction];
+
+    [self.modelReadCaches.installedStickerCache didInsertOrUpdateInstalledSticker:self transaction:transaction];
+}
+
+- (void)anyDidRemoveWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    [super anyDidRemoveWithTransaction:transaction];
+
+    [self.modelReadCaches.installedStickerCache didRemoveInstalledSticker:self transaction:transaction];
 }
 
 @end

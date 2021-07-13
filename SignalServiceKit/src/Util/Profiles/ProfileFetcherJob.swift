@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -13,6 +13,7 @@ public enum ProfileFetchError: Int, Error {
     case notMainApp
     case cantRequestVersionedProfile
     case rateLimit
+    case unauthorized
 }
 
 // MARK: -
@@ -30,6 +31,8 @@ extension ProfileFetchError: CustomStringConvertible {
             return "ProfileFetchError.cantRequestVersionedProfile"
         case .rateLimit:
             return "ProfileFetchError.rateLimit"
+        case .unauthorized:
+            return "ProfileFetchError.unauthorized"
         }
     }
 }
@@ -38,7 +41,7 @@ extension ProfileFetchError: CustomStringConvertible {
 
 @objc
 public enum ProfileFetchType: UInt {
-    // .default fetches honor FeatureFlag.versionedProfiledFetches
+    // .default fetches honor FeatureFlag.versionedProfileFetches
     case `default`
     case unversioned
     case versioned
@@ -57,7 +60,7 @@ public class ProfileFetchOptions: NSObject {
                      ignoreThrottling: Bool = false,
                      fetchType: ProfileFetchType = .default) {
         self.mainAppOnly = mainAppOnly
-        self.ignoreThrottling = ignoreThrottling
+        self.ignoreThrottling = ignoreThrottling || DebugFlags.aggressiveProfileFetching.get()
         self.fetchType = fetchType
     }
 }
@@ -106,38 +109,35 @@ extension ProfileRequestSubject: CustomStringConvertible {
 
 // MARK: -
 
-private struct FetchedProfile {
-    let profile: SignalServiceProfile
-    let versionedProfileRequest: VersionedProfileRequest?
-}
-
-// MARK: -
-
 @objc
 public class ProfileFetcherJob: NSObject {
 
+    private static let queueCluster = GCDQueueCluster(label: "org.signal.profileFetcherJob",
+                                                      concurrency: 5)
+
     // This property is only accessed on the serial queue.
     private static var fetchDateMap = [ProfileRequestSubject: Date]()
-    private static let serialQueue = DispatchQueue(label: "org.signal.profileFetcherJob")
 
     private let subject: ProfileRequestSubject
     private let options: ProfileFetchOptions
 
     private var backgroundTask: OWSBackgroundTask?
 
+    private static let unfairLock = UnfairLock()
+
     @objc
-    public class func fetchAndUpdateProfilePromiseObjc(address: SignalServiceAddress,
-                                                       mainAppOnly: Bool,
-                                                       ignoreThrottling: Bool) -> AnyPromise {
-        return AnyPromise(fetchAndUpdateProfilePromise(address: address,
-                                                       mainAppOnly: mainAppOnly,
-                                                       ignoreThrottling: ignoreThrottling))
+    public class func fetchProfilePromiseObjc(address: SignalServiceAddress,
+                                              mainAppOnly: Bool,
+                                              ignoreThrottling: Bool) -> AnyPromise {
+        return AnyPromise(fetchProfilePromise(address: address,
+                                              mainAppOnly: mainAppOnly,
+                                              ignoreThrottling: ignoreThrottling))
     }
 
-    public class func fetchAndUpdateProfilePromise(address: SignalServiceAddress,
-                                                   mainAppOnly: Bool = true,
-                                                   ignoreThrottling: Bool = false,
-                                                   fetchType: ProfileFetchType = .default) -> Promise<SignalServiceProfile> {
+    public class func fetchProfilePromise(address: SignalServiceAddress,
+                                          mainAppOnly: Bool = true,
+                                          ignoreThrottling: Bool = false,
+                                          fetchType: ProfileFetchType = .default) -> Promise<FetchedProfile> {
         let subject = ProfileRequestSubject.address(address: address)
         let options = ProfileFetchOptions(mainAppOnly: mainAppOnly,
                                           ignoreThrottling: ignoreThrottling,
@@ -146,27 +146,42 @@ public class ProfileFetcherJob: NSObject {
     }
 
     @objc
-    public class func fetchAndUpdateProfile(address: SignalServiceAddress, ignoreThrottling: Bool) {
+    public class func fetchProfile(address: SignalServiceAddress, ignoreThrottling: Bool) {
         let subject = ProfileRequestSubject.address(address: address)
         let options = ProfileFetchOptions(ignoreThrottling: ignoreThrottling)
         firstly {
             ProfileFetcherJob(subject: subject, options: options).runAsPromise()
         }.catch { error in
-            owsFailDebug("Error: \(error)")
+            if error.isNetworkFailureOrTimeout {
+                Logger.warn("Error: \(error)")
+            } else {
+                switch error {
+                case ProfileFetchError.missing:
+                    Logger.warn("Error: \(error)")
+                case ProfileFetchError.unauthorized:
+                    if self.tsAccountManager.isRegisteredAndReady {
+                        owsFailDebug("Error: \(error)")
+                    } else {
+                        Logger.warn("Error: \(error)")
+                    }
+                default:
+                    owsFailDebug("Error: \(error)")
+                }
+            }
         }
     }
 
     @objc
-    public class func fetchAndUpdateProfile(username: String,
-                                            success: @escaping (_ address: SignalServiceAddress) -> Void,
-                                            notFound: @escaping () -> Void,
-                                            failure: @escaping (_ error: Error?) -> Void) {
+    public class func fetchProfile(username: String,
+                                   success: @escaping (_ address: SignalServiceAddress) -> Void,
+                                   notFound: @escaping () -> Void,
+                                   failure: @escaping (_ error: Error?) -> Void) {
         let subject = ProfileRequestSubject.username(username: username)
         let options = ProfileFetchOptions(ignoreThrottling: true)
         firstly {
             ProfileFetcherJob(subject: subject, options: options).runAsPromise()
-        }.done { profile in
-                success(profile.address)
+        }.done { fetchedProfile in
+            success(fetchedProfile.profile.address)
         }.catch { error in
             switch error {
             case ProfileFetchError.missing:
@@ -183,61 +198,18 @@ public class ProfileFetcherJob: NSObject {
         self.options = options
     }
 
-    // MARK: - Dependencies
-
-    private var networkManager: TSNetworkManager {
-        return SSKEnvironment.shared.networkManager
-    }
-
-    private var socketManager: TSSocketManager {
-        return TSSocketManager.shared
-    }
-
-    private var udManager: OWSUDManager {
-        return SSKEnvironment.shared.udManager
-    }
-
-    private var profileManager: ProfileManagerProtocol {
-        return SSKEnvironment.shared.profileManager
-    }
-
-    private var identityManager: OWSIdentityManager {
-        return SSKEnvironment.shared.identityManager
-    }
-
-    private var signalServiceClient: SignalServiceClient {
-        // TODO hang on SSKEnvironment
-        return SignalServiceRestClient()
-    }
-
-    private var tsAccountManager: TSAccountManager {
-        return SSKEnvironment.shared.tsAccountManager
-    }
-
-    private var sessionStore: SSKSessionStore {
-        return SSKSessionStore()
-    }
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    private var versionedProfiles: VersionedProfiles {
-        return SSKEnvironment.shared.versionedProfiles
-    }
-
     // MARK: -
 
-    private func runAsPromise() -> Promise<SignalServiceProfile> {
+    private func runAsPromise() -> Promise<FetchedProfile> {
         return DispatchQueue.main.async(.promise) {
             self.addBackgroundTask()
-        }.then(on: DispatchQueue.global()) { _ in
-            return self.requestProfile()
-        }.then(on: DispatchQueue.global()) { fetchedProfile in
-            return firstly {
+        }.then(on: Self.queueCluster.next()) { _ in
+            self.requestProfile()
+        }.then(on: Self.queueCluster.next()) { fetchedProfile in
+            firstly {
                 self.updateProfile(fetchedProfile: fetchedProfile)
-            }.map(on: DispatchQueue.global()) { _ in
-                return fetchedProfile.profile
+            }.map(on: Self.queueCluster.next()) { _ in
+                return fetchedProfile
             }
         }
     }
@@ -259,8 +231,7 @@ public class ProfileFetcherJob: NSObject {
                 //
                 // Throttle less in debug to make it easier to test problems
                 // with our fetching logic.
-                let kGetProfileMaxFrequencySeconds = _isDebugAssertConfiguration() ? 60 : 60.0 * 5.0
-                guard lastTimeInterval > kGetProfileMaxFrequencySeconds else {
+                guard lastTimeInterval > Self.throttledProfileFetchFrequency else {
                     return Promise(error: ProfileFetchError.throttled)
                 }
             }
@@ -271,15 +242,22 @@ public class ProfileFetcherJob: NSObject {
         return requestProfileWithRetries()
     }
 
+    private static var throttledProfileFetchFrequency: TimeInterval {
+        kMinuteInterval * 2.0
+    }
+
     private func requestProfileWithRetries(retryCount: Int = 0) -> Promise<FetchedProfile> {
         let subject = self.subject
 
         let (promise, resolver) = Promise<FetchedProfile>.pending()
         firstly {
             requestProfileAttempt()
-        }.done(on: DispatchQueue.global()) { fetchedProfile in
+        }.done(on: Self.queueCluster.next()) { fetchedProfile in
             resolver.fulfill(fetchedProfile)
-        }.catch(on: DispatchQueue.global()) { error in
+        }.catch(on: Self.queueCluster.next()) { error in
+            if error.httpStatusCode == 401 {
+                return resolver.reject(ProfileFetchError.unauthorized)
+            }
             if error.httpStatusCode == 404 {
                 return resolver.reject(ProfileFetchError.missing)
             }
@@ -318,9 +296,9 @@ public class ProfileFetcherJob: NSObject {
 
                 firstly {
                     self.requestProfileWithRetries(retryCount: retryCount + 1)
-                }.done(on: DispatchQueue.global()) { fetchedProfile in
+                }.done(on: Self.queueCluster.next()) { fetchedProfile in
                     resolver.fulfill(fetchedProfile)
-                }.catch(on: DispatchQueue.global()) { error in
+                }.catch(on: Self.queueCluster.next()) { error in
                     resolver.reject(error)
                 }
             }
@@ -347,16 +325,20 @@ public class ProfileFetcherJob: NSObject {
         let request = OWSRequestFactory.getProfileRequest(withUsername: username)
         return firstly {
             return networkManager.makePromise(request: request)
-        }.map(on: DispatchQueue.global()) {
+        }.map(on: Self.queueCluster.next()) {
             let profile = try SignalServiceProfile(address: nil, responseObject: $1)
-            return FetchedProfile(profile: profile, versionedProfileRequest: nil)
+            let profileKey = self.profileKey(forProfile: profile,
+                                             versionedProfileRequest: nil)
+            return FetchedProfile(profile: profile,
+                                  versionedProfileRequest: nil,
+                                  profileKey: profileKey)
         }
     }
 
     private var shouldUseVersionedFetchForUuids: Bool {
         switch options.fetchType {
         case .default:
-            return FeatureFlags.versionedProfiledFetches
+            return true
         case .versioned:
             return true
         case .unversioned:
@@ -368,18 +350,14 @@ public class ProfileFetcherJob: NSObject {
         Logger.verbose("address: \(address)")
 
         let shouldUseVersionedFetch = (shouldUseVersionedFetchForUuids
-            && address.uuid != nil)
+                                        && address.uuid != nil)
 
         let udAccess: OWSUDAccess?
         if address.isLocalAddress {
             // Don't use UD for "self" profile fetches.
             udAccess = nil
         } else {
-            udAccess = databaseStorage.write { transaction in
-                return self.udManager.udAccess(forAddress: address,
-                                               requireSyncAccess: false,
-                                               transaction: transaction)
-            }
+            udAccess = udManager.udAccess(forAddress: address, requireSyncAccess: false)
         }
 
         let canFailoverUDAuth = true
@@ -399,57 +377,215 @@ public class ProfileFetcherJob: NSObject {
                                                     return nil
                                                 }
                                             } else {
+                                                Logger.info("Unversioned profile fetch.")
                                                 return OWSRequestFactory.getUnversionedProfileRequest(address: address, udAccessKey: udAccessKeyForRequest)
                                             }
-        }, udAuthFailureBlock: {
-            // Do nothing
-        }, websocketFailureBlock: {
-            // Do nothing
-        }, address: address,
-           udAccess: udAccess,
-           canFailoverUDAuth: canFailoverUDAuth)
+                                        }, udAuthFailureBlock: {
+                                            // Do nothing
+                                        }, websocketFailureBlock: {
+                                            // Do nothing
+                                        }, address: address,
+                                        udAccess: udAccess,
+                                        canFailoverUDAuth: canFailoverUDAuth)
 
         return firstly {
             return requestMaker.makeRequest()
-        }.map(on: DispatchQueue.global()) { (result: RequestMakerResult) -> FetchedProfile in
+        }.map(on: Self.queueCluster.next()) { (result: RequestMakerResult) -> FetchedProfile in
             let profile = try SignalServiceProfile(address: address, responseObject: result.responseObject)
-            return FetchedProfile(profile: profile, versionedProfileRequest: currentVersionedProfileRequest)
+            let profileKey = self.profileKey(forProfile: profile,
+                                             versionedProfileRequest: currentVersionedProfileRequest)
+            return FetchedProfile(profile: profile,
+                                  versionedProfileRequest: currentVersionedProfileRequest,
+                                  profileKey: profileKey)
         }
+    }
+
+    private func updateProfile(fetchedProfile: FetchedProfile) -> Promise<Void> {
+        // Before we update the profile, try to download and decrypt
+        // the avatar data, if necessary.
+
+        let profileAddress = fetchedProfile.profile.address
+        guard let profileKey = fetchedProfile.profileKey else {
+            // If we don't have a profile key for this user, don't bother
+            // downloading their avatar - we can't decrypt it.
+            return updateProfile(fetchedProfile: fetchedProfile,
+                                 profileKey: nil,
+                                 optionalAvatarData: nil)
+        }
+
+        guard let avatarUrlPath = fetchedProfile.profile.avatarUrlPath else {
+            // If profile has no avatar, we don't need to download the avatar.
+            return updateProfile(fetchedProfile: fetchedProfile,
+                                 profileKey: profileKey,
+                                 optionalAvatarData: nil)
+        }
+
+        let hasExistingAvatarData = databaseStorage.read { (transaction: SDSAnyReadTransaction) -> Bool in
+            guard let oldAvatarURLPath = self.profileManager.profileAvatarURLPath(for: profileAddress,
+                                                                                  transaction: transaction),
+                  oldAvatarURLPath == avatarUrlPath else {
+                return false
+            }
+            return self.profileManager.hasProfileAvatarData(profileAddress, transaction: transaction)
+        }
+        if hasExistingAvatarData {
+            Logger.verbose("Skipping avatar data download; already downloaded.")
+            return updateProfile(fetchedProfile: fetchedProfile,
+                                 profileKey: profileKey,
+                                 optionalAvatarData: nil)
+        }
+
+        return firstly { () -> AnyPromise in
+            profileManager.downloadAndDecryptProfileAvatar(forProfileAddress: profileAddress,
+                                                           avatarUrlPath: avatarUrlPath,
+                                                           profileKey: profileKey)
+        }.map(on: Self.queueCluster.next()) { (result: Any?) throws -> Data in
+            guard let avatarData = result as? Data else {
+                Logger.verbose("Unexpected result: \(String(describing: result))")
+                throw OWSAssertionError("Unexpected result.")
+            }
+            return avatarData
+        }.then(on: Self.queueCluster.next()) { (avatarData: Data) -> Promise<Void> in
+            self.updateProfile(fetchedProfile: fetchedProfile,
+                               profileKey: profileKey,
+                               optionalAvatarData: avatarData)
+        }.recover(on: Self.queueCluster.next()) { (error: Error) -> Promise<Void> in
+            if error.isNetworkFailureOrTimeout {
+                Logger.warn("Error: \(error)")
+
+                if profileAddress.isLocalAddress {
+                    // Fetches and local profile updates can conflict.
+                    // To avoid these conflicts we treat "partial"
+                    // profile fetches (where we download the profile
+                    // but not the associated avatar) as failures.
+                    throw error.asUnretryableError
+                }
+            } else {
+                // This should be very rare. It might reflect:
+                //
+                // * A race around rotating profile keys which would cause a
+                //   decryption error.
+                // * An incomplete profile update (profile updated but
+                //   avatar not uploaded afterward). This might be due to
+                //   a race with an update that is in flight.
+                //   We should eventually recover since profile updates are
+                //   durable.
+                Logger.warn("Error: \(error)")
+            }
+            // We made a best effort to download the avatar
+            // before updating the profile.
+            return self.updateProfile(fetchedProfile: fetchedProfile,
+                                      profileKey: profileKey,
+                                      optionalAvatarData: nil)
+        }
+    }
+
+    private func profileKey(forProfile profile: SignalServiceProfile,
+                            versionedProfileRequest: VersionedProfileRequest?) -> OWSAES256Key? {
+        if let profileKey = versionedProfileRequest?.profileKey {
+            if DebugFlags.internalLogging {
+                Logger.info("Using profileKey used in versioned profile request.")
+            }
+            return profileKey
+        }
+        let profileAddress = profile.address
+        if let profileKey = (databaseStorage.read { transaction in
+            self.profileManager.profileKey(for: profileAddress,
+                                           transaction: transaction)
+        }) {
+            if DebugFlags.internalLogging {
+                Logger.info("Using profileKey from database.")
+            }
+            return profileKey
+        }
+        return nil
     }
 
     // TODO: This method can cause many database writes.
     //       Perhaps we can use a single transaction?
-    private func updateProfile(fetchedProfile: FetchedProfile) -> Promise<Void> {
+    private func updateProfile(fetchedProfile: FetchedProfile,
+                               profileKey: OWSAES256Key?,
+                               optionalAvatarData: Data?) -> Promise<Void> {
         let profile = fetchedProfile.profile
         let address = profile.address
+
+        var givenName: String?
+        var familyName: String?
+        var bio: String?
+        var bioEmoji: String?
+        var paymentAddress: TSPaymentAddress?
+        if let decryptedProfile = fetchedProfile.decryptedProfile {
+            givenName = decryptedProfile.givenName?.nilIfEmpty
+            familyName = decryptedProfile.familyName?.nilIfEmpty
+            bio = decryptedProfile.bio?.nilIfEmpty
+            bioEmoji = decryptedProfile.bioEmoji?.nilIfEmpty
+            paymentAddress = decryptedProfile.paymentAddress
+        }
+        let username = profile.username
+
+        if DebugFlags.internalLogging {
+            let isVersionedProfile = fetchedProfile.versionedProfileRequest != nil
+            let profileKeyDescription = profileKey?.keyData.hexadecimalString ?? "None"
+            let hasAvatar = profile.avatarUrlPath != nil
+            let hasProfileNameEncrypted = profile.profileNameEncrypted != nil
+            let hasGivenName = givenName?.count ?? 0 > 0
+            let hasFamilyName = familyName?.count ?? 0 > 0
+            let hasBio = bio?.count ?? 0 > 0
+            let hasBioEmoji = bioEmoji?.count ?? 0 > 0
+            let hasUsername = username?.count ?? 0 > 0
+            let hasPaymentAddress = paymentAddress != nil
+
+            Logger.info("address: \(address), " +
+                            "isVersionedProfile: \(isVersionedProfile), " +
+                            "hasAvatar: \(hasAvatar), " +
+                            "hasProfileNameEncrypted: \(hasProfileNameEncrypted), " +
+                            "hasGivenName: \(hasGivenName), " +
+                            "hasFamilyName: \(hasFamilyName), " +
+                            "hasBio: \(hasBio), " +
+                            "hasBioEmoji: \(hasBioEmoji), " +
+                            "hasUsername: \(hasUsername), " +
+                            "hasPaymentAddress: \(hasPaymentAddress), " +
+                            "profileKey: \(profileKeyDescription)")
+        }
 
         if let profileRequest = fetchedProfile.versionedProfileRequest {
             self.versionedProfiles.didFetchProfile(profile: profile, profileRequest: profileRequest)
         }
 
         profileManager.updateProfile(for: address,
-                                     profileNameEncrypted: profile.profileNameEncrypted,
+                                     givenName: givenName,
+                                     familyName: familyName,
+                                     bio: bio,
+                                     bioEmoji: bioEmoji,
                                      username: profile.username,
-                                     isUuidCapable: profile.supportsUUID,
-                                     avatarUrlPath: profile.avatarUrlPath)
+                                     isUuidCapable: true,
+                                     avatarUrlPath: profile.avatarUrlPath,
+                                     optionalDecryptedAvatarData: optionalAvatarData,
+                                     lastFetch: Date(),
+                                     userProfileWriter: .profileFetch)
 
         updateUnidentifiedAccess(address: address,
                                  verifier: profile.unidentifiedAccessVerifier,
                                  hasUnrestrictedAccess: profile.hasUnrestrictedUnidentifiedAccess)
 
         if address.isLocalAddress,
-            DebugFlags.groupsV2memberStatusIndicators {
+           DebugFlags.groupsV2memberStatusIndicators {
             Logger.info("supportsGroupsV2: \(profile.supportsGroupsV2)")
         }
 
         return databaseStorage.write(.promise) { transaction in
-            GroupManager.setUserHasGroupsV2Capability(address: address,
-                                                      value: profile.supportsGroupsV2,
-                                                      transaction: transaction)
+            GroupManager.setUserCapabilities(address: address,
+                                             hasGroupsV2Capability: profile.supportsGroupsV2,
+                                             hasGroupsV2MigrationCapability: profile.supportsGroupsV2Migration,
+                                             transaction: transaction)
 
             self.verifyIdentityUpToDate(address: address,
                                         latestIdentityKey: profile.identityKey,
                                         transaction: transaction)
+
+            self.payments.setArePaymentsEnabled(for: address,
+                                                hasPaymentsEnabled: paymentAddress != nil,
+                                                transaction: transaction)
         }
     }
 
@@ -472,7 +608,7 @@ public class ProfileFetcherJob: NSObject {
         }
 
         let dataToVerify = Data(count: 32)
-        guard let expectedVerifier = Cryptography.computeSHA256HMAC(dataToVerify, withHMACKey: udAccessKey.keyData) else {
+        guard let expectedVerifier = Cryptography.computeSHA256HMAC(dataToVerify, key: udAccessKey.keyData) else {
             owsFailDebug("could not compute verification")
             udManager.setUnidentifiedAccessMode(.disabled, address: address)
             return
@@ -499,13 +635,13 @@ public class ProfileFetcherJob: NSObject {
     }
 
     private func lastFetchDate(for subject: ProfileRequestSubject) -> Date? {
-        return ProfileFetcherJob.serialQueue.sync {
-            return ProfileFetcherJob.fetchDateMap[subject]
+        Self.unfairLock.withLock {
+            ProfileFetcherJob.fetchDateMap[subject]
         }
     }
 
     private func recordLastFetchDate(for subject: ProfileRequestSubject) {
-        ProfileFetcherJob.serialQueue.sync {
+        Self.unfairLock.withLock {
             ProfileFetcherJob.fetchDateMap[subject] = Date()
         }
     }
@@ -522,5 +658,140 @@ public class ProfileFetcherJob: NSObject {
             }
             Logger.error("background task time ran out before profile fetch completed.")
         })
+    }
+}
+
+// MARK: -
+
+public struct DecryptedProfile: Dependencies {
+    public let givenName: String?
+    public let familyName: String?
+    public let bio: String?
+    public let bioEmoji: String?
+    public let paymentAddressData: Data?
+    public let publicIdentityKey: Data
+}
+
+// MARK: -
+
+public struct FetchedProfile {
+    let profile: SignalServiceProfile
+    let versionedProfileRequest: VersionedProfileRequest?
+    let profileKey: OWSAES256Key?
+    public let decryptedProfile: DecryptedProfile?
+
+    init(profile: SignalServiceProfile,
+         versionedProfileRequest: VersionedProfileRequest?,
+         profileKey: OWSAES256Key?) {
+        self.profile = profile
+        self.versionedProfileRequest = versionedProfileRequest
+        self.profileKey = profileKey
+        self.decryptedProfile = Self.decrypt(profile: profile,
+                                             versionedProfileRequest: versionedProfileRequest,
+                                             profileKey: profileKey)
+    }
+
+    private static func decrypt(profile: SignalServiceProfile,
+                                versionedProfileRequest: VersionedProfileRequest?,
+                                profileKey: OWSAES256Key?) -> DecryptedProfile? {
+        guard let profileKey = profileKey else {
+            return nil
+        }
+        var givenName: String?
+        var familyName: String?
+        var bio: String?
+        var bioEmoji: String?
+        var paymentAddressData: Data?
+        if let profileNameEncrypted = profile.profileNameEncrypted,
+           let profileNameComponents = OWSUserProfile.decrypt(profileNameData: profileNameEncrypted,
+                                                              profileKey: profileKey,
+                                                              address: profile.address) {
+            givenName = profileNameComponents.givenName?.ows_stripped()
+            familyName = profileNameComponents.familyName?.ows_stripped()
+        }
+        if let bioEncrypted = profile.bioEncrypted {
+            bio = OWSUserProfile.decrypt(profileStringData: bioEncrypted,
+                                         profileKey: profileKey)
+        }
+        if let bioEmojiEncrypted = profile.bioEmojiEncrypted {
+            bioEmoji = OWSUserProfile.decrypt(profileStringData: bioEmojiEncrypted,
+                                              profileKey: profileKey)
+        }
+        if let paymentAddressEncrypted = profile.paymentAddressEncrypted {
+            paymentAddressData = OWSUserProfile.decrypt(profileData: paymentAddressEncrypted,
+                                                        profileKey: profileKey)
+        }
+        let publicIdentityKey = profile.identityKey
+        return DecryptedProfile(givenName: givenName,
+                                familyName: familyName,
+                                bio: bio,
+                                bioEmoji: bioEmoji,
+                                paymentAddressData: paymentAddressData,
+                                publicIdentityKey: publicIdentityKey)
+    }
+}
+
+// MARK: -
+
+public extension DecryptedProfile {
+
+    var paymentAddress: TSPaymentAddress? {
+        guard payments.arePaymentsEnabled else {
+            return nil
+        }
+        guard let paymentAddressDataWithLength = paymentAddressData else {
+            return nil
+        }
+
+        do {
+            let byteParser = ByteParser(data: paymentAddressDataWithLength, littleEndian: true)
+            let length = byteParser.nextUInt32()
+            guard length > 0 else {
+                return nil
+            }
+            guard let paymentAddressDataWithoutLength = byteParser.readBytes(UInt(length)) else {
+                owsFailDebug("Invalid payment address.")
+                return nil
+            }
+            let proto = try SSKProtoPaymentAddress(serializedData: paymentAddressDataWithoutLength)
+            let paymentAddress = try TSPaymentAddress.fromProto(proto, publicIdentityKey: publicIdentityKey)
+            return paymentAddress
+        } catch {
+            owsFailDebug("Error: \(error)")
+            return nil
+        }
+    }
+}
+
+// MARK: -
+
+// A simple mechanism for distributing workload across multiple serial queues.
+// Allows concurrency while avoiding thread explosion.
+//
+// TODO: Move this to DispatchQueue+OWS.swift if we adopt it elsewhere.
+public class GCDQueueCluster {
+    private static let unfairLock = UnfairLock()
+
+    private let queues: [DispatchQueue]
+
+    private let counter = AtomicUInt(0)
+
+    public required init(label: String, concurrency: UInt) {
+        if concurrency < 1 {
+            owsFailDebug("Invalid concurrency.")
+        }
+        let concurrency = max(1, concurrency)
+        var queues = [DispatchQueue]()
+        for index in 0..<concurrency {
+            queues.append(DispatchQueue(label: label + ".\(index)"))
+        }
+        self.queues = queues
+    }
+
+    public func next() -> DispatchQueue {
+        Self.unfairLock.withLock {
+            let index = Int(counter.increment() % UInt(queues.count))
+            return queues[index]
+        }
     }
 }

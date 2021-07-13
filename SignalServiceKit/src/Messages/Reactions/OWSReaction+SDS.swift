@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -162,6 +162,44 @@ extension OWSReaction: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension OWSReaction: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == OWSReaction.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let emoji: String = modelToCopy.emoji
+            let reactorE164: String? = modelToCopy.reactorE164
+            let reactorUUID: String? = modelToCopy.reactorUUID
+            let read: Bool = modelToCopy.read
+            let receivedAtTimestamp: UInt64 = modelToCopy.receivedAtTimestamp
+            let sentAtTimestamp: UInt64 = modelToCopy.sentAtTimestamp
+            let uniqueMessageId: String = modelToCopy.uniqueMessageId
+
+            return OWSReaction(grdbId: id,
+                               uniqueId: uniqueId,
+                               emoji: emoji,
+                               reactorE164: reactorE164,
+                               reactorUUID: reactorUUID,
+                               read: read,
+                               receivedAtTimestamp: receivedAtTimestamp,
+                               sentAtTimestamp: sentAtTimestamp,
+                               uniqueMessageId: uniqueMessageId)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension OWSReactionSerializer {
@@ -304,9 +342,11 @@ public extension OWSReaction {
 
 @objc
 public class OWSReactionCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<ReactionRecord>?
 
-    init(cursor: RecordCursor<ReactionRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<ReactionRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -348,10 +388,10 @@ public extension OWSReaction {
         let database = transaction.database
         do {
             let cursor = try ReactionRecord.fetchCursor(database)
-            return OWSReactionCursor(cursor: cursor)
+            return OWSReactionCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return OWSReactionCursor(cursor: nil)
+            return OWSReactionCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -361,8 +401,6 @@ public extension OWSReaction {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return OWSReaction.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(ReactionRecord.databaseTableName) WHERE \(reactionColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -393,28 +431,20 @@ public extension OWSReaction {
                             batchSize: UInt,
                             block: @escaping (OWSReaction, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            OWSReaction.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? OWSReaction else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = OWSReaction.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = OWSReaction.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -442,10 +472,6 @@ public extension OWSReaction {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: OWSReaction.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -477,8 +503,6 @@ public extension OWSReaction {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: OWSReaction.collection())
         case .grdbRead(let grdbTransaction):
             return ReactionRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -488,8 +512,6 @@ public extension OWSReaction {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: OWSReaction.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try ReactionRecord.deleteAll(grdbTransaction.database)
@@ -538,8 +560,6 @@ public extension OWSReaction {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: OWSReaction.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(ReactionRecord.databaseTableName) WHERE \(reactionColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -557,11 +577,11 @@ public extension OWSReaction {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try ReactionRecord.fetchCursor(transaction.database, sqlRequest)
-            return OWSReactionCursor(cursor: cursor)
+            return OWSReactionCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return OWSReactionCursor(cursor: nil)
+            return OWSReactionCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -615,3 +635,20 @@ class OWSReactionSerializer: SDSSerializer {
         return ReactionRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, emoji: emoji, reactorE164: reactorE164, reactorUUID: reactorUUID, receivedAtTimestamp: receivedAtTimestamp, sentAtTimestamp: sentAtTimestamp, uniqueMessageId: uniqueMessageId, read: read)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension OWSReaction {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> OWSReaction {
+        guard let record = try asRecord() as? ReactionRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try OWSReaction.fromRecord(record)
+    }
+}
+#endif

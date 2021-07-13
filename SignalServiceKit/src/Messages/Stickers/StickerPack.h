@@ -1,9 +1,9 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "BaseModel.h"
-#import "StickerInfo.h"
+#import <SignalServiceKit/BaseModel.h>
+#import <SignalServiceKit/StickerInfo.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -14,8 +14,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, readonly) UInt32 stickerId;
 @property (nonatomic, readonly) NSString *emojiString;
+@property (nonatomic, readonly, nullable) NSString *contentType;
 
-- (instancetype)initWithStickerId:(UInt32)stickerId emojiString:(NSString *)emojiString;
+- (instancetype)initWithStickerId:(UInt32)stickerId
+                      emojiString:(NSString *)emojiString
+                      contentType:(nullable NSString *)contentType;
 
 - (StickerInfo *)stickerInfoWithStickerPack:(StickerPack *)stickerPack;
 

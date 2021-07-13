@@ -1,8 +1,8 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSOutgoingSyncMessage.h"
+#import <SignalServiceKit/OWSOutgoingSyncMessage.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -17,6 +17,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (OWSReceiptsForSenderMessage *)readReceiptsForSenderMessageWithThread:(TSThread *)thread
                                                       messageTimestamps:(NSArray<NSNumber *> *)messageTimestamps;
+
++ (OWSReceiptsForSenderMessage *)viewedReceiptsForSenderMessageWithThread:(TSThread *)thread
+                                                        messageTimestamps:(NSArray<NSNumber *> *)messageTimestamps;
 
 @end
 

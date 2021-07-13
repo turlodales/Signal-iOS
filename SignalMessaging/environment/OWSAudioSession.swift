@@ -1,9 +1,9 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
-import WebRTC
+import AVFoundation
 
 @objc(OWSAudioActivity)
 public class AudioActivity: NSObject {
@@ -13,17 +13,19 @@ public class AudioActivity: NSObject {
 
     @objc public var supportsBackgroundPlayback: Bool {
         // Currently, only audio messages support background playback
-        return behavior == .audioMessagePlayback
+        return [.audioMessagePlayback, .call].contains(behavior)
     }
 
-    @objc public var backgroundPlaybackName: String {
+    @objc public var backgroundPlaybackName: String? {
         switch behavior {
         case .audioMessagePlayback:
             return NSLocalizedString("AUDIO_ACTIVITY_PLAYBACK_NAME_AUDIO_MESSAGE",
                                      comment: "A string indicating that an audio message is playing.")
+        case .call:
+            return nil
         default:
             owsFailDebug("unexpectedly fetched background name for type that doesn't support background playback")
-            return ""
+            return nil
         }
     }
 
@@ -37,12 +39,6 @@ public class AudioActivity: NSObject {
         audioSession.ensureAudioState()
     }
 
-    // MARK: Dependencies
-
-    var audioSession: OWSAudioSession {
-        return Environment.shared.audioSession
-    }
-
     // MARK: 
 
     override public var description: String {
@@ -53,22 +49,32 @@ public class AudioActivity: NSObject {
 @objc
 public class OWSAudioSession: NSObject {
 
-    @objc
-    public func setup() {
-        NotificationCenter.default.addObserver(self, selector: #selector(proximitySensorStateDidChange(notification:)), name: UIDevice.proximityStateDidChangeNotification, object: nil)
-    }
-
-    // MARK: Dependencies
-
-    var proximityMonitoringManager: OWSProximityMonitoringManager {
-        return Environment.shared.proximityMonitoringManager
-    }
-
     private let avAudioSession = AVAudioSession.sharedInstance()
 
     private let device = UIDevice.current
 
-    // MARK: 
+    @objc
+    public required override init() {
+        super.init()
+
+        if CurrentAppContext().isMainApp {
+            AppReadiness.runNowOrWhenAppDidBecomeReadySync {
+                self.setup()
+            }
+        }
+    }
+
+    private func setup() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(proximitySensorStateDidChange(notification:)),
+            name: UIDevice.proximityStateDidChangeNotification,
+            object: nil)
+
+        ensureAudioState()
+    }
+
+    // MARK: -
 
     public private(set) var currentActivities: [Weak<AudioActivity>] = []
     var aggregateBehaviors: Set<OWSAudioBehavior> {
@@ -144,6 +150,9 @@ public class OWSAudioSession: NSObject {
         } else if aggregateBehaviors.contains(.playAndRecord) {
             assert(avAudioSession.recordPermission == .granted)
             try avAudioSession.setCategory(.record)
+            if #available(iOS 13, *) {
+                try avAudioSession.setAllowHapticsAndSystemSoundsDuringRecording(true)
+            }
         } else if aggregateBehaviors.contains(.audioMessagePlayback) {
             if self.device.proximityState {
                 Logger.debug("proximityState: true")
@@ -157,9 +166,9 @@ public class OWSAudioSession: NSObject {
         } else if aggregateBehaviors.contains(.playback) {
             try avAudioSession.setCategory(.playback)
         } else {
-            if avAudioSession.category != AVAudioSession.Category.soloAmbient {
-                Logger.debug("reverting to default audio category: soloAmbient")
-                try avAudioSession.setCategory(.soloAmbient)
+            if avAudioSession.category != AVAudioSession.Category.ambient {
+                Logger.debug("reverting to fallback audio category: ambient")
+                try avAudioSession.setCategory(.ambient)
             }
 
             ensureAudioSessionActivationState()
@@ -212,47 +221,6 @@ public class OWSAudioSession: NSObject {
             } else {
                 owsFailDebug("failed with error: \(error)")
             }
-        }
-    }
-
-    // MARK: - WebRTC Audio
-
-    /**
-     * By default WebRTC starts the audio session (PlayAndRecord) immediately upon creating the peer connection
-     * but we want to create the peer connection and set up all the signaling channels before we prompt the user
-     * for an incoming call. Without manually handling the session, this would result in the user seeing a recording
-     * permission requested (and recording banner) before they even know they have an incoming call.
-     *
-     * By using the `useManualAudio` and `isAudioEnabled` attributes of the RTCAudioSession we can delay recording until
-     * it makes sense.
-     */
-
-    /**
-     * The private class that manages AVAudioSession for WebRTC
-     */
-    private let rtcAudioSession = RTCAudioSession.sharedInstance()
-
-    /**
-     * This must be called before any audio tracks are added to the peerConnection, else we'll start recording before all
-     * our signaling is set up.
-     */
-    @objc
-    public func configureRTCAudio() {
-        Logger.info("")
-        rtcAudioSession.useManualAudio = true
-    }
-
-    /**
-     * Because we useManualAudio with our RTCAudioSession, we have to start/stop the recording audio session ourselves.
-     * See header for details on  manual audio.
-     */
-    @objc
-    public var isRTCAudioEnabled: Bool {
-        get {
-            return rtcAudioSession.isAudioEnabled
-        }
-        set {
-            rtcAudioSession.isAudioEnabled = newValue
         }
     }
 }

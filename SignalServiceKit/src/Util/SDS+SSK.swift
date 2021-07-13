@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -40,3 +40,18 @@ extension SSKJobRecordStatus: DatabaseValueConvertible { }
 
 extension SDSRecordType: Codable { }
 extension SDSRecordType: DatabaseValueConvertible { }
+
+extension TSRecentCallOfferType: Codable { }
+extension TSRecentCallOfferType: DatabaseValueConvertible { }
+
+extension TSPaymentCurrency: Codable { }
+extension TSPaymentCurrency: DatabaseValueConvertible { }
+
+extension TSPaymentState: Codable { }
+extension TSPaymentState: DatabaseValueConvertible { }
+
+extension TSPaymentFailure: Codable { }
+extension TSPaymentFailure: DatabaseValueConvertible { }
+
+extension TSPaymentType: Codable { }
+extension TSPaymentType: DatabaseValueConvertible { }

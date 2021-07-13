@@ -197,7 +197,7 @@ class MegaphoneView: UIView, ExperienceUpgradeView {
         let titleLabel = UILabel()
         titleLabel.numberOfLines = 0
         titleLabel.lineBreakMode = .byWordWrapping
-        titleLabel.font = UIFont.systemFont(ofSize: 17).ows_semibold()
+        titleLabel.font = UIFont.systemFont(ofSize: 17).ows_semibold
         titleLabel.textColor = Theme.darkThemePrimaryColor
         titleLabel.text = titleText
 
@@ -296,7 +296,7 @@ class MegaphoneView: UIView, ExperienceUpgradeView {
             for button in buttons {
                 let buttonView = createButtonView(
                     button,
-                    font: previousButton == nil ? UIFont.systemFont(ofSize: 15).ows_semibold() : .systemFont(ofSize: 15)
+                    font: previousButton == nil ? UIFont.systemFont(ofSize: 15).ows_semibold : .systemFont(ofSize: 15)
                 )
 
                 switch buttonOrientation {
@@ -348,8 +348,8 @@ class MegaphoneView: UIView, ExperienceUpgradeView {
         dismissButton.autoPinEdge(toSuperviewEdge: .top)
     }
 
-    func snoozeButton(fromViewController: UIViewController, snoozeCopy: @escaping () -> String = { MegaphoneStrings.weWillRemindYouLater }) -> Button {
-        return Button(title: MegaphoneStrings.remindMeLater) { [weak self] in
+    func snoozeButton(fromViewController: UIViewController, snoozeTitle: String = MegaphoneStrings.remindMeLater, snoozeCopy: @escaping () -> String = { MegaphoneStrings.weWillRemindYouLater }) -> Button {
+        return Button(title: snoozeTitle) { [weak self] in
             self?.markAsSnoozed()
             self?.dismiss {
                 self?.presentToast(text: snoozeCopy(), fromViewController: fromViewController)

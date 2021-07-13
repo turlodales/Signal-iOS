@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "RegistrationUtils.h"
@@ -14,22 +14,6 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @implementation RegistrationUtils
-
-#pragma mark - Dependencies
-
-+ (TSAccountManager *)tsAccountManager
-{
-    OWSAssertDebug(SSKEnvironment.shared.tsAccountManager);
-    
-    return SSKEnvironment.shared.tsAccountManager;
-}
-
-+ (AccountManager *)accountManager
-{
-    return AppEnvironment.shared.accountManager;
-}
-
-#pragma mark -
 
 + (void)showRelinkingUI
 {
@@ -53,7 +37,7 @@ NS_ASSUME_NONNULL_BEGIN
         return;
     }
 
-    ActionSheetController *actionSheet = [[ActionSheetController alloc] initWithTitle:nil message:nil];
+    ActionSheetController *actionSheet = [ActionSheetController new];
 
     [actionSheet
         addAction:[[ActionSheetAction alloc]
@@ -89,6 +73,8 @@ NS_ASSUME_NONNULL_BEGIN
                                                                             captchaToken:nil
                                                                                    isSMS:true]
                           .then(^{
+                              OWSAssertIsOnMainThread();
+
                               OWSLogInfo(@"re-registering: send verification code succeeded.");
 
                               [modalActivityIndicator dismissWithCompletion:^{
@@ -113,6 +99,8 @@ NS_ASSUME_NONNULL_BEGIN
                               }];
                           })
                           .catch(^(NSError *error) {
+                              OWSAssertIsOnMainThread();
+
                               OWSLogError(@"re-registering: send verification code failed.");
                               [modalActivityIndicator dismissWithCompletion:^{
                                   if (error.code == 400) {

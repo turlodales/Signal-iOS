@@ -1,27 +1,28 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
+import SignalClient
 
 @objc
 public class SignalServiceAddress: NSObject, NSCopying, NSSecureCoding, Codable {
     public static let supportsSecureCoding: Bool = true
 
     private static var cache: SignalServiceAddressCache {
-        return SSKEnvironment.shared.signalServiceAddressCache
+        return Self.signalServiceAddressCache
     }
 
-    private(set) var backingPhoneNumber: String?
+    private let backingPhoneNumber: AtomicOptional<String>
     @objc public var phoneNumber: String? {
-        guard let phoneNumber = backingPhoneNumber else {
+        guard let phoneNumber = backingPhoneNumber.get() else {
             // If we weren't initialized with a phone number, but the phone number exists in the cache, use it
-            guard let uuid = backingUuid,
+            guard let uuid = backingUuid.get(),
                 let cachedPhoneNumber = SignalServiceAddress.cache.phoneNumber(forUuid: uuid)
             else {
                 return nil
             }
-            backingPhoneNumber = cachedPhoneNumber
+            backingPhoneNumber.set(cachedPhoneNumber)
             return cachedPhoneNumber
         }
 
@@ -29,16 +30,17 @@ public class SignalServiceAddress: NSObject, NSCopying, NSSecureCoding, Codable 
     }
 
     // TODO UUID: eventually this can be not optional
-    private(set) var backingUuid: UUID?
+    private let backingUuid: AtomicOptional<UUID>
     @objc public var uuid: UUID? {
-        guard let uuid = backingUuid else {
+        guard let uuid = backingUuid.get() else {
             // If we weren't initialized with a uuid, but the uuid exists in the cache, use it
-            guard let phoneNumber = backingPhoneNumber,
+            guard let phoneNumber = backingPhoneNumber.get(),
                 let cachedUuid = SignalServiceAddress.cache.uuid(forPhoneNumber: phoneNumber)
             else {
                 return nil
             }
-            backingUuid = cachedUuid
+            backingUuid.set(cachedUuid)
+            observeMappingChanges()
             return cachedUuid
         }
 
@@ -68,36 +70,12 @@ public class SignalServiceAddress: NSObject, NSCopying, NSSecureCoding, Codable 
     }
 
     @objc
-    public init(uuid: UUID?, phoneNumber: String?) {
-        if phoneNumber == nil, let uuid = uuid,
-            let cachedPhoneNumber = SignalServiceAddress.cache.phoneNumber(forUuid: uuid) {
-            backingPhoneNumber = cachedPhoneNumber
-        } else {
-            if let phoneNumber = phoneNumber, phoneNumber.isEmpty {
-                owsFailDebug("Unexpectedly initialized signal service address with invalid phone number")
-            }
-
-            backingPhoneNumber = phoneNumber
-        }
-
-        if uuid == nil, let phoneNumber = phoneNumber,
-            let cachedUuid = SignalServiceAddress.cache.uuid(forPhoneNumber: phoneNumber) {
-            backingUuid = cachedUuid
-        } else {
-            backingUuid = uuid
-        }
-
-        backingHashValue = SignalServiceAddress.cache.hashAndCache(uuid: backingUuid, phoneNumber: backingPhoneNumber)
-
-        super.init()
-
-        if !isValid {
-            owsFailDebug("Unexpectedly initialized address with no identifier")
-        }
+    public convenience init(uuidString: String?, phoneNumber: String?) {
+        self.init(uuidString: uuidString, phoneNumber: phoneNumber, trustLevel: .low)
     }
 
     @objc
-    public convenience init(uuidString: String?, phoneNumber: String?) {
+    public convenience init(uuidString: String?, phoneNumber: String?, trustLevel: SignalRecipientTrustLevel) {
         let uuid: UUID?
 
         if let uuidString = uuidString {
@@ -109,21 +87,119 @@ public class SignalServiceAddress: NSObject, NSCopying, NSSecureCoding, Codable 
             uuid = nil
         }
 
-        self.init(uuid: uuid, phoneNumber: phoneNumber)
+        self.init(uuid: uuid, phoneNumber: phoneNumber, trustLevel: trustLevel)
     }
 
-    // MARK: -
+    @objc
+    public convenience init(uuid: UUID?, phoneNumber: String?) {
+        self.init(uuid: uuid, phoneNumber: phoneNumber, trustLevel: .low)
+    }
+
+    internal convenience init(from address: ProtocolAddress) {
+        if let uuid = UUID(uuidString: address.name) {
+            self.init(uuid: uuid)
+        } else {
+            // FIXME: What happens if this is *not* a valid phone number?
+            self.init(phoneNumber: address.name)
+        }
+    }
+
+    @objc
+    public init(uuid: UUID?, phoneNumber: String?, trustLevel: SignalRecipientTrustLevel) {
+        if phoneNumber == nil, let uuid = uuid,
+            let cachedPhoneNumber = SignalServiceAddress.cache.phoneNumber(forUuid: uuid) {
+            backingPhoneNumber = AtomicOptional(cachedPhoneNumber)
+        } else {
+            if let phoneNumber = phoneNumber, phoneNumber.isEmpty {
+                owsFailDebug("Unexpectedly initialized signal service address with invalid phone number")
+            }
+
+            backingPhoneNumber = AtomicOptional(phoneNumber)
+        }
+
+        if uuid == nil, let phoneNumber = phoneNumber,
+            let cachedUuid = SignalServiceAddress.cache.uuid(forPhoneNumber: phoneNumber) {
+            backingUuid = AtomicOptional(cachedUuid)
+        } else {
+            backingUuid = AtomicOptional(uuid)
+        }
+
+        backingHashValue = SignalServiceAddress.cache.hashAndCache(
+            uuid: backingUuid.get(),
+            phoneNumber: backingPhoneNumber.get(),
+            trustLevel: trustLevel
+        )
+
+        super.init()
+
+        if !isValid {
+            owsFailDebug("Unexpectedly initialized address with no identifier")
+        }
+
+        observeMappingChanges()
+    }
+
+    // MARK: - Codable
+
+    private enum CodingKeys: String, CodingKey {
+        case backingUuid, backingPhoneNumber
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(backingUuid.get(), forKey: .backingUuid)
+        // Only encode the backingPhoneNumber if we don't know the UUID
+        try container.encode(backingUuid.get() == nil ? backingPhoneNumber.get() : nil, forKey: .backingPhoneNumber)
+    }
+
+    public required init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+
+        let uuid: UUID? = try container.decodeIfPresent(UUID.self, forKey: .backingUuid)
+
+        // Only decode the backingPhoneNumber if we don't know the UUID, otherwise
+        // pull the phone number from the cache.
+        let phoneNumber: String?
+        if let decodedUuid = uuid {
+            phoneNumber = SignalServiceAddress.cache.phoneNumber(forUuid: decodedUuid)
+        } else {
+            phoneNumber = try container.decodeIfPresent(String.self, forKey: .backingPhoneNumber)
+        }
+
+        backingUuid = AtomicOptional(uuid)
+        backingPhoneNumber = AtomicOptional(phoneNumber)
+        backingHashValue = SignalServiceAddress.cache.hashAndCache(uuid: backingUuid.get(), phoneNumber: backingPhoneNumber.get(), trustLevel: .low)
+
+        super.init()
+
+        observeMappingChanges()
+    }
+
+    // MARK: - NSSecureCoding
 
     public func encode(with aCoder: NSCoder) {
-        aCoder.encode(backingUuid, forKey: "backingUuid")
-        aCoder.encode(backingPhoneNumber, forKey: "backingPhoneNumber")
+        aCoder.encode(backingUuid.get(), forKey: "backingUuid")
+
+        // Only encode the backingPhoneNumber if we don't know the UUID
+        aCoder.encode(backingUuid.get() == nil ? backingPhoneNumber.get() : nil, forKey: "backingPhoneNumber")
     }
 
     public required init?(coder aDecoder: NSCoder) {
-        backingUuid = (aDecoder.decodeObject(of: NSUUID.self, forKey: "backingUuid") as UUID?)
-        backingPhoneNumber = (aDecoder.decodeObject(of: NSString.self, forKey: "backingPhoneNumber") as String?)
+        backingUuid = AtomicOptional(aDecoder.decodeObject(of: NSUUID.self, forKey: "backingUuid") as UUID?)
 
-        backingHashValue = SignalServiceAddress.cache.hashAndCache(uuid: backingUuid, phoneNumber: backingPhoneNumber)
+        // Only decode the backingPhoneNumber if we don't know the UUID, otherwise
+        // pull the phone number from the cache.
+        if let backingUuid = backingUuid.get() {
+            backingPhoneNumber = AtomicOptional(SignalServiceAddress.cache.phoneNumber(forUuid: backingUuid))
+        } else {
+            backingPhoneNumber = AtomicOptional(aDecoder.decodeObject(of: NSString.self, forKey: "backingPhoneNumber") as String?)
+        }
+
+        backingHashValue = SignalServiceAddress.cache.hashAndCache(uuid: backingUuid.get(), phoneNumber: backingPhoneNumber.get(), trustLevel: .low)
+
+        super.init()
+
+        observeMappingChanges()
     }
 
     // MARK: -
@@ -147,7 +223,15 @@ public class SignalServiceAddress: NSObject, NSCopying, NSSecureCoding, Codable 
             return false
         }
 
-        return otherAddress.phoneNumber == phoneNumber && otherAddress.uuid == uuid
+        if let thisUuid = uuid,
+            let otherUuid = otherAddress.uuid {
+            return thisUuid == otherUuid
+        }
+        if phoneNumber != nil ||
+            otherAddress.phoneNumber != nil {
+            return otherAddress.phoneNumber == phoneNumber
+        }
+        return false
     }
 
     // In order to maintain a consistent hash, we use a constant value generated
@@ -199,8 +283,7 @@ public class SignalServiceAddress: NSObject, NSCopying, NSSecureCoding, Codable 
 
     @objc
     public var serviceIdentifier: String? {
-        if FeatureFlags.allowUUIDOnlyContacts,
-            uuid != nil {
+        if uuid != nil {
             guard let uuidString = uuidString else {
                 owsFailDebug("uuidString was unexpectedly nil")
                 return phoneNumber
@@ -220,14 +303,117 @@ public class SignalServiceAddress: NSObject, NSCopying, NSSecureCoding, Codable 
     }
 
     @objc
+    public var sortKey: String {
+        guard let serviceIdentifier = serviceIdentifier else {
+            owsFailDebug("Invalid address.")
+            return "Invalid"
+        }
+        return serviceIdentifier
+    }
+
+    @objc
     override public var description: String {
         return "<SignalServiceAddress phoneNumber: \(phoneNumber ?? "nil"), uuid: \(uuid?.uuidString ?? "nil")>"
     }
+
+    // MARK: - Mapping Changes
+
+    // The "observer" is a weak array of addresses with the
+    // same UUID observing changes to that UUID.
+    private typealias AddressMappingObserver = NSHashTable<SignalServiceAddress>
+
+    // Every address retains a strong reference to its observer.
+    private var mappingObserver = AtomicOptional<AddressMappingObserver>(nil)
+
+    private static let unfairLock = UnfairLock()
+    private static let mappingObserverCache = NSMapTable<NSUUID, AddressMappingObserver>(keyOptions: .strongMemory,
+                                                                                         valueOptions: .weakMemory)
+
+    private func observeMappingChanges() {
+        guard let uuid = backingUuid.get() else {
+            return
+        }
+        guard mappingObserver.get() == nil else {
+            owsFailDebug("There's shouldn't be an existing observer.")
+            return
+        }
+        let observer = Self.unfairLock.withLock { () -> AddressMappingObserver in
+            let observer = { () -> AddressMappingObserver in
+                if let observer = Self.mappingObserverCache.object(forKey: uuid as NSUUID) {
+                    return observer
+                } else {
+                    // * Use weak references to addresses.
+                    // * Use .objectPointerPersonality; this NSHashTable will contain
+                    //   a list of addresses that are all "equal".
+                    let observer = NSHashTable<SignalServiceAddress>(options: [
+                        .weakMemory,
+                        .objectPointerPersonality
+                    ])
+                    Self.mappingObserverCache.setObject(observer, forKey: uuid as NSUUID)
+                    return observer
+                }
+            }()
+            observer.add(self)
+            return observer
+        }
+        // We could race in this method, but in practice it should never happen.
+        // If it did, it wouldn't have any adverse side effects.
+        owsAssertDebug(mappingObserver.get() == nil)
+        mappingObserver.set(observer)
+    }
+
+    fileprivate static func notifyMappingDidChange(forUuid uuid: UUID) {
+        guard let addresses = (Self.unfairLock.withLock { () -> [SignalServiceAddress]? in
+            guard let observer = Self.mappingObserverCache.object(forKey: uuid as NSUUID) else {
+                return nil
+            }
+            return observer.allObjects
+        }) else {
+            return
+        }
+        for address in addresses {
+            address.mappingDidChange(uuid: uuid)
+        }
+    }
+
+    fileprivate func mappingDidChange(uuid: UUID) {
+        owsAssertDebug(uuid == self.uuid)
+        backingPhoneNumber.set(SignalServiceAddress.cache.phoneNumber(forUuid: uuid))
+    }
 }
+
+// MARK: -
+
+#if TESTABLE_BUILD
+
+extension SignalServiceAddress {
+    var unresolvedUuid: UUID? {
+        backingUuid.get()
+    }
+
+    var unresolvedPhoneNumber: String? {
+        backingPhoneNumber.get()
+    }
+}
+
+#endif
+
+// MARK: -
+
+public extension Array where Element == SignalServiceAddress {
+    func stableSort() -> [SignalServiceAddress] {
+        // Use an arbitrary sort but ensure the ordering is stable.
+        self.sorted { (left, right) in
+            left.sortKey < right.sortKey
+        }
+    }
+}
+
+// MARK: -
 
 @objc
 public class SignalServiceAddressCache: NSObject {
-    private let serialQueue = DispatchQueue(label: "SignalServiceAddressCache")
+    private static let unfairLock = UnfairLock()
 
     private var uuidToPhoneNumberCache = [UUID: String]()
     private var phoneNumberToUUIDCache = [String: UUID]()
@@ -235,19 +421,24 @@ public class SignalServiceAddressCache: NSObject {
     private var uuidToHashValueCache = [UUID: Int]()
     private var phoneNumberToHashValueCache = [String: Int]()
 
-    override init() {
-        super.init()
-        AppReadiness.runNowOrWhenAppWillBecomeReady { [weak self] in
-            SDSDatabaseStorage.shared.asyncRead { transaction in
-                SignalRecipient.anyEnumerate(transaction: transaction) { recipient, _ in
-                    let recipientUuid: UUID?
-                    if let uuidString = recipient.recipientUUID {
-                        recipientUuid = UUID(uuidString: uuidString)
-                    } else {
-                        recipientUuid = nil
-                    }
-                    self?.hashAndCache(uuid: recipientUuid, phoneNumber: recipient.recipientPhoneNumber)
+    @objc
+    func warmCaches() {
+        let localNumber = TSAccountManager.shared.localNumber
+        let localUuid = TSAccountManager.shared.localUuid
+
+        if localNumber != nil || localUuid != nil {
+            hashAndCache(uuid: localUuid, phoneNumber: localNumber, trustLevel: .high)
+        }
+
+        SDSDatabaseStorage.shared.read { transaction in
+            SignalRecipient.anyEnumerate(transaction: transaction) { recipient, _ in
+                let recipientUuid: UUID?
+                if let uuidString = recipient.recipientUUID {
+                    recipientUuid = UUID(uuidString: uuidString)
+                } else {
+                    recipientUuid = nil
                 }
+                self.hashAndCache(uuid: recipientUuid, phoneNumber: recipient.recipientPhoneNumber, trustLevel: .high)
             }
         }
     }
@@ -256,8 +447,14 @@ public class SignalServiceAddressCache: NSObject {
     /// and returns a constant hash value that can be used to represent
     /// either of these values going forward for the lifetime of the cache.
     @discardableResult
-    func hashAndCache(uuid: UUID?, phoneNumber: String?) -> Int {
-        return serialQueue.sync {
+    func hashAndCache(uuid: UUID? = nil, phoneNumber: String? = nil, trustLevel: SignalRecipientTrustLevel) -> Int {
+        var phoneNumber = phoneNumber
+
+        // If we have a UUID, don't trust the phone number for mapping
+        // in low trust scenarios.
+        if trustLevel == .low, uuid != nil { phoneNumber = nil }
+
+        return Self.unfairLock.withLock {
             // If we have a UUID and a phone number, cache the mapping.
             if let uuid = uuid, let phoneNumber = phoneNumber {
                 uuidToPhoneNumberCache[uuid] = phoneNumber
@@ -296,10 +493,57 @@ public class SignalServiceAddressCache: NSObject {
     }
 
     func uuid(forPhoneNumber phoneNumber: String) -> UUID? {
-        return serialQueue.sync { phoneNumberToUUIDCache[phoneNumber] }
+        Self.unfairLock.withLock { phoneNumberToUUIDCache[phoneNumber] }
     }
 
     func phoneNumber(forUuid uuid: UUID) -> String? {
-        return serialQueue.sync { uuidToPhoneNumberCache[uuid] }
+        Self.unfairLock.withLock { uuidToPhoneNumberCache[uuid] }
+    }
+
+    @objc
+    func updateMapping(uuid: UUID, phoneNumber: String?) {
+        Self.unfairLock.withLock {
+            // Maintain the existing hash value for the given UUID, or create
+            // a new hash if one is yet to exist.
+            let hashValue: Int = {
+                if let oldUUIDHashValue = uuidToHashValueCache[uuid] {
+                    return oldUUIDHashValue
+                } else if let oldPhoneNumber = uuidToPhoneNumberCache[uuid],
+                    phoneNumberToUUIDCache[oldPhoneNumber] == nil,
+                    let oldPhoneNumberHashValue = phoneNumberToHashValueCache[oldPhoneNumber] {
+                    return oldPhoneNumberHashValue
+                } else {
+                    return UUID().hashValue
+                }
+            }()
+
+            // If we previously had a phone number, disassociate it from the UUID
+            if let oldPhoneNumber = uuidToPhoneNumberCache[uuid] {
+                phoneNumberToHashValueCache[oldPhoneNumber] = nil
+                phoneNumberToUUIDCache[oldPhoneNumber] = nil
+            }
+
+            // Map the uuid to the new phone number
+            uuidToPhoneNumberCache[uuid] = phoneNumber
+            uuidToHashValueCache[uuid] = hashValue
+
+            if let phoneNumber = phoneNumber {
+                // Unmap the previous UUID from this phone number
+                if let oldUuid = phoneNumberToUUIDCache[phoneNumber] {
+                    uuidToPhoneNumberCache[oldUuid] = nil
+                }
+
+                // Map the phone number to the new UUID
+                phoneNumberToUUIDCache[phoneNumber] = uuid
+                phoneNumberToHashValueCache[phoneNumber] = hashValue
+            }
+        }
+
+        // Notify any existing address objects to update their backing phone number
+        SignalServiceAddress.notifyMappingDidChange(forUuid: uuid)
+
+        if AppReadiness.isAppReady {
+            Self.bulkProfileFetch.fetchProfile(uuid: uuid)
+        }
     }
 }

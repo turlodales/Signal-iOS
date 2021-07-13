@@ -1,16 +1,16 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 
 @objc
-public class OWSLayerView: UIView {
+open class OWSLayerView: UIView {
     @objc
     public var shouldAnimate = true
 
     @objc
-    public var layoutCallback: ((UIView) -> Void)
+    public var layoutCallback: (UIView) -> Void
 
     @objc
     public init() {
@@ -31,10 +31,40 @@ public class OWSLayerView: UIView {
         super.init(coder: aDecoder)
     }
 
+    @objc
+    public static func circleView() -> OWSLayerView {
+        circleView(size: nil)
+    }
+
+    public static func circleView(size: CGFloat? = nil) -> OWSLayerView {
+        let result = OWSLayerView(frame: .zero) { view in
+            view.layer.cornerRadius = min(view.width, view.height) * 0.5
+        }
+        if let size = size {
+            result.autoSetDimensions(to: CGSize.square(size))
+        }
+        return result
+    }
+
+    @objc
+    public static func pillView() -> OWSLayerView {
+        pillView(height: nil)
+    }
+
+    public static func pillView(height: CGFloat? = nil) -> OWSLayerView {
+        let result = OWSLayerView(frame: .zero) { view in
+            view.layer.cornerRadius = min(view.width, view.height) * 0.5
+        }
+        if let height = height {
+            result.autoSetDimension(.height, toSize: height)
+        }
+        return result
+    }
+
     public override var bounds: CGRect {
         didSet {
             if oldValue != bounds {
-                layoutCallback(self)
+                layoutSubviews()
             }
         }
     }
@@ -42,7 +72,7 @@ public class OWSLayerView: UIView {
     public override var frame: CGRect {
         didSet {
             if oldValue != frame {
-                layoutCallback(self)
+                layoutSubviews()
             }
         }
     }
@@ -50,19 +80,82 @@ public class OWSLayerView: UIView {
     public override var center: CGPoint {
         didSet {
             if oldValue != center {
-                layoutCallback(self)
+                layoutSubviews()
             }
         }
     }
 
+    public override func layoutSubviews() {
+        super.layoutSubviews()
+
+        layoutCallback(self)
+    }
+
     public func updateContent() {
         if shouldAnimate {
-            layoutCallback(self)
+            layoutSubviews()
         } else {
             CATransaction.begin()
             CATransaction.setDisableActions(true)
-            layoutCallback(self)
+            layoutSubviews()
             CATransaction.commit()
+        }
+    }
+
+    // MARK: - Tap
+
+    public typealias TapBlock = () -> Void
+    private var tapBlock: TapBlock?
+
+    public func addTapGesture(_ tapBlock: @escaping TapBlock) {
+        self.tapBlock = tapBlock
+        isUserInteractionEnabled = true
+        addGestureRecognizer(UITapGestureRecognizer(target: self, action: #selector(didTap)))
+    }
+
+    @objc
+    private func didTap() {
+        guard let tapBlock = tapBlock else {
+            owsFailDebug("Missing tapBlock.")
+            return
+        }
+        tapBlock()
+    }
+
+    // MARK: - Long Press
+
+    public typealias LongPressBlock = () -> Void
+    private var longPressBlock: LongPressBlock?
+
+    public func addLongPressGesture(_ longPressBlock: @escaping LongPressBlock) {
+        self.longPressBlock = longPressBlock
+        isUserInteractionEnabled = true
+        addGestureRecognizer(UILongPressGestureRecognizer(target: self, action: #selector(didLongPress)))
+    }
+
+    @objc
+    private func didLongPress() {
+        guard let longPressBlock = longPressBlock else {
+            owsFailDebug("Missing longPressBlock.")
+            return
+        }
+        longPressBlock()
+    }
+
+    // MARK: - 
+
+    public func reset() {
+        removeAllSubviews()
+
+        self.layoutCallback = { _ in }
+
+        self.tapBlock = nil
+        self.longPressBlock = nil
+
+        if let gestureRecognizers = self.gestureRecognizers {
+            for gestureRecognizer in gestureRecognizers {
+                removeGestureRecognizer(gestureRecognizer)
+            }
         }
     }
 }

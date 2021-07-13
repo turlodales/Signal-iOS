@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -16,7 +16,6 @@ public class SDSKeyValueStore: NSObject {
 
     // Key-value stores use "collections" to group related keys.
     //
-    // * In YDB, we store each model type and k-v store in a separate YDB collection.
     // * In GRDB, we store each model in a separate table but
     //   all k-v stores are in a single table.
     //   GRDB maintains a mapping between tables and collections.
@@ -74,8 +73,6 @@ public class SDSKeyValueStore: NSObject {
     @objc
     public func hasValue(forKey key: String, transaction: SDSAnyReadTransaction) -> Bool {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: key, inCollection: collection)
         case .grdbRead(let grdbTransaction):
             do {
                 let count = try UInt.fetchOne(grdbTransaction.database,
@@ -153,6 +150,20 @@ public class SDSKeyValueStore: NSObject {
     @objc
     public func setBool(_ value: Bool, key: String, transaction: SDSAnyWriteTransaction) {
         write(NSNumber(booleanLiteral: value), forKey: key, transaction: transaction)
+    }
+
+    @objc
+    public func setBoolIfChanged(_ value: Bool,
+                                 defaultValue: Bool,
+                                 key: String,
+                                 transaction: SDSAnyWriteTransaction) {
+        let didChange = value != getBool(key,
+                                         defaultValue: defaultValue,
+                                         transaction: transaction)
+        guard didChange else {
+            return
+        }
+        setBool(value, key: key, transaction: transaction)
     }
 
     // MARK: - UInt
@@ -307,8 +318,6 @@ public class SDSKeyValueStore: NSObject {
     @objc
     public func removeAll(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let yapWrite):
-            yapWrite.removeAllObjects(inCollection: collection)
         case .grdbWrite(let grdbWrite):
             let sql = """
                 DELETE
@@ -322,10 +331,6 @@ public class SDSKeyValueStore: NSObject {
     @objc
     public func enumerateKeysAndObjects(transaction: SDSAnyReadTransaction, block: @escaping (String, Any, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeysAndObjects(inCollection: collection) { (key: String, value: Any, stopPtr: UnsafeMutablePointer<ObjCBool>) in
-                block(key, value, stopPtr)
-            }
         case .grdbRead(let grdbRead):
             var stop: ObjCBool = false
             // PERF - we could enumerate with a single query rather than
@@ -347,10 +352,6 @@ public class SDSKeyValueStore: NSObject {
     @objc
     public func enumerateKeys(transaction: SDSAnyReadTransaction, block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: collection) { (key: String, stopPtr: UnsafeMutablePointer<ObjCBool>) in
-                block(key, stopPtr)
-            }
         case .grdbRead(let grdbRead):
             var stop: ObjCBool = false
             for key in allKeys(grdbTransaction: grdbRead) {
@@ -376,6 +377,89 @@ public class SDSKeyValueStore: NSObject {
         }
     }
 
+    private struct PairRecord: Codable, FetchableRecord, PersistableRecord {
+        public let key: String?
+        public let value: Data?
+    }
+
+    private func allPairs(transaction: SDSAnyReadTransaction) -> [PairRecord] {
+
+        switch transaction.readTransaction {
+        case .grdbRead(let grdbTransaction):
+
+            let sql = """
+            SELECT
+                \(SDSKeyValueStore.keyColumn.columnName),
+                \(SDSKeyValueStore.valueColumn.columnName)
+            FROM \(SDSKeyValueStore.table.tableName)
+            WHERE \(SDSKeyValueStore.collectionColumn.columnName) == ?
+            """
+
+            do {
+                return try PairRecord.fetchAll(grdbTransaction.database,
+                                               sql: sql,
+                                               arguments: [collection])
+            } catch {
+                owsFailDebug("Error: \(error)")
+                return []
+            }
+        }
+    }
+
+    @objc
+    public func allBoolValuesMap(transaction: SDSAnyReadTransaction) -> [String: Bool] {
+        let pairs = allPairs(transaction: transaction)
+        var result = [String: Bool]()
+        for pair in pairs {
+            guard let key = pair.key else {
+                owsFailDebug("missing key.")
+                continue
+            }
+            guard let value = pair.value else {
+                owsFailDebug("missing value.")
+                continue
+            }
+            guard let rawObject = parseArchivedValue(value) else {
+                owsFailDebug("Could not parse value.")
+                continue
+            }
+            guard let number: NSNumber = parseValueAs(key: key,
+                                                      rawObject: rawObject) else {
+                                                        owsFailDebug("Invalid value.")
+                                                        continue
+            }
+            result[key] = number.boolValue
+        }
+        return result
+    }
+
+    @objc
+    public func allUIntValuesMap(transaction: SDSAnyReadTransaction) -> [String: UInt] {
+        let pairs = allPairs(transaction: transaction)
+        var result = [String: UInt]()
+        for pair in pairs {
+            guard let key = pair.key else {
+                owsFailDebug("missing key.")
+                continue
+            }
+            guard let value = pair.value else {
+                owsFailDebug("missing value.")
+                continue
+            }
+            guard let rawObject = parseArchivedValue(value) else {
+                owsFailDebug("Could not parse value.")
+                continue
+            }
+            guard let number: NSNumber = parseValueAs(key: key,
+                                                      rawObject: rawObject) else {
+                                                        owsFailDebug("Invalid value.")
+                                                        continue
+            }
+            result[key] = number.uintValue
+        }
+        return result
+    }
+
     @objc
     public func anyDataValue(transaction: SDSAnyReadTransaction) -> Data? {
         let keys = allKeys(transaction: transaction).shuffled()
@@ -392,8 +476,6 @@ public class SDSKeyValueStore: NSObject {
     @objc
     public func allKeys(transaction: SDSAnyReadTransaction) -> [String] {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.allKeys(inCollection: collection)
         case .grdbRead(let grdbRead):
             return allKeys(grdbTransaction: grdbRead)
         }
@@ -402,8 +484,6 @@ public class SDSKeyValueStore: NSObject {
     @objc
     public func numberOfKeys(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: collection)
         case .grdbRead(let grdbRead):
             let sql = """
             SELECT COUNT(*)
@@ -424,7 +504,7 @@ public class SDSKeyValueStore: NSObject {
     }
 
     @objc
-    var asObjC: SDSKeyValueStoreObjC {
+    public var asObjC: SDSKeyValueStoreObjC {
         return SDSKeyValueStoreObjC(sdsKeyValueStore: self)
     }
 
@@ -471,6 +551,37 @@ public class SDSKeyValueStore: NSObject {
         guard let rawObject = readRawObject(key, transaction: transaction) else {
             return nil
         }
+        return parseValueAs(key: key, rawObject: rawObject)
+    }
+
+    private func readRawObject(_ key: String, transaction: SDSAnyReadTransaction) -> Any? {
+        // GRDB values are serialized to data by this class.
+        switch transaction.readTransaction {
+        case .grdbRead:
+            guard let encoded = readData(key, transaction: transaction) else {
+                return nil
+            }
+            return parseArchivedValue(encoded)
+        }
+    }
+
+    private func parseArchivedValue(_ encoded: Data) -> Any? {
+        do {
+            guard let rawObject = try NSKeyedUnarchiver.unarchiveTopLevelObjectWithData(encoded) else {
+                owsFailDebug("Could not decode value.")
+                return nil
+            }
+            return rawObject
+        } catch {
+            owsFailDebug("Decode failed.")
+            return nil
+        }
+    }
+
+    private func parseValueAs<T>(key: String, rawObject: Any?) -> T? {
+        guard let rawObject = rawObject else {
+            return nil
+        }
         guard let object = rawObject as? T else {
             owsFailDebug("Value for key: \(key) has unexpected type: \(type(of: rawObject)).")
             return nil
@@ -478,43 +589,10 @@ public class SDSKeyValueStore: NSObject {
         return object
     }
 
-    private func readRawObject(_ key: String, transaction: SDSAnyReadTransaction) -> Any? {
-        // YDB values are serialized by YDB.
-        // GRDB values are serialized to data by this class.
-        switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.object(forKey: key, inCollection: collection)
-        case .grdbRead:
-            guard let encoded = readData(key, transaction: transaction) else {
-                return nil
-            }
-
-            do {
-                guard let rawObject = try NSKeyedUnarchiver.unarchiveTopLevelObjectWithData(encoded) else {
-                    owsFailDebug("Could not decode value.")
-                    return nil
-                }
-                return rawObject
-            } catch {
-                owsFailDebug("Decode failed.")
-                return nil
-            }
-        }
-    }
-
     private func readData(_ key: String, transaction: SDSAnyReadTransaction) -> Data? {
         let collection = self.collection
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            guard let rawObject = ydbTransaction.object(forKey: key, inCollection: collection) else {
-                return nil
-            }
-            guard let object = rawObject as? Data else {
-                owsFailDebug("Value has unexpected type: \(type(of: rawObject)).")
-                return nil
-            }
-            return object
         case .grdbRead(let grdbTransaction):
             return SDSKeyValueStore.readData(transaction: grdbTransaction, key: key, collection: collection)
         }
@@ -533,15 +611,8 @@ public class SDSKeyValueStore: NSObject {
 
     // TODO: Codable? NSCoding? Other serialization?
     private func write(_ value: NSCoding?, forKey key: String, transaction: SDSAnyWriteTransaction) {
-        // YDB values are serialized by YDB.
         // GRDB values are serialized to data by this class.
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            if let value = value {
-                ydbTransaction.setObject(value, forKey: key, inCollection: collection)
-            } else {
-                ydbTransaction.removeObject(forKey: key, inCollection: collection)
-            }
         case .grdbWrite:
             if let value = value {
                 let encoded = NSKeyedArchiver.archivedData(withRootObject: value)
@@ -557,12 +628,6 @@ public class SDSKeyValueStore: NSObject {
         let collection = self.collection
 
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            if let data = data {
-                ydbTransaction.setObject(data, forKey: key, inCollection: collection)
-            } else {
-                ydbTransaction.removeObject(forKey: key, inCollection: collection)
-            }
         case .grdbWrite(let grdbTransaction):
             do {
                 try SDSKeyValueStore.write(transaction: grdbTransaction, key: key, collection: collection, encoded: data)
@@ -606,7 +671,20 @@ public class SDSKeyValueStore: NSObject {
         }
         // TODO: We could use setArgumentsWithValidation for more safety.
         statement.unsafeSetArguments(statementArguments)
-        try statement.execute()
+
+        do {
+            try statement.execute()
+        } catch {
+            // If the attempt to write to GRDB flagged that the database was
+            // corrupt, in addition to crashing we flag this so that we can
+            // attempt to perform recovery.
+            if let error = error as? DatabaseError, error.resultCode == .SQLITE_CORRUPT {
+                SSKPreferences.setHasGrdbDatabaseCorruption(true)
+                owsFail("Error: \(error)")
+            } else {
+                throw error
+            }
+        }
     }
 
     private func allKeys(grdbTransaction: GRDBReadTransaction) -> [String] {
@@ -615,8 +693,9 @@ public class SDSKeyValueStore: NSObject {
         FROM \(SDSKeyValueStore.table.tableName)
         WHERE \(SDSKeyValueStore.collectionColumn.columnName) == ?
         """
-        return try! String.fetchAll(grdbTransaction.database,
-                                    sql: sql,
-                                    arguments: [collection])
+
+        return grdbTransaction.database.strictRead { database in
+            try String.fetchAll(database, sql: sql, arguments: [collection])
+        }
     }
 }

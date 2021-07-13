@@ -6,7 +6,7 @@ import Foundation
 import Photos
 import PromiseKit
 
-protocol PhotoCollectionPickerDelegate: class {
+protocol PhotoCollectionPickerDelegate: AnyObject {
     func photoCollectionPicker(_ photoCollectionPicker: PhotoCollectionPickerController, didPickCollection collection: PhotoCollection)
 }
 
@@ -51,7 +51,6 @@ class PhotoCollectionPickerController: OWSTableViewController, PhotoLibraryDeleg
                 }
                 return self.buildTableCell(collection: collection)
                 },
-                                customRowHeight: UITableView.automaticDimension,
                                 actionBlock: { [weak self] in
                                     guard let strongSelf = self else { return }
                                     strongSelf.didSelectCollection(collection: collection)

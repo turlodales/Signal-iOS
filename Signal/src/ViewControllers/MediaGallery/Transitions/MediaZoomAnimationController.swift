@@ -1,14 +1,18 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 
 class MediaZoomAnimationController: NSObject {
-    private let galleryItem: MediaGalleryItem
+    private let item: Media
+
+    init(image: UIImage) {
+        item = .image(image)
+    }
 
     init(galleryItem: MediaGalleryItem) {
-        self.galleryItem = galleryItem
+        item = .gallery(galleryItem)
     }
 }
 
@@ -44,13 +48,15 @@ extension MediaZoomAnimationController: UIViewControllerAnimatedTransitioning {
                 return
             }
             fromContextProvider = contextProvider
+        case let memberActionSheet as MemberActionSheet:
+            fromContextProvider = memberActionSheet
         default:
             owsFailDebug("unexpected fromVC: \(fromVC)")
             transitionContext.completeTransition(false)
             return
         }
 
-        guard let fromMediaContext = fromContextProvider.mediaPresentationContext(galleryItem: galleryItem, in: containerView) else {
+        guard let fromMediaContext = fromContextProvider.mediaPresentationContext(item: item, in: containerView) else {
             owsFailDebug("fromPresentationContext was unexpectedly nil")
             transitionContext.completeTransition(false)
             return
@@ -77,13 +83,13 @@ extension MediaZoomAnimationController: UIViewControllerAnimatedTransitioning {
         toView.autoPinEdgesToSuperviewEdges()
         toView.layoutIfNeeded()
 
-        guard let toMediaContext = toContextProvider.mediaPresentationContext(galleryItem: galleryItem, in: containerView) else {
+        guard let toMediaContext = toContextProvider.mediaPresentationContext(item: item, in: containerView) else {
             owsFailDebug("toPresentationContext was unexpectedly nil")
             transitionContext.completeTransition(false)
             return
         }
 
-        guard let presentationImage = galleryItem.attachmentStream.originalImage else {
+        guard let presentationImage = item.image else {
             owsFailDebug("presentationImage was unexpectedly nil")
             // Complete transition immediately.
             fromContextProvider.mediaWillPresent(fromContext: fromMediaContext)

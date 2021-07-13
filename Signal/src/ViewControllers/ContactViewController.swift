@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -30,8 +30,6 @@ class ContactViewController: OWSViewController, ContactShareViewHelperDelegate {
         }
     }
 
-    private let contactsManager: OWSContactsManager
-
     private let contactShare: ContactShareViewModel
 
     private var contactShareViewHelper: ContactShareViewHelper
@@ -42,9 +40,8 @@ class ContactViewController: OWSViewController, ContactShareViewHelperDelegate {
 
     @objc
     required init(contactShare: ContactShareViewModel) {
-        contactsManager = Environment.shared.contactsManager
         self.contactShare = contactShare
-        self.contactShareViewHelper = ContactShareViewHelper(contactsManager: contactsManager)
+        self.contactShareViewHelper = ContactShareViewHelper()
 
         super.init()
 
@@ -79,7 +76,7 @@ class ContactViewController: OWSViewController, ContactShareViewHelperDelegate {
         postDismissNavigationController = navigationController
         navigationController.isNavigationBarHidden = true
 
-        contactsManager.requestSystemContactsOnce(completion: { [weak self] _ in
+        contactsManagerImpl.requestSystemContactsOnce(completion: { [weak self] _ in
             guard let strongSelf = self else { return }
             strongSelf.updateMode()
         })
@@ -135,13 +132,13 @@ class ContactViewController: OWSViewController, ContactShareViewHelperDelegate {
     private func systemContactsWithSignalAccountsForContact() -> [String] {
         AssertIsOnMainThread()
 
-        return contactShare.systemContactsWithSignalAccountPhoneNumbers(contactsManager)
+        return contactShare.systemContactsWithSignalAccountPhoneNumbers()
     }
 
     private func systemContactsForContact() -> [String] {
         AssertIsOnMainThread()
 
-        return contactShare.systemContactPhoneNumbers(contactsManager)
+        return contactShare.systemContactPhoneNumbers()
     }
 
     private func updateContent() {
@@ -225,7 +222,7 @@ class ContactViewController: OWSViewController, ContactShareViewHelperDelegate {
 
         let avatarSize: CGFloat = 100
         let avatarView = AvatarImageView()
-        avatarView.image = contactShare.getAvatarImage(diameter: avatarSize, contactsManager: contactsManager)
+        avatarView.image = contactShare.getAvatarImageWithSneakyTransaction(diameter: avatarSize)
         topView.addSubview(avatarView)
         avatarView.autoPinEdge(toSuperviewEdge: .top, withInset: 20)
         avatarView.autoHCenterInSuperview()
@@ -265,14 +262,12 @@ class ContactViewController: OWSViewController, ContactShareViewHelperDelegate {
             let stackView = UIStackView()
             stackView.axis = .horizontal
             stackView.distribution = .fillEqually
-            stackView.addArrangedSubview(createCircleActionButton(text: NSLocalizedString("ACTION_SEND_MESSAGE",
-                                                                                          comment: "Label for 'send message' button in contact view."),
+            stackView.addArrangedSubview(createCircleActionButton(text: CommonStrings.sendMessage,
                                                                   imageName: "contact_view_message",
                                                                   actionBlock: { [weak self] in
                                                                     guard let strongSelf = self else { return }
                                                                     strongSelf.didPressSendMessage()
             }))
-            if FeatureFlags.calling {
                 stackView.addArrangedSubview(createCircleActionButton(text: NSLocalizedString("ACTION_AUDIO_CALL",
                                                                                               comment: "Label for 'audio call' button in contact view."),
                                                                       imageName: "contact_view_audio_call",
@@ -287,7 +282,6 @@ class ContactViewController: OWSViewController, ContactShareViewHelperDelegate {
                                                                         guard let strongSelf = self else { return }
                                                                         strongSelf.didPressVideoCall()
                 }))
-            }
             topView.addSubview(stackView)
             stackView.autoPinEdge(.top, to: .bottom, of: lastView, withOffset: 20)
             stackView.autoPinLeadingToSuperviewMargin(withInset: hMargin)
@@ -531,10 +525,9 @@ class ContactViewController: OWSViewController, ContactShareViewHelperDelegate {
 
         if let e164 = phoneNumber.tryToConvertToE164() {
             let address = SignalServiceAddress(phoneNumber: e164)
-            if contactShare.systemContactsWithSignalAccountPhoneNumbers(contactsManager).contains(e164) {
-                actionSheet.addAction(ActionSheetAction(title: NSLocalizedString("ACTION_SEND_MESSAGE",
-                                                                             comment: "Label for 'send message' button in contact view."),
-                                                    style: .default) { _ in
+            if contactShare.systemContactsWithSignalAccountPhoneNumbers().contains(e164) {
+                actionSheet.addAction(ActionSheetAction(title: CommonStrings.sendMessage,
+                                                        style: .default) { _ in
                                                         SignalApp.shared().presentConversation(for: address, action: .compose, animated: true)
                 })
                 actionSheet.addAction(ActionSheetAction(title: NSLocalizedString("ACTION_AUDIO_CALL",

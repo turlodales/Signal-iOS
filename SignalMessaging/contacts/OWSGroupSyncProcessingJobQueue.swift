@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -15,6 +15,7 @@ public class IncomingGroupSyncJobQueue: NSObject, JobQueue {
 
     public typealias DurableOperationType = IncomingGroupSyncOperation
     public let requiresInternet: Bool = true
+    public let isEnabled: Bool = true
     public static let maxRetries: UInt = 4
     @objc
     public static let jobRecordLabel: String = OWSIncomingGroupSyncJobRecord.defaultLabel
@@ -29,7 +30,7 @@ public class IncomingGroupSyncJobQueue: NSObject, JobQueue {
     public override init() {
         super.init()
 
-        AppReadiness.runNowOrWhenAppDidBecomeReadyPolite {
+        AppReadiness.runNowOrWhenAppDidBecomeReadyAsync {
             self.setup()
         }
     }
@@ -80,20 +81,6 @@ public class IncomingGroupSyncOperation: OWSOperation, DurableOperation {
 
     init(jobRecord: OWSIncomingGroupSyncJobRecord) {
         self.jobRecord = jobRecord
-    }
-
-    // MARK: - Dependencies
-
-    var databaseStorage: SDSDatabaseStorage {
-        return SSKEnvironment.shared.databaseStorage
-    }
-
-    var attachmentDownloads: OWSAttachmentDownloads {
-        return SSKEnvironment.shared.attachmentDownloads
-    }
-
-    var blockingManager: OWSBlockingManager {
-        return .shared()
     }
 
     // MARK: - Durable Operation Overrides
@@ -155,8 +142,7 @@ public class IncomingGroupSyncOperation: OWSOperation, DurableOperation {
 
         switch attachment {
         case let attachmentPointer as TSAttachmentPointer:
-            return self.attachmentDownloads.downloadAttachmentPointer(attachmentPointer,
-                                                                      bypassPendingMessageRequest: true)
+            return self.attachmentDownloads.enqueueHeadlessDownloadPromise(attachmentPointer: attachmentPointer)
         case let attachmentStream as TSAttachmentStream:
             return Promise.value(attachmentStream)
         default:
@@ -174,18 +160,33 @@ public class IncomingGroupSyncOperation: OWSOperation, DurableOperation {
                 let inputStream = ChunkedInputStream(forReadingFrom: pointer, count: bufferPtr.count)
                 let groupStream = GroupsInputStream(inputStream: inputStream)
 
-                try databaseStorage.write { transaction in
-                    while let nextGroup = try groupStream.decodeGroup() {
-                        autoreleasepool {
-                            do {
-                                try self.process(groupDetails: nextGroup, transaction: transaction)
-                            } catch {
-                                owsFailDebug("Error: \(error)")
-                            }
+                while try processBatch(groupStream: groupStream) {}
+            }
+        }
+    }
+
+    private func processBatch(groupStream: GroupsInputStream) throws -> Bool {
+        try autoreleasepool {
+            let maxBatchSize = 32
+            var count: UInt = 0
+            try databaseStorage.write { transaction in
+                while count < maxBatchSize,
+                      let nextGroup = try groupStream.decodeGroup() {
+
+                    count += 1
+
+                    do {
+                        try self.process(groupDetails: nextGroup, transaction: transaction)
+                    } catch {
+                        if case GroupsV2Error.groupDowngradeNotAllowed = error {
+                            Logger.warn("Error: \(error)")
+                        } else {
+                            owsFailDebug("Error: \(error)")
                         }
                     }
                 }
             }
+            return count > 0
         }
     }
 
@@ -198,6 +199,9 @@ public class IncomingGroupSyncOperation: OWSOperation, DurableOperation {
             owsFailDebug("Invalid group id.")
             return
         }
+
+        TSGroupThread.ensureGroupIdMapping(forGroupId: groupId, transaction: transaction)
+
         // groupUpdateSourceAddress is nil because we don't know
         // who made any changes.
         let groupUpdateSourceAddress: SignalServiceAddress? = nil
@@ -223,17 +227,9 @@ public class IncomingGroupSyncOperation: OWSOperation, DurableOperation {
             groupNeedsUpdate = true
         }
 
-        if let rawSyncedColorName = groupDetails.conversationColorName {
-            let conversationColorName = ConversationColorName(rawValue: rawSyncedColorName)
-            if conversationColorName != groupThread.conversationColorName {
-                groupThread.conversationColorName = conversationColorName
-                groupNeedsUpdate = true
-            }
-        }
-
         if groupDetails.isBlocked {
             if !self.blockingManager.isGroupIdBlocked(groupDetails.groupId) {
-                self.blockingManager.addBlockedGroup(groupModel, wasLocallyInitiated: false, transaction: transaction)
+                self.blockingManager.addBlockedGroup(groupModel, blockMode: .remote, transaction: transaction)
             }
         } else {
             if self.blockingManager.isGroupIdBlocked(groupDetails.groupId) {
@@ -246,7 +242,8 @@ public class IncomingGroupSyncOperation: OWSOperation, DurableOperation {
             newThreads.append((threadId: groupThread.uniqueId, sortOrder: inboxSortOrder))
 
             if let isArchived = groupDetails.isArchived, isArchived == true {
-                groupThread.archiveThread(updateStorageService: false, transaction: transaction)
+                let associatedData = ThreadAssociatedData.fetchOrDefault(for: groupThread, transaction: transaction)
+                associatedData.updateWith(isArchived: true, updateStorageService: false, transaction: transaction)
             }
         }
 

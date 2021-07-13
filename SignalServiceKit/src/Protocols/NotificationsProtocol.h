@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
@@ -9,12 +9,13 @@ NS_ASSUME_NONNULL_BEGIN
 @class SDSAnyWriteTransaction;
 @class TSErrorMessage;
 @class TSIncomingMessage;
-@class TSInfoMessage;
+@class TSInteraction;
 @class TSOutgoingMessage;
 @class TSThread;
 @class ThreadlessErrorMessage;
 
 @protocol ContactsManagerProtocol;
+@protocol OWSPreviewText;
 
 @protocol NotificationsProtocol <NSObject>
 
@@ -31,10 +32,10 @@ NS_ASSUME_NONNULL_BEGIN
                            thread:(TSThread *)thread
                       transaction:(SDSAnyWriteTransaction *)transaction;
 
-- (void)notifyUserForInfoMessage:(TSInfoMessage *)infoMessage
-                          thread:(TSThread *)thread
-                      wantsSound:(BOOL)wantsSound
-                     transaction:(SDSAnyWriteTransaction *)transaction;
+- (void)notifyUserForPreviewableInteraction:(TSInteraction<OWSPreviewText> *)previewableInteraction
+                                     thread:(TSThread *)thread
+                                 wantsSound:(BOOL)wantsSound
+                                transaction:(SDSAnyWriteTransaction *)transaction NS_SWIFT_NAME(notifyUser(for:thread:wantsSound:transaction:));
 
 - (void)notifyUserForThreadlessErrorMessage:(ThreadlessErrorMessage *)errorMessage
                                 transaction:(SDSAnyWriteTransaction *)transaction;
@@ -43,8 +44,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)cancelNotificationsForMessageId:(NSString *)uniqueMessageId NS_SWIFT_NAME(cancelNotifications(messageId:));
 - (void)cancelNotificationsForReactionId:(NSString *)uniqueReactionId NS_SWIFT_NAME(cancelNotifications(reactionId:));
-
-- (void)notifyUserForGRDBMigration;
 
 @end
 

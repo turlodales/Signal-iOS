@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -33,12 +33,6 @@ extension TSInteraction {
 // MARK: -
 
 class SDSDatabaseStorageTest: SSKBaseTestSwift {
-
-    // MARK: - Dependencies
-
-    private var tsAccountManager: TSAccountManager {
-        return TSAccountManager.sharedInstance()
-    }
 
     // MARK: - Test Life Cycle
 
@@ -98,7 +92,7 @@ class SDSDatabaseStorageTest: SSKBaseTestSwift {
                 return
             }
             XCTAssertNil(firstThread.messageDraft)
-            firstThread.update(withDraft: "Some draft", transaction: transaction)
+            firstThread.update(withDraft: MessageBody(text: "Some draft", ranges: .empty), transaction: transaction)
         }
         storage.read { transaction in
             let threads = TSThread.anyFetchAll(transaction: transaction)

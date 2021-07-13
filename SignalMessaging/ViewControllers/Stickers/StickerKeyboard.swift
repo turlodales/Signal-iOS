@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -14,14 +14,6 @@ public protocol StickerKeyboardDelegate {
 
 @objc
 public class StickerKeyboard: CustomKeyboard {
-
-    // MARK: - Dependencies
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    // MARK: -
 
     @objc
     public weak var delegate: StickerKeyboardDelegate?
@@ -83,12 +75,13 @@ public class StickerKeyboard: CustomKeyboard {
 
         // If there are no recents, default to showing the first sticker pack.
         if currentPageCollectionView.stickerCount < 1 {
-            selectedStickerPack = stickerPacks.first
+            updateSelectedStickerPack(stickerPacks.first)
         }
 
         updatePageConstraints()
     }
 
+    private let reusableStickerViewCache = StickerViewCache(maxSize: 32)
     private func reloadStickers() {
         let oldStickerPacks = stickerPacks
 
@@ -99,18 +92,25 @@ public class StickerKeyboard: CustomKeyboard {
         }
 
         var items = [StickerHorizontalListViewItem]()
-        items.append(StickerHorizontalListViewItemRecents(didSelectBlock: { [weak self] in
-            self?.recentsButtonWasTapped()
-            }, isSelectedBlock: { [weak self] in
+        items.append(StickerHorizontalListViewItemRecents(
+            didSelectBlock: { [weak self] in
+                self?.recentsButtonWasTapped()
+            },
+            isSelectedBlock: { [weak self] in
                 self?.selectedStickerPack == nil
-        }))
+            }
+        ))
         items += stickerPacks.map { (stickerPack) in
-            StickerHorizontalListViewItemSticker(stickerInfo: stickerPack.coverInfo,
-                                                 didSelectBlock: { [weak self] in
-                                                    self?.selectedStickerPack = stickerPack
-                }, isSelectedBlock: { [weak self] in
+            StickerHorizontalListViewItemSticker(
+                stickerInfo: stickerPack.coverInfo,
+                didSelectBlock: { [weak self] in
+                    self?.updateSelectedStickerPack(stickerPack)
+                },
+                isSelectedBlock: { [weak self] in
                     self?.selectedStickerPack?.info == stickerPack.info
-            })
+                },
+                cache: reusableStickerViewCache
+            )
         }
         packsCollectionView.items = items
 
@@ -123,7 +123,7 @@ public class StickerKeyboard: CustomKeyboard {
 
         // If the selected pack was uninstalled, select the first pack.
         if let selectedStickerPack = selectedStickerPack, !stickerPacks.contains(selectedStickerPack) {
-            self.selectedStickerPack = stickerPacks.first
+            updateSelectedStickerPack(stickerPacks.first)
         }
 
         resetStickerPages()
@@ -213,7 +213,12 @@ public class StickerKeyboard: CustomKeyboard {
         Logger.verbose("")
 
         // nil is used for the recents special-case.
-        selectedStickerPack = nil
+        updateSelectedStickerPack(nil)
+    }
+
+    private func updateSelectedStickerPack(_ stickerPack: StickerPack?, scrollToSelected: Bool = false) {
+        selectedStickerPack = stickerPack
+        packsCollectionView.updateSelections(scrollToSelectedItem: scrollToSelected)
     }
 
     private func manageButtonWasTapped() {
@@ -369,9 +374,6 @@ public class StickerKeyboard: CustomKeyboard {
         if !isScrollingChange { applyPendingPageChangeUpdates() }
 
         updatePageConstraints()
-
-        // Update the selected pack in the top bar.
-        packsCollectionView.updateSelections()
     }
 
     private func resetStickerPages() {
@@ -446,11 +448,11 @@ public class StickerKeyboard: CustomKeyboard {
 
         // Scrolled left a page
         if offsetX <= previousPageThreshold {
-            selectedStickerPack = previousPageStickerPack
+            updateSelectedStickerPack(previousPageStickerPack, scrollToSelected: true)
 
             // Scrolled right a page
         } else if offsetX >= nextPageThreshold {
-            selectedStickerPack = nextPageStickerPack
+            updateSelectedStickerPack(nextPageStickerPack, scrollToSelected: true)
 
             // We're about to cross the threshold into a new page, execute any pending updates.
             // We wait to execute these until we're sure we're going to cross over as it
@@ -500,5 +502,63 @@ extension StickerKeyboard: StickerPackCollectionViewDelegate {
 
     public func stickerPreviewHasOverlay() -> Bool {
         return true
+    }
+}
+
+// MARK: -
+
+@objc
+public class StickerViewCache: NSObject {
+
+    private let backingCache: LRUCache<StickerInfo, StickerReusableView>
+
+    @objc
+    public init(maxSize: Int) {
+        // Always use a nseMaxSize of zero.
+        backingCache = LRUCache(maxSize: maxSize,
+                                nseMaxSize: 0,
+                                shouldEvacuateInBackground: true)
+    }
+
+    @objc
+    public func get(key: StickerInfo) -> StickerReusableView? {
+        return self.backingCache.get(key: key)
+    }
+
+    @objc
+    public func set(key: StickerInfo, value: StickerReusableView) {
+        self.backingCache.set(key: key, value: value)
+    }
+
+    @objc
+    public func remove(key: StickerInfo) {
+        self.backingCache.remove(key: key)
+    }
+
+    @objc
+    public func clear() {
+        self.backingCache.clear()
+    }
+
+    // MARK: - NSCache Compatibility
+
+    @objc
+    public func setObject(_ value: StickerReusableView, forKey key: StickerInfo) {
+        set(key: key, value: value)
+    }
+
+    @objc
+    public func object(forKey key: StickerInfo) -> StickerReusableView? {
+        self.get(key: key)
+    }
+
+    @objc
+    public func removeObject(forKey key: StickerInfo) {
+        remove(key: key)
+    }
+
+    @objc
+    public func removeAllObjects() {
+        clear()
     }
 }

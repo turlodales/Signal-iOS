@@ -1,15 +1,17 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import UIKit
 import AVFoundation
 
-protocol AttachmentPrepViewControllerDelegate: class {
+protocol AttachmentPrepViewControllerDelegate: AnyObject {
     func prepViewControllerUpdateNavigationBar()
 
     func prepViewControllerUpdateControls()
+
+    var prepViewControllerShouldIgnoreTapGesture: Bool { get }
 }
 
 // MARK: -
@@ -235,10 +237,6 @@ public class AttachmentPrepViewController: OWSViewController {
 
     // MARK: - Tooltip
 
-    var preferences: OWSPreferences {
-        return Environment.shared.preferences
-    }
-
     private var shouldShowBlurTooltip: Bool {
         guard imageEditorView != nil else { return false }
 
@@ -271,10 +269,12 @@ public class AttachmentPrepViewController: OWSViewController {
         }
         blurTooltip = tooltip
 
-        preferences.setWasBlurTooltipShown()
+        DispatchQueue.global().async {
+            self.preferences.setWasBlurTooltipShown()
 
-        DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 5) { [weak self] in
-            self?.removeBlurTooltip()
+            DispatchQueue.main.asyncAfter(deadline: DispatchTime.now() + 5) { [weak self] in
+                self?.removeBlurTooltip()
+            }
         }
     }
 
@@ -385,7 +385,7 @@ extension AttachmentPrepViewController: ImageEditorViewDelegate {
         navigationController.ows_prefersStatusBarHidden = true
 
         if let navigationBar = navigationController.navigationBar as? OWSNavigationBar {
-            navigationBar.switchToStyle(.clear)
+            navigationBar.switchToStyle(.alwaysDarkAndClear)
         } else {
             owsFailDebug("navigationBar was nil or unexpected class")
         }
@@ -399,6 +399,10 @@ extension AttachmentPrepViewController: ImageEditorViewDelegate {
 
     public func imageEditorUpdateControls() {
         prepDelegate?.prepViewControllerUpdateControls()
+    }
+
+    public var imageEditorShouldIgnoreTapGesture: Bool {
+        return prepDelegate?.prepViewControllerShouldIgnoreTapGesture ?? false
     }
 }
 

@@ -1,11 +1,12 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "RemoteAttestationSigningCertificate.h"
+#import <SignalServiceKit/RemoteAttestationSigningCertificate.h>
 #import <CommonCrypto/CommonCrypto.h>
 #import <SignalCoreKit/Cryptography.h>
 #import <SignalCoreKit/NSData+OWS.h>
+#import <SignalCoreKit/SignalCoreKit-Swift.h>
 #import <openssl/x509.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -98,10 +99,18 @@ NSError *RemoteAttestationSigningCertificateErrorMake(RemoteAttestationSigningCe
     for (NSData *certificateDerData in certificateDerDatas) {
         SecCertificateRef certificate = SecCertificateCreateWithData(NULL, (__bridge CFDataRef)(certificateDerData));
         if (!certificate) {
-            OWSFailDebug(@"Could not create SecCertificate %@.", certificateDerData.base64EncodedString);
-            *error = RemoteAttestationSigningCertificateErrorMake(
-                RemoteAttestationSigningCertificateError_AssertionError, @"Could not create SecCertificate.");
-            return nil;
+            OWSFailDebug(@"Could not create SecCertificate from DER:\n%@\n\nParsed from PEM:\n%@", certificateDerData.base64EncodedString, certificatePem);
+
+            // If we failed to parse the leaf certificate, we must fail outright.
+            // There's no way to verify this certificate is trusted.
+            if ([certificateDerData isEqualToData:leafCertificateData]) {
+                *error = RemoteAttestationSigningCertificateErrorMake(
+                                                                      RemoteAttestationSigningCertificateError_AssertionError, @"Could not create SecCertificate.");
+                return nil;
+            } else {
+                OWSLogWarn(@"Skipping non-leaf certificate, we'll attempt to verify trust without it.");
+                continue;
+            }
         }
         [certificates addObject:(__bridge_transfer id)certificate];
     }
@@ -387,6 +396,8 @@ NSError *RemoteAttestationSigningCertificateErrorMake(RemoteAttestationSigningCe
         }
         certificateProperties[oid] = entryString;
     }
+
+    X509_free(certificateX509);
     return certificateProperties;
 }
 

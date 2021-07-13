@@ -1,0 +1,5 @@
+• Aplikaci jsme vylepšili o nové animace při odesílání a přijímání zpráv, výběru zpráv v zobrazení chatu a odpovídání na zprávy.
+• Výdrž baterie je vzácnost, proto jsme provedli několik změn ve způsobu zpracování oznámení v aplikaci, které výrazně snižují spotřebu baterie. Nahlaste prosím všechny problémy, které se spolehlivostí oznámení zaznamenáte. 
+• Obdrželi jste nechtěnou zprávu? Nyní ji můžete nahlásit jako spam klepnutím na tlačítko blokovat.
+
+Chcete pomoci vylepšit Signal? Nabíráme. Další informace najdete na adrese https://signal.org/workworkwork.

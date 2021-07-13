@@ -1,8 +1,9 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "ShareAppExtensionContext.h"
+#import <SignalMessaging/DebugLogger.h>
 #import <SignalMessaging/UIViewController+OWS.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/TSConstants.h>
@@ -154,6 +155,11 @@ NS_ASSUME_NONNULL_BEGIN
     return NO;
 }
 
+- (BOOL)isNSE
+{
+    return NO;
+}
+
 - (UIApplicationState)mainApplicationStateOnLaunch
 {
     OWSFailDebug(@"Not main app.");
@@ -221,6 +227,11 @@ NS_ASSUME_NONNULL_BEGIN
     OWSAssertDebug(self.rootViewController);
 
     return [self.rootViewController findFrontmostViewController:YES];
+}
+
+- (void)openSystemSettings
+{
+    return;
 }
 
 - (nullable ActionSheetAction *)openSystemSettingsActionWithCompletion:(void (^_Nullable)(void))completion
@@ -316,6 +327,21 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)hasUI
 {
     return YES;
+}
+
+- (BOOL)didLastLaunchNotTerminate
+{
+    return NO;
+}
+
+- (BOOL)hasActiveCall
+{
+    return NO;
+}
+
+- (NSString *)debugLogsDirPath
+{
+    return DebugLogger.shareExtensionDebugLogsDirPath;
 }
 
 @end

@@ -1,10 +1,10 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "SSKMessageSenderJobRecord.h"
-#import "TSOutgoingMessage.h"
+#import <SignalServiceKit/SSKMessageSenderJobRecord.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSOutgoingMessage.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -38,7 +38,9 @@ NS_ASSUME_NONNULL_BEGIN
                                         userInfo:@{ NSDebugDescriptionErrorKey : @"message wasn't saved" }];
             return nil;
         }
+
         _isMediaMessage = [message hasMediaAttachmentsWithTransaction:transaction.unwrapGrdbRead];
+
         _invisibleMessage = nil;
     } else {
         _messageId = nil;

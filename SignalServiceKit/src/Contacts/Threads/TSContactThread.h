@@ -1,24 +1,14 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSThread.h"
+#import <SignalServiceKit/TSThread.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @class SignalServiceAddress;
 
 @interface TSContactThread : TSThread
-
-- (instancetype)initWithGrdbId:(int64_t)grdbId
-                      uniqueId:(NSString *)uniqueId
-         conversationColorName:(ConversationColorName)conversationColorName
-                  creationDate:(nullable NSDate *)creationDate
-                    isArchived:(BOOL)isArchived
-          lastInteractionRowId:(int64_t)lastInteractionRowId
-                  messageDraft:(nullable NSString *)messageDraft
-                mutedUntilDate:(nullable NSDate *)mutedUntilDate
-         shouldThreadBeVisible:(BOOL)shouldThreadBeVisible NS_UNAVAILABLE;
 
 + (instancetype)new NS_UNAVAILABLE;
 - (instancetype)init NS_UNAVAILABLE;
@@ -38,18 +28,23 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithGrdbId:(int64_t)grdbId
                       uniqueId:(NSString *)uniqueId
-           conversationColorName:(ConversationColorName)conversationColorName
+   conversationColorNameObsolete:(NSString *)conversationColorNameObsolete
                     creationDate:(nullable NSDate *)creationDate
-                      isArchived:(BOOL)isArchived
-                  isMarkedUnread:(BOOL)isMarkedUnread
+              isArchivedObsolete:(BOOL)isArchivedObsolete
+          isMarkedUnreadObsolete:(BOOL)isMarkedUnreadObsolete
             lastInteractionRowId:(int64_t)lastInteractionRowId
+       lastVisibleSortIdObsolete:(uint64_t)lastVisibleSortIdObsolete
+lastVisibleSortIdOnScreenPercentageObsolete:(double)lastVisibleSortIdOnScreenPercentageObsolete
+         mentionNotificationMode:(TSThreadMentionNotificationMode)mentionNotificationMode
                     messageDraft:(nullable NSString *)messageDraft
-                  mutedUntilDate:(nullable NSDate *)mutedUntilDate
+          messageDraftBodyRanges:(nullable MessageBodyRanges *)messageDraftBodyRanges
+          mutedUntilDateObsolete:(nullable NSDate *)mutedUntilDateObsolete
+     mutedUntilTimestampObsolete:(uint64_t)mutedUntilTimestampObsolete
            shouldThreadBeVisible:(BOOL)shouldThreadBeVisible
               contactPhoneNumber:(nullable NSString *)contactPhoneNumber
                      contactUUID:(nullable NSString *)contactUUID
               hasDismissedOffers:(BOOL)hasDismissedOffers
-NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(grdbId:uniqueId:conversationColorName:creationDate:isArchived:isMarkedUnread:lastInteractionRowId:messageDraft:mutedUntilDate:shouldThreadBeVisible:contactPhoneNumber:contactUUID:hasDismissedOffers:));
+NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(grdbId:uniqueId:conversationColorNameObsolete:creationDate:isArchivedObsolete:isMarkedUnreadObsolete:lastInteractionRowId:lastVisibleSortIdObsolete:lastVisibleSortIdOnScreenPercentageObsolete:mentionNotificationMode:messageDraft:messageDraftBodyRanges:mutedUntilDateObsolete:mutedUntilTimestampObsolete:shouldThreadBeVisible:contactPhoneNumber:contactUUID:hasDismissedOffers:));
 
 // clang-format on
 
@@ -73,12 +68,6 @@ NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(grdbId:uniqueId:conversationColorNa
 
 // This is only ever used from migration from a pre-UUID world to a UUID world
 + (nullable NSString *)legacyContactPhoneNumberFromThreadId:(NSString *)threadId;
-
-// This method can be used to get the conversation color for a given
-// recipient without using a read/write transaction to create a
-// contact thread.
-+ (NSString *)conversationColorNameForContactAddress:(SignalServiceAddress *)address
-                                         transaction:(SDSAnyReadTransaction *)transaction;
 
 @end
 

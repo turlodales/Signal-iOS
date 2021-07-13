@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
@@ -96,7 +96,7 @@ public class PinReminderViewController: OWSViewController {
 
         let titleLabel = UILabel()
         titleLabel.textColor = Theme.primaryTextColor
-        titleLabel.font = UIFont.ows_dynamicTypeTitle3Clamped.ows_semibold()
+        titleLabel.font = UIFont.ows_dynamicTypeTitle3Clamped.ows_semibold
         titleLabel.numberOfLines = 0
         titleLabel.lineBreakMode = .byWordWrapping
         titleLabel.textAlignment = .center
@@ -150,7 +150,7 @@ public class PinReminderViewController: OWSViewController {
         pinStack.autoSetDimension(.width, toSize: 227)
         pinStackRow.setContentHuggingVerticalHigh()
 
-        let font = UIFont.ows_dynamicTypeBodyClamped.ows_semibold()
+        let font = UIFont.ows_dynamicTypeBodyClamped.ows_semibold
         let buttonHeight = OWSFlatButton.heightForFont(font)
         let submitButton = OWSFlatButton.button(
             title: NSLocalizedString("BUTTON_SUBMIT",
@@ -236,9 +236,10 @@ public class PinReminderViewController: OWSViewController {
     @objc func dismissPressed() {
         Logger.info("")
 
-        // The megaphone will persist and we'll deprecate their reminder interval if they
-        // tried and guessed wrong while the view was visible.
-        if hasGuessedWrong { OWS2FAManager.shared().updateRepetitionInterval(withWasSuccessful: false) }
+        // If the user tried and guessed wrong, we'll dismiss the megaphone and
+        // decrease their reminder interval so the next reminder comes sooner.
+        // If they didn't try and enter a PIN, we do nothing and leave the megaphone.
+        if hasGuessedWrong { OWS2FAManager.shared.reminderCompleted(withIncorrectAttempts: true) }
 
         dismiss(animated: true, completion: nil)
     }
@@ -260,9 +261,9 @@ public class PinReminderViewController: OWSViewController {
             return
         }
 
-        OWS2FAManager.shared().verifyPin(pin) { success in
+        OWS2FAManager.shared.verifyPin(pin) { success in
             guard success else {
-                guard OWS2FAManager.shared().needsLegacyPinMigration(), pin.count > kLegacyTruncated2FAv1PinLength else {
+                guard OWS2FAManager.shared.needsLegacyPinMigration(), pin.count > kLegacyTruncated2FAv1PinLength else {
                     if !silent { self.validationState = .mismatch }
                     return
                 }
@@ -278,7 +279,7 @@ public class PinReminderViewController: OWSViewController {
     }
 
     private func dismissAndUpdateRepetitionInterval() {
-        OWS2FAManager.shared().updateRepetitionInterval(withWasSuccessful: !hasGuessedWrong)
+        OWS2FAManager.shared.reminderCompleted(withIncorrectAttempts: hasGuessedWrong)
         dismiss(animated: true)
     }
 

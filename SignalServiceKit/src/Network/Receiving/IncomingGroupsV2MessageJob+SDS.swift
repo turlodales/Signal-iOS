@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -33,6 +33,7 @@ public struct IncomingGroupsV2MessageJobRecord: SDSRecord {
     public let plaintextData: Data?
     public let wasReceivedByUD: Bool
     public let groupId: Data?
+    public let serverDeliveryTimestamp: UInt64
 
     public enum CodingKeys: String, CodingKey, ColumnExpression, CaseIterable {
         case id
@@ -43,6 +44,7 @@ public struct IncomingGroupsV2MessageJobRecord: SDSRecord {
         case plaintextData
         case wasReceivedByUD
         case groupId
+        case serverDeliveryTimestamp
     }
 
     public static func columnName(_ column: IncomingGroupsV2MessageJobRecord.CodingKeys, fullyQualified: Bool = false) -> String {
@@ -74,6 +76,7 @@ public extension IncomingGroupsV2MessageJobRecord {
         plaintextData = row[5]
         wasReceivedByUD = row[6]
         groupId = row[7]
+        serverDeliveryTimestamp = row[8]
     }
 }
 
@@ -110,6 +113,7 @@ extension IncomingGroupsV2MessageJob {
             let envelopeData: Data = record.envelopeData
             let groupId: Data? = SDSDeserialization.optionalData(record.groupId, name: "groupId")
             let plaintextData: Data? = SDSDeserialization.optionalData(record.plaintextData, name: "plaintextData")
+            let serverDeliveryTimestamp: UInt64 = record.serverDeliveryTimestamp
             let wasReceivedByUD: Bool = record.wasReceivedByUD
 
             return IncomingGroupsV2MessageJob(grdbId: recordId,
@@ -118,6 +122,7 @@ extension IncomingGroupsV2MessageJob {
                                               envelopeData: envelopeData,
                                               groupId: groupId,
                                               plaintextData: plaintextData,
+                                              serverDeliveryTimestamp: serverDeliveryTimestamp,
                                               wasReceivedByUD: wasReceivedByUD)
 
         default:
@@ -153,6 +158,42 @@ extension IncomingGroupsV2MessageJob: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension IncomingGroupsV2MessageJob: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == IncomingGroupsV2MessageJob.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let createdAt: Date = modelToCopy.createdAt
+            let envelopeData: Data = modelToCopy.envelopeData
+            let groupId: Data? = modelToCopy.groupId
+            let plaintextData: Data? = modelToCopy.plaintextData
+            let serverDeliveryTimestamp: UInt64 = modelToCopy.serverDeliveryTimestamp
+            let wasReceivedByUD: Bool = modelToCopy.wasReceivedByUD
+
+            return IncomingGroupsV2MessageJob(grdbId: id,
+                                              uniqueId: uniqueId,
+                                              createdAt: createdAt,
+                                              envelopeData: envelopeData,
+                                              groupId: groupId,
+                                              plaintextData: plaintextData,
+                                              serverDeliveryTimestamp: serverDeliveryTimestamp,
+                                              wasReceivedByUD: wasReceivedByUD)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension IncomingGroupsV2MessageJobSerializer {
@@ -168,6 +209,7 @@ extension IncomingGroupsV2MessageJobSerializer {
     static let plaintextDataColumn = SDSColumnMetadata(columnName: "plaintextData", columnType: .blob, isOptional: true)
     static let wasReceivedByUDColumn = SDSColumnMetadata(columnName: "wasReceivedByUD", columnType: .int)
     static let groupIdColumn = SDSColumnMetadata(columnName: "groupId", columnType: .blob, isOptional: true)
+    static let serverDeliveryTimestampColumn = SDSColumnMetadata(columnName: "serverDeliveryTimestamp", columnType: .int64)
 
     // TODO: We should decide on a naming convention for
     //       tables that store models.
@@ -181,7 +223,8 @@ extension IncomingGroupsV2MessageJobSerializer {
         envelopeDataColumn,
         plaintextDataColumn,
         wasReceivedByUDColumn,
-        groupIdColumn
+        groupIdColumn,
+        serverDeliveryTimestampColumn
         ])
 }
 
@@ -291,9 +334,11 @@ public extension IncomingGroupsV2MessageJob {
 
 @objc
 public class IncomingGroupsV2MessageJobCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<IncomingGroupsV2MessageJobRecord>?
 
-    init(cursor: RecordCursor<IncomingGroupsV2MessageJobRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<IncomingGroupsV2MessageJobRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -335,10 +380,10 @@ public extension IncomingGroupsV2MessageJob {
         let database = transaction.database
         do {
             let cursor = try IncomingGroupsV2MessageJobRecord.fetchCursor(database)
-            return IncomingGroupsV2MessageJobCursor(cursor: cursor)
+            return IncomingGroupsV2MessageJobCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return IncomingGroupsV2MessageJobCursor(cursor: nil)
+            return IncomingGroupsV2MessageJobCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -348,8 +393,6 @@ public extension IncomingGroupsV2MessageJob {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return IncomingGroupsV2MessageJob.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(IncomingGroupsV2MessageJobRecord.databaseTableName) WHERE \(incomingGroupsV2MessageJobColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -380,28 +423,20 @@ public extension IncomingGroupsV2MessageJob {
                             batchSize: UInt,
                             block: @escaping (IncomingGroupsV2MessageJob, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            IncomingGroupsV2MessageJob.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? IncomingGroupsV2MessageJob else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = IncomingGroupsV2MessageJob.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = IncomingGroupsV2MessageJob.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -429,10 +464,6 @@ public extension IncomingGroupsV2MessageJob {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: IncomingGroupsV2MessageJob.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -464,8 +495,6 @@ public extension IncomingGroupsV2MessageJob {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: IncomingGroupsV2MessageJob.collection())
         case .grdbRead(let grdbTransaction):
             return IncomingGroupsV2MessageJobRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -475,8 +504,6 @@ public extension IncomingGroupsV2MessageJob {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: IncomingGroupsV2MessageJob.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try IncomingGroupsV2MessageJobRecord.deleteAll(grdbTransaction.database)
@@ -525,8 +552,6 @@ public extension IncomingGroupsV2MessageJob {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: IncomingGroupsV2MessageJob.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(IncomingGroupsV2MessageJobRecord.databaseTableName) WHERE \(incomingGroupsV2MessageJobColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -544,11 +569,11 @@ public extension IncomingGroupsV2MessageJob {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try IncomingGroupsV2MessageJobRecord.fetchCursor(transaction.database, sqlRequest)
-            return IncomingGroupsV2MessageJobCursor(cursor: cursor)
+            return IncomingGroupsV2MessageJobCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return IncomingGroupsV2MessageJobCursor(cursor: nil)
+            return IncomingGroupsV2MessageJobCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -596,7 +621,25 @@ class IncomingGroupsV2MessageJobSerializer: SDSSerializer {
         let plaintextData: Data? = model.plaintextData
         let wasReceivedByUD: Bool = model.wasReceivedByUD
         let groupId: Data? = model.groupId
+        let serverDeliveryTimestamp: UInt64 = model.serverDeliveryTimestamp
 
-        return IncomingGroupsV2MessageJobRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, createdAt: createdAt, envelopeData: envelopeData, plaintextData: plaintextData, wasReceivedByUD: wasReceivedByUD, groupId: groupId)
+        return IncomingGroupsV2MessageJobRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, createdAt: createdAt, envelopeData: envelopeData, plaintextData: plaintextData, wasReceivedByUD: wasReceivedByUD, groupId: groupId, serverDeliveryTimestamp: serverDeliveryTimestamp)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension IncomingGroupsV2MessageJob {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> IncomingGroupsV2MessageJob {
+        guard let record = try asRecord() as? IncomingGroupsV2MessageJobRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try IncomingGroupsV2MessageJob.fromRecord(record)
+    }
+}
+#endif

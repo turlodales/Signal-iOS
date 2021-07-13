@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -37,6 +37,10 @@ public struct UserProfileRecord: SDSRecord {
     public let username: String?
     public let familyName: String?
     public let isUuidCapable: Bool
+    public let lastFetchDate: Double?
+    public let lastMessagingDate: Double?
+    public let bio: String?
+    public let bioEmoji: String?
 
     public enum CodingKeys: String, CodingKey, ColumnExpression, CaseIterable {
         case id
@@ -51,6 +55,10 @@ public struct UserProfileRecord: SDSRecord {
         case username
         case familyName
         case isUuidCapable
+        case lastFetchDate
+        case lastMessagingDate
+        case bio
+        case bioEmoji
     }
 
     public static func columnName(_ column: UserProfileRecord.CodingKeys, fullyQualified: Bool = false) -> String {
@@ -86,6 +94,10 @@ public extension UserProfileRecord {
         username = row[9]
         familyName = row[10]
         isUuidCapable = row[11]
+        lastFetchDate = row[12]
+        lastMessagingDate = row[13]
+        bio = row[14]
+        bioEmoji = row[15]
     }
 }
 
@@ -119,8 +131,14 @@ extension OWSUserProfile {
             let uniqueId: String = record.uniqueId
             let avatarFileName: String? = record.avatarFileName
             let avatarUrlPath: String? = record.avatarUrlPath
+            let bio: String? = record.bio
+            let bioEmoji: String? = record.bioEmoji
             let familyName: String? = record.familyName
             let isUuidCapable: Bool = record.isUuidCapable
+            let lastFetchDateInterval: Double? = record.lastFetchDate
+            let lastFetchDate: Date? = SDSDeserialization.optionalDoubleAsDate(lastFetchDateInterval, name: "lastFetchDate")
+            let lastMessagingDateInterval: Double? = record.lastMessagingDate
+            let lastMessagingDate: Date? = SDSDeserialization.optionalDoubleAsDate(lastMessagingDateInterval, name: "lastMessagingDate")
             let profileKeySerialized: Data? = record.profileKey
             let profileKey: OWSAES256Key? = try SDSDeserialization.optionalUnarchive(profileKeySerialized, name: "profileKey")
             let profileName: String? = record.profileName
@@ -132,8 +150,12 @@ extension OWSUserProfile {
                                   uniqueId: uniqueId,
                                   avatarFileName: avatarFileName,
                                   avatarUrlPath: avatarUrlPath,
+                                  bio: bio,
+                                  bioEmoji: bioEmoji,
                                   familyName: familyName,
                                   isUuidCapable: isUuidCapable,
+                                  lastFetchDate: lastFetchDate,
+                                  lastMessagingDate: lastMessagingDate,
                                   profileKey: profileKey,
                                   profileName: profileName,
                                   recipientPhoneNumber: recipientPhoneNumber,
@@ -173,6 +195,68 @@ extension OWSUserProfile: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension OWSUserProfile: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == OWSUserProfile.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let avatarFileName: String? = modelToCopy.avatarFileName
+            let avatarUrlPath: String? = modelToCopy.avatarUrlPath
+            let bio: String? = modelToCopy.bio
+            let bioEmoji: String? = modelToCopy.bioEmoji
+            let familyName: String? = modelToCopy.familyName
+            let isUuidCapable: Bool = modelToCopy.isUuidCapable
+            let lastFetchDate: Date? = modelToCopy.lastFetchDate
+            let lastMessagingDate: Date? = modelToCopy.lastMessagingDate
+            // NOTE: If this generates build errors, you made need to
+            // modify DeepCopy.swift to support this type.
+            //
+            // That might mean:
+            //
+            // * Implement DeepCopyable for this type (e.g. a model).
+            // * Modify DeepCopies.deepCopy() to support this type (e.g. a collection).
+            let profileKey: OWSAES256Key?
+            if let profileKeyForCopy = modelToCopy.profileKey {
+               profileKey = try DeepCopies.deepCopy(profileKeyForCopy)
+            } else {
+               profileKey = nil
+            }
+            let profileName: String? = modelToCopy.profileName
+            let recipientPhoneNumber: String? = modelToCopy.recipientPhoneNumber
+            let recipientUUID: String? = modelToCopy.recipientUUID
+            let username: String? = modelToCopy.username
+
+            return OWSUserProfile(grdbId: id,
+                                  uniqueId: uniqueId,
+                                  avatarFileName: avatarFileName,
+                                  avatarUrlPath: avatarUrlPath,
+                                  bio: bio,
+                                  bioEmoji: bioEmoji,
+                                  familyName: familyName,
+                                  isUuidCapable: isUuidCapable,
+                                  lastFetchDate: lastFetchDate,
+                                  lastMessagingDate: lastMessagingDate,
+                                  profileKey: profileKey,
+                                  profileName: profileName,
+                                  recipientPhoneNumber: recipientPhoneNumber,
+                                  recipientUUID: recipientUUID,
+                                  username: username)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension OWSUserProfileSerializer {
@@ -192,6 +276,10 @@ extension OWSUserProfileSerializer {
     static let usernameColumn = SDSColumnMetadata(columnName: "username", columnType: .unicodeString, isOptional: true)
     static let familyNameColumn = SDSColumnMetadata(columnName: "familyName", columnType: .unicodeString, isOptional: true)
     static let isUuidCapableColumn = SDSColumnMetadata(columnName: "isUuidCapable", columnType: .int)
+    static let lastFetchDateColumn = SDSColumnMetadata(columnName: "lastFetchDate", columnType: .double, isOptional: true)
+    static let lastMessagingDateColumn = SDSColumnMetadata(columnName: "lastMessagingDate", columnType: .double, isOptional: true)
+    static let bioColumn = SDSColumnMetadata(columnName: "bio", columnType: .unicodeString, isOptional: true)
+    static let bioEmojiColumn = SDSColumnMetadata(columnName: "bioEmoji", columnType: .unicodeString, isOptional: true)
 
     // TODO: We should decide on a naming convention for
     //       tables that store models.
@@ -209,7 +297,11 @@ extension OWSUserProfileSerializer {
         recipientUUIDColumn,
         usernameColumn,
         familyNameColumn,
-        isUuidCapableColumn
+        isUuidCapableColumn,
+        lastFetchDateColumn,
+        lastMessagingDateColumn,
+        bioColumn,
+        bioEmojiColumn
         ])
 }
 
@@ -319,9 +411,11 @@ public extension OWSUserProfile {
 
 @objc
 public class OWSUserProfileCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<UserProfileRecord>?
 
-    init(cursor: RecordCursor<UserProfileRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<UserProfileRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -332,7 +426,9 @@ public class OWSUserProfileCursor: NSObject {
         guard let record = try cursor.next() else {
             return nil
         }
-        return try OWSUserProfile.fromRecord(record)
+        let value = try OWSUserProfile.fromRecord(record)
+        Self.modelReadCaches.userProfileReadCache.didReadUserProfile(value, transaction: transaction.asAnyRead)
+        return value
     }
 
     public func all() throws -> [OWSUserProfile] {
@@ -363,10 +459,10 @@ public extension OWSUserProfile {
         let database = transaction.database
         do {
             let cursor = try UserProfileRecord.fetchCursor(database)
-            return OWSUserProfileCursor(cursor: cursor)
+            return OWSUserProfileCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return OWSUserProfileCursor(cursor: nil)
+            return OWSUserProfileCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -376,8 +472,6 @@ public extension OWSUserProfile {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return OWSUserProfile.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(UserProfileRecord.databaseTableName) WHERE \(userProfileColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -408,28 +502,20 @@ public extension OWSUserProfile {
                             batchSize: UInt,
                             block: @escaping (OWSUserProfile, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            OWSUserProfile.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? OWSUserProfile else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = OWSUserProfile.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = OWSUserProfile.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -457,10 +543,6 @@ public extension OWSUserProfile {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: OWSUserProfile.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -492,8 +574,6 @@ public extension OWSUserProfile {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: OWSUserProfile.collection())
         case .grdbRead(let grdbTransaction):
             return UserProfileRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -503,8 +583,6 @@ public extension OWSUserProfile {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: OWSUserProfile.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try UserProfileRecord.deleteAll(grdbTransaction.database)
@@ -553,8 +631,6 @@ public extension OWSUserProfile {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: OWSUserProfile.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(UserProfileRecord.databaseTableName) WHERE \(userProfileColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -572,11 +648,11 @@ public extension OWSUserProfile {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try UserProfileRecord.fetchCursor(transaction.database, sqlRequest)
-            return OWSUserProfileCursor(cursor: cursor)
+            return OWSUserProfileCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return OWSUserProfileCursor(cursor: nil)
+            return OWSUserProfileCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -591,7 +667,9 @@ public extension OWSUserProfile {
                 return nil
             }
 
-            return try OWSUserProfile.fromRecord(record)
+            let value = try OWSUserProfile.fromRecord(record)
+            Self.modelReadCaches.userProfileReadCache.didReadUserProfile(value, transaction: transaction.asAnyRead)
+            return value
         } catch {
             owsFailDebug("error: \(error)")
             return nil
@@ -628,7 +706,28 @@ class OWSUserProfileSerializer: SDSSerializer {
         let username: String? = model.username
         let familyName: String? = model.familyName
         let isUuidCapable: Bool = model.isUuidCapable
+        let lastFetchDate: Double? = archiveOptionalDate(model.lastFetchDate)
+        let lastMessagingDate: Double? = archiveOptionalDate(model.lastMessagingDate)
+        let bio: String? = model.bio
+        let bioEmoji: String? = model.bioEmoji
 
-        return UserProfileRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, avatarFileName: avatarFileName, avatarUrlPath: avatarUrlPath, profileKey: profileKey, profileName: profileName, recipientPhoneNumber: recipientPhoneNumber, recipientUUID: recipientUUID, username: username, familyName: familyName, isUuidCapable: isUuidCapable)
+        return UserProfileRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, avatarFileName: avatarFileName, avatarUrlPath: avatarUrlPath, profileKey: profileKey, profileName: profileName, recipientPhoneNumber: recipientPhoneNumber, recipientUUID: recipientUUID, username: username, familyName: familyName, isUuidCapable: isUuidCapable, lastFetchDate: lastFetchDate, lastMessagingDate: lastMessagingDate, bio: bio, bioEmoji: bioEmoji)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension OWSUserProfile {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> OWSUserProfile {
+        guard let record = try asRecord() as? UserProfileRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try OWSUserProfile.fromRecord(record)
+    }
+}
+#endif

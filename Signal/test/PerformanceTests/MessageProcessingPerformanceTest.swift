@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import XCTest
@@ -8,32 +8,13 @@ import GRDB
 
 class MessageProcessingPerformanceTest: PerformanceBaseTest {
 
-    // MARK: - Dependencies
-
-    var messageReceiver: OWSMessageReceiver {
-        return SSKEnvironment.shared.messageReceiver
-    }
-
-    var tsAccountManager: TSAccountManager {
-        return SSKEnvironment.shared.tsAccountManager
-    }
-
-    var identityManager: OWSIdentityManager {
-        return SSKEnvironment.shared.identityManager
-    }
-
-    // MARK: -
-
     let localE164Identifier = "+13235551234"
     let localUUID = UUID()
-
-    let aliceE164Identifier = "+14715355555"
-    var aliceClient: SignalClient!
-
-    let bobE164Identifier = "+18083235555"
-    var bobClient: SignalClient!
-
     let localClient = LocalSignalClient()
+
+    let bobUUID = UUID()
+    var bobClient: TestSignalClient!
+
     let runner = TestProtocolRunner()
     lazy var fakeService = FakeService(localClient: localClient, runner: runner)
 
@@ -46,35 +27,42 @@ class MessageProcessingPerformanceTest: PerformanceBaseTest {
     override func setUp() {
         super.setUp()
 
-        // for unit tests, we must manually start the decryptJobQueue
-        SSKEnvironment.shared.messageDecryptJobQueue.setup()
+        try! databaseStorage.grdbStorage.setupDatabaseChangeObserver()
 
+        // Use DatabaseChangeObserver to be notified of DB writes so we
+        // can verify the expected changes occur.
         let dbObserver = BlockObserver(block: { [weak self] in self?.dbObserverBlock?() })
         self.dbObserver = dbObserver
-        databaseStorage.add(databaseStorageObserver: dbObserver)
+        databaseStorage.appendDatabaseChangeDelegate(dbObserver)
     }
 
     override func tearDown() {
         super.tearDown()
+
         self.dbObserver = nil
+        databaseStorage.grdbStorage.testing_tearDownDatabaseChangeObserver()
     }
 
     // MARK: - Tests
 
-    func testGRDBPerf_messageProcessing() {
-        storageCoordinator.useGRDBForTests()
-        try! databaseStorage.grdbStorage.setupUIDatabase()
-        measureMetrics(XCTestCase.defaultPerformanceMetrics, automaticallyStartMeasuring: false) {
-            processIncomingMessages()
-        }
-        databaseStorage.grdbStorage.testing_tearDownUIDatabase()
-    }
-
-    func testYapDBPerf_messageProcessing() {
-        // Getting this working will require a new observer pattern.
-        storageCoordinator.useYDBForTests()
-        measureMetrics(XCTestCase.defaultPerformanceMetrics, automaticallyStartMeasuring: false) {
-            processIncomingMessages()
+    func testPerf_messageProcessing() {
+        if #available(iOS 13, *) {
+            let options = XCTMeasureOptions()
+            options.invocationOptions = [.manuallyStart, .manuallyStop]
+            options.iterationCount = 16
+            self.measure(options: options) {
+                autoreleasepool {
+                    processIncomingMessages()
+                }
+            }
+        } else {
+            // If we ever need to measure on older versions, we can't disable this owsFailDebug().
+            owsFailDebug("Invalid iOS version.")
+            measureMetrics(XCTestCase.defaultPerformanceMetrics, automaticallyStartMeasuring: false) {
+                autoreleasepool {
+                    processIncomingMessages()
+                }
+            }
         }
     }
 
@@ -83,10 +71,7 @@ class MessageProcessingPerformanceTest: PerformanceBaseTest {
         identityManager.generateNewIdentityKey()
         tsAccountManager.registerForTests(withLocalNumber: localE164Identifier, uuid: localUUID)
 
-        // use the uiDatabase to be notified of DB writes so we can verify the expected
-        // changes occur
-        bobClient = FakeSignalClient.generate(e164Identifier: bobE164Identifier)
-        aliceClient = FakeSignalClient.generate(e164Identifier: aliceE164Identifier)
+        bobClient = FakeSignalClient.generate(uuid: bobUUID)
 
         write { transaction in
             XCTAssertEqual(0, TSMessage.anyCount(transaction: transaction))
@@ -99,17 +84,24 @@ class MessageProcessingPerformanceTest: PerformanceBaseTest {
 
         let buildEnvelopeData = { () -> Data in
             let envelopeBuilder = try! self.fakeService.envelopeBuilder(fromSenderClient: self.bobClient)
-            envelopeBuilder.setSourceE164(self.bobClient.e164Identifier!)
+            envelopeBuilder.setSourceUuid(self.bobUUID.uuidString)
             return try! envelopeBuilder.buildSerializedData()
         }
 
-        let envelopeDatas: [Data] = (0..<500).map { _ in buildEnvelopeData() }
+        let envelopeCount: Int = DebugFlags.fastPerfTests ? 5 : 500
+        let envelopeDatas: [Data] = (0..<envelopeCount).map { _ in buildEnvelopeData() }
+
+        // Wait until message processing has completed, otherwise future
+        // tests may break as we try and drain the processing queue.
+        let expectFlushNotification = expectation(description: "queue flushed")
+        NotificationCenter.default.observe(once: MessageProcessor.messageProcessorDidFlushQueue).done { _ in
+            expectFlushNotification.fulfill()
+        }
 
         let expectMessagesProcessed = expectation(description: "messages processed")
-        var hasFulfilled = false
+        let hasFulfilled = AtomicBool(false)
         let fulfillOnce = {
-            if !hasFulfilled {
-                hasFulfilled = true
+            if hasFulfilled.tryToSetFlag() {
                 expectMessagesProcessed.fulfill()
             }
         }
@@ -118,15 +110,23 @@ class MessageProcessingPerformanceTest: PerformanceBaseTest {
             let messageCount = self.databaseStorage.read { transaction in
                 return TSInteraction.anyCount(transaction: transaction)
             }
-            if (messageCount == envelopeDatas.count) {
+            if messageCount == envelopeDatas.count {
                 fulfillOnce()
             }
         }
 
         startMeasuring()
-        for envelopeData in envelopeDatas {
-            messageReceiver.handleReceivedEnvelopeData(envelopeData)
+
+        let envelopeJobs: [MessageProcessor.EnvelopeJob] = envelopeDatas.map {
+            MessageProcessor.EnvelopeJob(encryptedEnvelopeData: $0,
+                                         encryptedEnvelope: nil,
+                                         completion: { XCTAssertNil($0) })
         }
+
+        messageProcessor.processEncryptedEnvelopes(
+            envelopeJobs: envelopeJobs,
+            serverDeliveryTimestamp: 0
+        )
 
         waitForExpectations(timeout: 15.0) { _ in
             self.stopMeasuring()
@@ -143,21 +143,25 @@ class MessageProcessingPerformanceTest: PerformanceBaseTest {
     }
 }
 
-private class BlockObserver: SDSDatabaseStorageObserver {
+private class BlockObserver: DatabaseChangeDelegate {
     let block: () -> Void
     init(block: @escaping () -> Void) {
         self.block = block
     }
 
-    func databaseStorageDidUpdate(change: SDSDatabaseStorageChange) {
+    func databaseChangesWillUpdate() {
+        AssertIsOnMainThread()
+    }
+
+    func databaseChangesDidUpdate(databaseChanges: DatabaseChanges) {
         block()
     }
 
-    func databaseStorageDidUpdateExternally() {
+    func databaseChangesDidUpdateExternally() {
         block()
     }
 
-    func databaseStorageDidReset() {
+    func databaseChangesDidReset() {
         block()
     }
 }

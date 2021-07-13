@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -42,7 +42,7 @@ public enum JobError: Error {
     case obsolete(description: String)
 }
 
-public protocol DurableOperation: class {
+public protocol DurableOperation: AnyObject, Equatable {
     associatedtype JobRecordType: SSKJobRecord
     associatedtype DurableOperationDelegateType: DurableOperationDelegate
 
@@ -52,7 +52,7 @@ public protocol DurableOperation: class {
     var remainingRetries: UInt { get set }
 }
 
-public protocol DurableOperationDelegate: class {
+public protocol DurableOperationDelegate: AnyObject {
     associatedtype DurableOperationType: DurableOperation
 
     func durableOperationDidSucceed(_ operation: DurableOperationType, transaction: SDSAnyWriteTransaction)
@@ -60,23 +60,9 @@ public protocol DurableOperationDelegate: class {
     func durableOperation(_ operation: DurableOperationType, didFailWithError error: Error, transaction: SDSAnyWriteTransaction)
 }
 
-public protocol JobQueue: DurableOperationDelegate {
+public protocol JobQueue: DurableOperationDelegate, Dependencies {
     typealias DurableOperationDelegateType = Self
     typealias JobRecordType = DurableOperationType.JobRecordType
-
-    // MARK: Dependencies
-
-    var databaseStorage: SDSDatabaseStorage { get }
-    var finder: AnyJobRecordFinder<JobRecordType> { get }
-
-    // MARK: Default Implementations
-
-    func add(jobRecord: JobRecordType, transaction: SDSAnyWriteTransaction)
-    func restartOldJobs()
-    func workStep()
-    func defaultSetup()
-
-    // MARK: Required
 
     var runningOperations: AtomicArray<DurableOperationType> { get set }
     var jobRecordLabel: String { get }
@@ -96,28 +82,24 @@ public protocol JobQueue: DurableOperationDelegate {
     /// are back online.
     var requiresInternet: Bool { get }
     static var maxRetries: UInt { get }
+
+    var isEnabled: Bool { get }
 }
+
+// MARK: -
 
 public extension JobQueue {
 
-    // MARK: Dependencies
-
-    var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
+    // MARK: - Dependencies
 
     var finder: AnyJobRecordFinder<JobRecordType> {
         return AnyJobRecordFinder<JobRecordType>()
     }
 
-    var reachabilityManager: SSKReachabilityManager {
-        return SSKEnvironment.shared.reachabilityManager
-    }
-
-    // MARK: 
+    // MARK: Default Implementations
 
     func add(jobRecord: JobRecordType, transaction: SDSAnyWriteTransaction) {
-        assert(jobRecord.status == .ready)
+        owsAssertDebug(jobRecord.status == .ready)
 
         jobRecord.anyInsert(transaction: transaction)
 
@@ -131,6 +113,8 @@ public extension JobQueue {
     }
 
     func startWorkWhenAppIsReady() {
+        guard isEnabled else { return }
+
         guard !CurrentAppContext().isRunningTests else {
             DispatchQueue.global().async {
                 self.workStep()
@@ -138,7 +122,7 @@ public extension JobQueue {
             return
         }
 
-        AppReadiness.runNowOrWhenAppDidBecomeReadyPolite {
+        AppReadiness.runNowOrWhenAppDidBecomeReadyAsync {
             guard self.isSetup.get() else {
                 return
             }
@@ -150,6 +134,8 @@ public extension JobQueue {
 
     func workStep() {
         Logger.debug("")
+
+        guard isEnabled else { return }
 
         guard !DebugFlags.suppressBackgroundActivity else {
             // Don't process queues.
@@ -178,7 +164,7 @@ public extension JobQueue {
                 let durableOperation = try self.buildOperation(jobRecord: nextJob, transaction: transaction)
 
                 durableOperation.durableOperationDelegate = self as? Self.DurableOperationType.DurableOperationDelegateType
-                assert(durableOperation.durableOperationDelegate != nil)
+                owsAssertDebug(durableOperation.durableOperationDelegate != nil)
 
                 let remainingRetries = self.remainingRetries(durableOperation: durableOperation)
                 durableOperation.remainingRetries = remainingRetries
@@ -205,6 +191,8 @@ public extension JobQueue {
     }
 
     func restartOldJobs() {
+        guard isEnabled else { return }
+
         guard !DebugFlags.suppressBackgroundActivity else {
             // Don't process queues.
             return
@@ -234,6 +222,8 @@ public extension JobQueue {
     /// `setup` is called from objc, and default implementations from a protocol
     /// cannot be marked as @objc.
     func defaultSetup() {
+        guard isEnabled else { return }
+
         guard !isSetup.get() else {
             owsFailDebug("already ready already")
             return
@@ -247,7 +237,7 @@ public extension JobQueue {
             }
             if self.requiresInternet {
                 NotificationCenter.default.addObserver(forName: SSKReachability.owsReachabilityDidChange,
-                                                       object: self.reachabilityManager.observationContext,
+                                                       object: nil,
                                                        queue: nil) { _ in
 
                                                         if self.reachabilityManager.isReachable {
@@ -376,7 +366,6 @@ public class JobRecordFinderObjC: NSObject {
 
 public class AnyJobRecordFinder<JobRecordType> where JobRecordType: SSKJobRecord {
     lazy var grdbAdapter = GRDBJobRecordFinder<JobRecordType>()
-    lazy var yapAdapter = YAPDBJobRecordFinder<JobRecordType>()
 
     public init() {}
 }
@@ -386,8 +375,6 @@ extension AnyJobRecordFinder: JobRecordFinder {
         switch transaction.readTransaction {
         case .grdbRead(let grdbRead):
             grdbAdapter.enumerateJobRecords(label: label, transaction: grdbRead, block: block)
-        case .yapRead(let yapRead):
-            yapAdapter.enumerateJobRecords(label: label, transaction: yapRead, block: block)
         }
     }
 
@@ -395,8 +382,6 @@ extension AnyJobRecordFinder: JobRecordFinder {
         switch transaction.readTransaction {
         case .grdbRead(let grdbRead):
             grdbAdapter.enumerateJobRecords(label: label, status: status, transaction: grdbRead, block: block)
-        case .yapRead(let yapRead):
-            yapAdapter.enumerateJobRecords(label: label, status: status, transaction: yapRead, block: block)
         }
     }
 }
@@ -454,91 +439,6 @@ extension GRDBJobRecordFinder: JobRecordFinder {
             if stop.boolValue {
                 return
             }
-        }
-    }
-}
-
-@objc
-public class YAPDBJobRecordFinderSetup: NSObject {
-    @objc
-    public class func asyncRegisterDatabaseExtensionObjC(storage: OWSStorage) {
-        YAPDBJobRecordFinder.asyncRegisterDatabaseExtension(storage: storage)
-    }
-}
-
-public class YAPDBJobRecordFinder<JobRecordType> where JobRecordType: SSKJobRecord {
-    public static var dbExtensionName: String {
-        return "SecondaryIndexJobRecord"
-    }
-
-    func ext(transaction: YapDatabaseReadTransaction) -> YapDatabaseSecondaryIndexTransaction? {
-        return transaction.safeSecondaryIndexTransaction(type(of: self).dbExtensionName)
-    }
-
-    static func asyncRegisterDatabaseExtension(storage: OWSStorage) {
-        storage.asyncRegister(dbExtensionConfig, withName: dbExtensionName)
-    }
-
-    enum JobRecordField: String {
-        case status, label, sortId
-    }
-
-    static var dbExtensionConfig: YapDatabaseSecondaryIndex {
-        let setup = YapDatabaseSecondaryIndexSetup()
-        setup.addColumn(JobRecordField.sortId.rawValue, with: .integer)
-        setup.addColumn(JobRecordField.status.rawValue, with: .integer)
-        setup.addColumn(JobRecordField.label.rawValue, with: .text)
-
-        let block: YapDatabaseSecondaryIndexWithObjectBlock = { transaction, dict, collection, key, object in
-            guard let jobRecord = object as? SSKJobRecord else {
-                return
-            }
-
-            dict[JobRecordField.sortId.rawValue] = jobRecord.sortId
-            dict[JobRecordField.status.rawValue] = jobRecord.status.rawValue
-            dict[JobRecordField.label.rawValue] = jobRecord.label
-        }
-
-        let handler = YapDatabaseSecondaryIndexHandler.withObjectBlock(block)
-
-        let options = YapDatabaseSecondaryIndexOptions()
-        let whitelist = YapWhitelistBlacklist(whitelist: Set([SSKJobRecord.collection()]))
-        options.allowedCollections = whitelist
-
-        return YapDatabaseSecondaryIndex.init(setup: setup, handler: handler, versionTag: "2", options: options)
-    }
-}
-
-extension YAPDBJobRecordFinder: JobRecordFinder {
-    public func enumerateJobRecords(label: String, transaction: YapDatabaseReadTransaction, block: @escaping (JobRecordType, UnsafeMutablePointer<ObjCBool>) -> Void) {
-        let queryFormat = String(format: "WHERE %@ = ? ORDER BY %@", JobRecordField.label.rawValue, JobRecordField.sortId.rawValue)
-        let query = YapDatabaseQuery(string: queryFormat, parameters: [label])
-
-        guard let ext = self.ext(transaction: transaction) else {
-            return
-        }
-        ext.enumerateKeysAndObjects(matching: query) { _, _, object, stopPointer in
-            guard let jobRecord = object as? JobRecordType else {
-                owsFailDebug("expecting jobRecord but found: \(object)")
-                return
-            }
-            block(jobRecord, stopPointer)
-        }
-    }
-
-    public func enumerateJobRecords(label: String, status: SSKJobRecordStatus, transaction: YapDatabaseReadTransaction, block: @escaping (JobRecordType, UnsafeMutablePointer<ObjCBool>) -> Void) {
-        let queryFormat = String(format: "WHERE %@ = ? AND %@ = ? ORDER BY %@", JobRecordField.status.rawValue, JobRecordField.label.rawValue, JobRecordField.sortId.rawValue)
-        let query = YapDatabaseQuery(string: queryFormat, parameters: [status.rawValue, label])
-
-        guard let ext = self.ext(transaction: transaction) else {
-            return
-        }
-        ext.enumerateKeysAndObjects(matching: query) { _, _, object, stopPointer in
-            guard let jobRecord = object as? JobRecordType else {
-                owsFailDebug("expecting jobRecord but found: \(object)")
-                return
-            }
-            block(jobRecord, stopPointer)
         }
     }
 }

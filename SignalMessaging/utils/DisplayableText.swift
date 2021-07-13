@@ -4,19 +4,56 @@
 
 import Foundation
 
-@objc public class DisplayableText: NSObject {
+@objc
+public class DisplayableText: NSObject {
 
     private struct Content {
-        let text: String
+        let textValue: CVTextValue
         let naturalAlignment: NSTextAlignment
+
+        var stringValue: String { textValue.stringValue }
     }
 
-    private let fullContent: Content
-    private let truncatedContent: Content?
+    private let _fullContent: AtomicValue<Content>
+    private var fullContent: Content {
+        get { _fullContent.get() }
+        set { _fullContent.set(newValue) }
+    }
+
+    private let _truncatedContent = AtomicOptional<Content>(nil)
+    private var truncatedContent: Content? {
+        get { _truncatedContent.get() }
+        set { _truncatedContent.set(newValue) }
+    }
+
+    public var fullTextValue: CVTextValue {
+        fullContent.textValue
+    }
+
+    public var truncatedTextValue: CVTextValue? {
+        truncatedContent?.textValue
+    }
+
+    public var displayTextValue: CVTextValue {
+        return truncatedContent?.textValue ?? fullContent.textValue
+    }
+
+    public func textValue(isTextExpanded: Bool) -> CVTextValue {
+        if isTextExpanded {
+            return fullTextValue
+        } else {
+            return displayTextValue
+        }
+    }
 
     @objc
-    public var fullText: String {
-        return fullContent.text
+    public var fullAttributedText: NSAttributedString {
+        switch fullContent.textValue {
+        case .text(let text):
+            return NSAttributedString(string: text)
+        case .attributedText(let attributedText):
+            return attributedText
+        }
     }
 
     @objc
@@ -25,8 +62,14 @@ import Foundation
     }
 
     @objc
-    public var displayText: String {
-        return truncatedContent?.text ?? fullContent.text
+    public var displayAttributedText: NSAttributedString {
+        let content = truncatedContent ?? fullContent
+        switch content.textValue {
+        case .text(let text):
+            return NSAttributedString(string: text)
+        case .attributedText(let attributedText):
+            return attributedText
+        }
     }
 
     @objc
@@ -39,10 +82,20 @@ import Foundation
         return truncatedContent != nil
     }
 
+    private static let maxInlineText = 1024 * 8
+
+    @objc
+    public var canRenderTruncatedTextInline: Bool {
+        return isTextTruncated && fullLengthWithNewLineScalar <= Self.maxInlineText
+    }
+
+    @objc
+    public let fullLengthWithNewLineScalar: Int
+
     @objc public let jumbomojiCount: UInt
 
     @objc
-    static let kMaxJumbomojiCount: UInt = 5
+    public static let kMaxJumbomojiCount: UInt = 5
 
     // This value is a bit arbitrary since we don't need to be 100% correct about 
     // rendering "Jumbomoji".  It allows us to place an upper bound on worst-case
@@ -53,9 +106,43 @@ import Foundation
     // MARK: Initializers
 
     private init(fullContent: Content, truncatedContent: Content?) {
-        self.fullContent = fullContent
-        self.truncatedContent = truncatedContent
-        self.jumbomojiCount = DisplayableText.jumbomojiCount(in: fullContent.text)
+        self._fullContent = AtomicValue(fullContent)
+        self._truncatedContent.set(truncatedContent)
+        self.jumbomojiCount = DisplayableText.jumbomojiCount(in: fullContent.stringValue)
+        self.fullLengthWithNewLineScalar = DisplayableText.fullLengthWithNewLineScalar(in: fullContent.stringValue)
+
+        super.init()
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(themeDidChange),
+            name: .ThemeDidChange,
+            object: nil
+        )
+    }
+
+    @objc
+    private func themeDidChange() {
+        // When the theme changes, we must refresh any mention attributes.
+        func updateContent(_ content: Content) -> Content {
+            switch content.textValue {
+            case .text:
+                // We only need to update attributedText.
+                return content
+            case .attributedText(let attributedText):
+                let mutableFullText = NSMutableAttributedString(attributedString: attributedText)
+                Mention.refreshAttributes(in: mutableFullText)
+                return Content(textValue: .attributedText(attributedText: mutableFullText),
+                               naturalAlignment: content.naturalAlignment)
+            }
+        }
+
+        // When the theme changes, we must refresh any mention attributes.
+        fullContent = updateContent(fullContent)
+
+        if let truncatedContent = truncatedContent {
+            self.truncatedContent = updateContent(truncatedContent)
+        }
     }
 
     // MARK: Emoji
@@ -127,7 +214,9 @@ import Foundation
             }
         }
 
-        for match in linkDetector.matches(in: fullText, options: [], range: NSRange(location: 0, length: fullText.utf16.count)) {
+        let rawText = fullContent.stringValue
+
+        for match in linkDetector.matches(in: rawText, options: [], range: rawText.entireRange) {
             guard let matchURL: URL = match.url else {
                 continue
             }
@@ -137,7 +226,7 @@ import Foundation
             //
             // But what we really want is to check the text which will ultimately be presented to
             // the user.
-            let rawTextOfMatch = (fullText as NSString).substring(with: match.range)
+            let rawTextOfMatch = (rawText as NSString).substring(with: match.range)
             guard isValidLink(linkText: rawTextOfMatch) else {
                 return false
             }
@@ -147,21 +236,96 @@ import Foundation
 
     // MARK: Filter Methods
 
+    private static let newLineRegex = try! NSRegularExpression(pattern: "\n", options: [])
+    private static let newLineScalar = 16
+
+    private class func fullLengthWithNewLineScalar(in string: String) -> Int {
+        let numberOfNewLines = newLineRegex.numberOfMatches(
+            in: string,
+            options: [],
+            range: string.entireRange
+        )
+        return string.utf16.count + numberOfNewLines * newLineScalar
+    }
+
     @objc
-    public class func displayableText(_ rawText: String) -> DisplayableText {
-        let fullText = rawText.filterStringForDisplay()
-        let fullContent = Content(text: fullText, naturalAlignment: fullText.naturalTextAlignment)
+    public class var empty: DisplayableText {
+        return DisplayableText(
+            fullContent: .init(textValue: .text(text: ""), naturalAlignment: .natural),
+            truncatedContent: nil
+        )
+    }
+
+    @objc
+    public class func displayableTextForTests(_ text: String) -> DisplayableText {
+        return DisplayableText(
+            fullContent: .init(textValue: .text(text: text),
+                               naturalAlignment: text.naturalTextAlignment),
+            truncatedContent: nil
+        )
+    }
+
+    @objc
+    public class func displayableText(withMessageBody messageBody: MessageBody, mentionStyle: Mention.Style, transaction: SDSAnyReadTransaction) -> DisplayableText {
+        let textValue = messageBody.textValue(style: mentionStyle,
+                                              attributes: [:],
+                                              shouldResolveAddress: { _ in true }, // Resolve all mentions in messages.
+                                              transaction: transaction.unwrapGrdbRead)
+        let fullContent = Content(
+            textValue: textValue,
+            naturalAlignment: textValue.stringValue.naturalTextAlignment
+        )
 
         // Only show up to N characters of text.
         let kMaxTextDisplayLength = 512
+        let kMaxSnippetNewLines = 15
         let truncatedContent: Content?
-        if fullText.count > kMaxTextDisplayLength {
-            // Trim whitespace before _AND_ after slicing the snipper from the string.
-            let snippet = fullText.safePrefix(kMaxTextDisplayLength).ows_stripped()
-            let truncatedText = String(format: NSLocalizedString("OVERSIZE_TEXT_DISPLAY_FORMAT", comment:
-                "A display format for oversize text messages."),
-                snippet)
-            truncatedContent = Content(text: truncatedText, naturalAlignment: truncatedText.naturalTextAlignment)
+
+        if fullContent.stringValue.count > kMaxTextDisplayLength {
+            var snippetLength = kMaxTextDisplayLength
+
+            // Message bubbles by default should be short. We don't ever
+            // want to show more than X new lines in the truncated text.
+            let newLineMatches = newLineRegex.matches(
+                in: fullContent.stringValue,
+                options: [],
+                range: NSRange(location: 0, length: kMaxTextDisplayLength)
+            )
+            if newLineMatches.count > kMaxSnippetNewLines {
+                snippetLength = newLineMatches[kMaxSnippetNewLines - 1].range.location
+            }
+
+            switch textValue {
+            case .text(let text):
+                let truncatedText = (text.substring(to: snippetLength)
+                                        .ows_stripped()
+                                        + "…")
+                truncatedContent = Content(textValue: .text(text: truncatedText),
+                                           naturalAlignment: truncatedText.naturalTextAlignment)
+            case .attributedText(let attributedText):
+                var mentionRange = NSRange()
+                let possibleOverlappingMention = attributedText.attribute(
+                    .mention,
+                    at: snippetLength,
+                    longestEffectiveRange: &mentionRange,
+                    in: attributedText.entireRange
+                )
+
+                // There's a mention overlapping our normal truncate point, we want to truncate sooner
+                // so we don't "split" the mention.
+                if possibleOverlappingMention != nil && mentionRange.location < snippetLength {
+                    snippetLength = mentionRange.location
+                }
+
+                // Trim whitespace before _AND_ after slicing the snipper from the string.
+                let truncatedAttributedText = attributedText
+                    .attributedSubstring(from: NSRange(location: 0, length: snippetLength))
+                    .ows_stripped()
+                    .stringByAppendingString("…")
+
+                truncatedContent = Content(textValue: .attributedText(attributedText: truncatedAttributedText),
+                                           naturalAlignment: truncatedAttributedText.string.naturalTextAlignment)
+            }
         } else {
             truncatedContent = nil
         }

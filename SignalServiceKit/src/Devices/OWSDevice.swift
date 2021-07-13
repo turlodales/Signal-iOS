@@ -1,19 +1,11 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 
 @objc
 public extension OWSDevice {
-
-    // MARK: - Dependencies
-
-    private class var profileManager: ProfileManagerProtocol {
-        return SSKEnvironment.shared.profileManager
-    }
-
-    // MARK: -
 
     // Updates the list of devices in the database.
     //
@@ -62,7 +54,7 @@ public extension OWSDevice {
             DispatchQueue.global().async {
                 // Device changes can affect the UD access mode for a recipient,
                 // so we need to fetch the profile for this user to update UD access mode.
-                self.profileManager.fetchAndUpdateLocalUsersProfile()
+                self.profileManager.fetchLocalUsersProfile()
             }
         }
         return wasDeviceAddedOrRemoved

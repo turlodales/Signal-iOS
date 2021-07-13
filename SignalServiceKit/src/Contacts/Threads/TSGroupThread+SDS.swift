@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -61,19 +61,24 @@ class TSGroupThreadSerializer: SDSSerializer {
         let uniqueId: String = model.uniqueId
 
         // Properties
-        let conversationColorName: String = model.conversationColorName.rawValue
+        let conversationColorName: String = model.conversationColorNameObsolete
         let creationDate: Double? = archiveOptionalDate(model.creationDate)
-        let isArchived: Bool = model.isArchived
+        let isArchived: Bool = model.isArchivedObsolete
         let lastInteractionRowId: Int64 = model.lastInteractionRowId
         let messageDraft: String? = model.messageDraft
-        let mutedUntilDate: Double? = archiveOptionalDate(model.mutedUntilDate)
+        let mutedUntilDate: Double? = archiveOptionalDate(model.mutedUntilDateObsolete)
         let shouldThreadBeVisible: Bool = model.shouldThreadBeVisible
         let contactPhoneNumber: String? = nil
         let contactUUID: String? = nil
         let groupModel: Data? = optionalArchive(model.groupModel)
         let hasDismissedOffers: Bool? = nil
-        let isMarkedUnread: Bool = model.isMarkedUnread
+        let isMarkedUnread: Bool = model.isMarkedUnreadObsolete
+        let lastVisibleSortIdOnScreenPercentage: Double = model.lastVisibleSortIdOnScreenPercentageObsolete
+        let lastVisibleSortId: UInt64 = model.lastVisibleSortIdObsolete
+        let messageDraftBodyRanges: Data? = optionalArchive(model.messageDraftBodyRanges)
+        let mentionNotificationMode: UInt = model.mentionNotificationMode.rawValue
+        let mutedUntilTimestamp: UInt64 = model.mutedUntilTimestampObsolete
 
-        return ThreadRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, conversationColorName: conversationColorName, creationDate: creationDate, isArchived: isArchived, lastInteractionRowId: lastInteractionRowId, messageDraft: messageDraft, mutedUntilDate: mutedUntilDate, shouldThreadBeVisible: shouldThreadBeVisible, contactPhoneNumber: contactPhoneNumber, contactUUID: contactUUID, groupModel: groupModel, hasDismissedOffers: hasDismissedOffers, isMarkedUnread: isMarkedUnread)
+        return ThreadRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, conversationColorName: conversationColorName, creationDate: creationDate, isArchived: isArchived, lastInteractionRowId: lastInteractionRowId, messageDraft: messageDraft, mutedUntilDate: mutedUntilDate, shouldThreadBeVisible: shouldThreadBeVisible, contactPhoneNumber: contactPhoneNumber, contactUUID: contactUUID, groupModel: groupModel, hasDismissedOffers: hasDismissedOffers, isMarkedUnread: isMarkedUnread, lastVisibleSortIdOnScreenPercentage: lastVisibleSortIdOnScreenPercentage, lastVisibleSortId: lastVisibleSortId, messageDraftBodyRanges: messageDraftBodyRanges, mentionNotificationMode: mentionNotificationMode, mutedUntilTimestamp: mutedUntilTimestamp)
     }
 }

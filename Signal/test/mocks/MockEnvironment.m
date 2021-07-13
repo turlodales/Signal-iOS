@@ -1,10 +1,11 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "MockEnvironment.h"
-#import "OWSBackup.h"
+#import "OWSOrphanDataCleaner.h"
 #import "OWSWindowManager.h"
+#import <SignalMessaging/ContactsViewHelper.h>
 #import <SignalMessaging/OWSPreferences.h>
 #import <SignalMessaging/OWSSounds.h>
 #import <SignalMessaging/SignalMessaging-Swift.h>
@@ -31,6 +32,11 @@ NS_ASSUME_NONNULL_BEGIN
     OWSSounds *sounds = [OWSSounds new];
     id<OWSProximityMonitoringManager> proximityMonitoringManager = [OWSProximityMonitoringManagerImpl new];
     OWSWindowManager *windowManager = [[OWSWindowManager alloc] initDefault];
+    ContactsViewHelper *contactsViewHelper = [ContactsViewHelper new];
+    BroadcastMediaMessageJobQueue *broadcastMediaMessageJobQueue = [BroadcastMediaMessageJobQueue new];
+    OWSOrphanDataCleaner *orphanDataCleaner = [OWSOrphanDataCleaner new];
+    ChatColors *chatColors = [ChatColors new];
+    AvatarBuilder *avatarBuilder = [AvatarBuilder new];
 
     self = [super initWithAudioSession:audioSession
            incomingContactSyncJobQueue:incomingContactSyncJobQueue
@@ -39,7 +45,12 @@ NS_ASSUME_NONNULL_BEGIN
                            preferences:preferences
             proximityMonitoringManager:proximityMonitoringManager
                                 sounds:sounds
-                         windowManager:windowManager];
+                         windowManager:windowManager
+                    contactsViewHelper:contactsViewHelper
+         broadcastMediaMessageJobQueue:broadcastMediaMessageJobQueue
+                     orphanDataCleaner:orphanDataCleaner
+                            chatColors:chatColors
+                         avatarBuilder:avatarBuilder];
 
     OWSAssertDebug(self);
     return self;

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -8,14 +8,6 @@ import blurhash
 
 @objc
 public class BlurHash: NSObject {
-
-    // MARK: - Dependencies
-
-    private class var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    // MARK: -
 
     // This should be generous.
     private static let maxLength = 100
@@ -126,7 +118,7 @@ public class BlurHash: NSObject {
         // As long as we're normalizing the image, reduce the size.
         // The blurHash algorithm doesn't need more data.
         // This also places an upper bound on blurHash perf cost.
-        let srcSize = image.pixelSize()
+        let srcSize = image.pixelSize
         guard srcSize.width > 0, srcSize.height > 0 else {
             owsFailDebug("Invalid image size.")
             return nil

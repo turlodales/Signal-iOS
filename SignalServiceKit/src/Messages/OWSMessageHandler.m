@@ -1,8 +1,8 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSMessageHandler.h"
+#import <SignalServiceKit/OWSMessageHandler.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -15,7 +15,7 @@ NSString *envelopeAddress(SSKProtoEnvelope *envelope)
 
 @implementation OWSMessageHandler
 
-- (NSString *)descriptionForEnvelopeType:(SSKProtoEnvelope *)envelope
++ (NSString *)descriptionForEnvelopeType:(SSKProtoEnvelope *)envelope
 {
     OWSAssertDebug(envelope != nil);
 
@@ -47,7 +47,7 @@ NSString *envelopeAddress(SSKProtoEnvelope *envelope)
     }
 }
 
-- (NSString *)descriptionForEnvelope:(SSKProtoEnvelope *)envelope
++ (NSString *)descriptionForEnvelope:(SSKProtoEnvelope *)envelope
 {
     OWSAssertDebug(envelope != nil);
 
@@ -57,6 +57,12 @@ NSString *envelopeAddress(SSKProtoEnvelope *envelope)
                      envelope.timestamp,
                      (unsigned long)envelope.content.length];
 }
+
+- (NSString *)descriptionForEnvelope:(SSKProtoEnvelope *)envelope
+{
+    return [[self class] descriptionForEnvelope:envelope];
+}
+
 
 /**
  * We don't want to just log `content.description` because we'd potentially log message bodies for dataMesssages and
@@ -108,6 +114,9 @@ NSString *envelopeAddress(SSKProtoEnvelope *envelope)
     } else if (callMessage.iceUpdate.count > 0) {
         messageType = [NSString stringWithFormat:@"Ice Updates (%lu)", (unsigned long)callMessage.iceUpdate.count];
         callId = callMessage.iceUpdate.firstObject.id;
+    } else if (callMessage.opaque) {
+        messageType = @"Opaque";
+        callId = 0;
     } else {
         OWSFailDebug(@"failure: unexpected call message type: %@", callMessage);
         messageType = @"Unknown";

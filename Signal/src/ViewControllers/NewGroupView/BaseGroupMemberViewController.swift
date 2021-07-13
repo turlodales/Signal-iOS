@@ -1,12 +1,11 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
-import SafariServices
 import PromiseKit
 
-protocol GroupMemberViewDelegate: class {
+protocol GroupMemberViewDelegate: AnyObject {
     var groupMemberViewRecipientSet: OrderedSet<PickedRecipient> { get }
 
     var groupMemberViewHasUnsavedChanges: Bool { get }
@@ -23,13 +22,18 @@ protocol GroupMemberViewDelegate: class {
 
     func groupMemberViewGroupMemberCountForDisplay() -> Int
 
-    func groupMemberViewIsGroupFull() -> Bool
+    func groupMemberViewIsGroupFull_HardLimit() -> Bool
 
-    func groupMemberViewIsPreExistingMember(_ recipient: PickedRecipient) -> Bool
+    func groupMemberViewIsGroupFull_RecommendedLimit() -> Bool
+
+    func groupMemberViewIsPreExistingMember(_ recipient: PickedRecipient,
+                                            transaction: SDSAnyReadTransaction) -> Bool
 
     func groupMemberViewIsGroupsV2Required() -> Bool
 
     func groupMemberViewDismiss()
+
+    var isNewGroup: Bool { get }
 }
 
 // MARK: -
@@ -40,22 +44,6 @@ protocol GroupMemberViewDelegate: class {
 // * Add new members to an existing group.
 @objc
 public class BaseGroupMemberViewController: OWSViewController {
-
-    // MARK: - Dependencies
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    private class var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    private var tsAccountManager: TSAccountManager {
-        return .sharedInstance()
-    }
-
-    // MARK: -
 
     // This delegate is the subclass.
     weak var groupMemberViewDelegate: GroupMemberViewDelegate?
@@ -92,15 +80,13 @@ public class BaseGroupMemberViewController: OWSViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
 
-        view.backgroundColor = Theme.backgroundColor
-
         // First section.
 
         memberBar.delegate = self
 
         // Don't use dynamic type in this label.
         memberCountLabel.font = UIFont.ows_dynamicTypeBody2.withSize(12)
-        memberCountLabel.textColor = Theme.secondaryTextAndIconColor
+        memberCountLabel.textColor = Theme.isDarkThemeEnabled ? .ows_gray05 : .ows_gray60
         memberCountLabel.textAlignment = CurrentAppContext().isRTL ? .left : .right
 
         memberCountWrapper.addSubview(memberCountLabel)
@@ -121,13 +107,13 @@ public class BaseGroupMemberViewController: OWSViewController {
         autoPinView(toBottomOfViewControllerOrKeyboard: recipientPicker.view, avoidNotch: false)
 
         updateMemberCount()
-        tryToFillInMissingUuuids()
+        tryToFillInMissingUuids()
     }
 
-    private func tryToFillInMissingUuuids() {
-        let addresses = recipientPicker.contactsViewHelper.signalAccounts.map { $0.recipientAddress }
+    private func tryToFillInMissingUuids() {
+        let addresses = contactsViewHelper.allSignalAccounts.map { $0.recipientAddress }
         firstly {
-            GroupManager.tryToFillInMissingUuuids(for: addresses, isBlocking: false)
+            GroupManager.tryToFillInMissingUuids(for: addresses, isBlocking: false)
         }.catch { error in
             owsFailDebug("Error: \(error)")
         }
@@ -156,13 +142,17 @@ public class BaseGroupMemberViewController: OWSViewController {
         }
 
         memberCountWrapper.isHidden = false
-        let format = NSLocalizedString("GROUP_MEMBER_COUNT_FORMAT",
-                                       comment: "Format string for the group member count indicator. Embeds {{ %1$@ the number of members in the group, %2$@ the maximum number of members in the group. }}.")
+        let format = NSLocalizedString("GROUP_MEMBER_COUNT_WITHOUT_LIMIT_FORMAT",
+                                       comment: "Format string for the group member count indicator. Embeds {{ the number of members in the group }}.")
         let memberCount = groupMemberViewDelegate.groupMemberViewGroupMemberCountForDisplay()
 
         memberCountLabel.text = String(format: format,
-                                       OWSFormat.formatInt(memberCount),
-                                       OWSFormat.formatUInt(GroupManager.maxGroupMemberCount))
+                                       OWSFormat.formatInt(memberCount))
+        if memberCount >= GroupManager.groupsV2MaxGroupSizeRecommended {
+            memberCountLabel.textColor = .ows_accentRed
+        } else {
+            memberCountLabel.textColor = Theme.primaryTextColor
+        }
     }
 
     public func removeRecipient(_ recipient: PickedRecipient) {
@@ -186,13 +176,23 @@ public class BaseGroupMemberViewController: OWSViewController {
             return
         }
         guard groupMemberViewDelegate.groupMemberViewCanAddRecipient(recipient) else {
-            showInvalidGroupMemberAlert(recipient: recipient)
+            GroupViewUtils.showInvalidGroupMemberAlert(fromViewController: self)
             return
         }
-        guard !groupMemberViewDelegate.groupMemberViewIsGroupFull() else {
-            showGroupFullAlert()
+        guard !groupMemberViewDelegate.groupMemberViewIsGroupFull_HardLimit() else {
+            showGroupFullAlert_HardLimit()
             return
         }
+        if groupMemberViewDelegate.groupMemberViewIsGroupFull_RecommendedLimit() {
+            showGroupFullAlert_SoftLimit(recipient: recipient, groupMemberViewDelegate: groupMemberViewDelegate)
+            return
+        } else {
+            addRecipientStep2(recipient, groupMemberViewDelegate: groupMemberViewDelegate)
+        }
+    }
+
+    private func addRecipientStep2(_ recipient: PickedRecipient,
+                                   groupMemberViewDelegate: GroupMemberViewDelegate) {
 
         groupMemberViewDelegate.groupMemberViewAddRecipient(recipient)
         recipientPicker.pickedRecipients = recipientSet.orderedMembers
@@ -204,16 +204,17 @@ public class BaseGroupMemberViewController: OWSViewController {
     }
 
     private func updateMemberBar() {
-        memberBar.setMembers(databaseStorage.uiRead { transaction in
-            self.orderedMembers(transaction: transaction)
+        memberBar.setMembers(databaseStorage.read { transaction in
+            self.orderedMembers(shouldSort: false, transaction: transaction)
         })
     }
 
-    private func orderedMembers(transaction: SDSAnyReadTransaction) -> [NewGroupMember] {
-        return Self.orderedMembers(recipientSet: recipientSet, transaction: transaction)
+    private func orderedMembers(shouldSort: Bool, transaction: SDSAnyReadTransaction) -> [NewGroupMember] {
+        return Self.orderedMembers(recipientSet: recipientSet, shouldSort: shouldSort, transaction: transaction)
     }
 
     class func orderedMembers(recipientSet: OrderedSet<PickedRecipient>,
+                              shouldSort: Bool,
                               transaction: SDSAnyReadTransaction) -> [NewGroupMember] {
         var members = recipientSet.orderedMembers.compactMap { (recipient: PickedRecipient) -> NewGroupMember? in
             guard let address = recipient.address else {
@@ -221,55 +222,58 @@ public class BaseGroupMemberViewController: OWSViewController {
                 return nil
             }
             let displayName = self.contactsManager.displayName(for: address, transaction: transaction)
+            let shortDisplayName = self.contactsManager.shortDisplayName(for: address, transaction: transaction)
             let comparableName = self.contactsManager.comparableName(for: address, transaction: transaction)
-            let conversationColorName = ConversationColorName(rawValue: self.contactsManager.conversationColorName(for: address,
-                                                                                                                   transaction: transaction))
-            var shortName = displayName
-            if  !Locale.current.isCJKV,
-                let nameComponents = self.contactsManager.nameComponents(for: address, transaction: transaction),
-                let givenName = nameComponents.givenName?.filterForDisplay,
-                !givenName.isEmpty {
-                shortName = givenName
-            }
             return NewGroupMember(recipient: recipient,
                                   address: address,
                                   displayName: displayName,
-                                  shortName: shortName,
-                                  comparableName: comparableName,
-                                  conversationColorName: conversationColorName)
+                                  shortName: shortDisplayName,
+                                  comparableName: comparableName)
         }
-        members.sort { (left, right) in
-            return left.comparableName < right.comparableName
+        if shouldSort {
+            members.sort { (left, right) in
+                return left.comparableName < right.comparableName
+            }
         }
         return members
     }
 
-    private func showInvalidGroupMemberAlert(recipient: PickedRecipient) {
-        let actionSheet = ActionSheetController(title: CommonStrings.errorAlertTitle,
-                                                message: NSLocalizedString("EDIT_GROUP_ERROR_CANNOT_ADD_MEMBER",
-                                                                           comment: "Error message indicating the a user can't be added to a group."))
-
-        actionSheet.addAction(ActionSheetAction(title: CommonStrings.learnMore,
-                                                style: .default) { _ in
-                                                    self.showCantAddMemberView()
-        })
-        actionSheet.addAction(ActionSheetAction(title: CommonStrings.okayButton,
-                                                style: .default))
-        presentActionSheet(actionSheet)
+    private func showGroupFullAlert_HardLimit() {
+        let format = NSLocalizedString("EDIT_GROUP_ERROR_CANNOT_ADD_MEMBER_GROUP_FULL_FORMAT",
+                                       comment: "Format for the 'group full' error alert when a user can't be added to a group because the group is full. Embeds {{ the maximum number of members in a group }}.")
+        let message = String(format: format, OWSFormat.formatUInt(GroupManager.groupsV2MaxGroupSizeHardLimit))
+        OWSActionSheets.showErrorAlert(message: message)
     }
 
-    private func showGroupFullAlert() {
-        OWSActionSheets.showErrorAlert(message: NSLocalizedString("EDIT_GROUP_ERROR_CANNOT_ADD_MEMBER_GROUP_FULL",
-                                                                  comment: "Message for 'group full' error alert when a user can't be added to a group."))
-    }
+    private func showGroupFullAlert_SoftLimit(recipient: PickedRecipient,
+                                              groupMemberViewDelegate: GroupMemberViewDelegate) {
+        let title = NSLocalizedString("GROUPS_TOO_MANY_MEMBERS_ALERT_TITLE",
+                                      comment: "Title for alert warning the user that they've reached the recommended limit on how many members can be in a group.")
+        let messageFormat = NSLocalizedString("GROUPS_TOO_MANY_MEMBERS_ALERT_MESSAGE_FORMAT",
+                                              comment: "Format for the alert warning the user that they've reached the recommended limit on how many members can be in a group when creating a new group. Embeds {{ the maximum number of recommended members in a group }}.")
+        var message = String(format: messageFormat, OWSFormat.formatUInt(GroupManager.groupsV2MaxGroupSizeRecommended))
 
-    private func showCantAddMemberView() {
-        guard let url = URL(string: "https://support.signal.org/hc/articles/360007319331") else {
-            owsFailDebug("Invalid url.")
-            return
+        if groupMemberViewDelegate.isNewGroup {
+            let actionSheet = ActionSheetController(title: title, message: message)
+
+            actionSheet.addAction(ActionSheetAction(title: CommonStrings.okayButton) { [weak self] _ in
+                guard let self = self else { return }
+                self.addRecipientStep2(recipient, groupMemberViewDelegate: groupMemberViewDelegate)
+            })
+            presentActionSheet(actionSheet)
+        } else {
+            message += ("\n\n"
+                            + NSLocalizedString("GROUPS_TOO_MANY_MEMBERS_CONFIRM",
+                                                comment: "Message asking the user to confirm that they want to add a member to the group."))
+            let actionSheet = ActionSheetController(title: title, message: message)
+
+            actionSheet.addAction(ActionSheetAction(title: CommonStrings.addButton) { [weak self] _ in
+                guard let self = self else { return }
+                self.addRecipientStep2(recipient, groupMemberViewDelegate: groupMemberViewDelegate)
+            })
+            actionSheet.addAction(OWSActionSheets.cancelAction)
+            presentActionSheet(actionSheet)
         }
-        let vc = SFSafariViewController(url: url)
-        present(vc, animated: true, completion: nil)
     }
 
     // MARK: -
@@ -277,15 +281,23 @@ public class BaseGroupMemberViewController: OWSViewController {
     public override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
 
+        recipientPicker.applyTheme(to: self)
+
         guard let navigationController = navigationController else {
             owsFailDebug("Missing navigationController.")
             return
         }
         if navigationController.viewControllers.count == 1 {
-            navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .stop,
+            navigationItem.leftBarButtonItem = UIBarButtonItem(barButtonSystemItem: .done,
                                                                target: self,
                                                                action: #selector(dismissPressed))
         }
+    }
+
+    public override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+
+        recipientPicker.removeTheme(from: self)
     }
 
     @objc
@@ -332,7 +344,10 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
             owsFailDebug("Missing groupMemberViewDelegate.")
             return .unknownError
         }
-        guard !groupMemberViewDelegate.groupMemberViewIsPreExistingMember(recipient) else {
+        guard (Self.databaseStorage.read { transaction in
+            !groupMemberViewDelegate.groupMemberViewIsPreExistingMember(recipient,
+                                                                       transaction: transaction)
+        }) else {
             return .duplicateGroupMember
         }
         return .canBeSelected
@@ -352,7 +367,10 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
             owsFailDebug("Missing groupMemberViewDelegate.")
             return
         }
-        guard !groupMemberViewDelegate.groupMemberViewIsPreExistingMember(recipient) else {
+        guard (Self.databaseStorage.read { transaction in
+            !groupMemberViewDelegate.groupMemberViewIsPreExistingMember(recipient,
+                                                                       transaction: transaction)
+        }) else {
             owsFailDebug("Can't re-add pre-existing member.")
             return
         }
@@ -362,7 +380,7 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
         }
 
         let isCurrentMember = recipientSet.contains(recipient)
-        let isBlocked = self.recipientPicker.contactsViewHelper.isSignalServiceAddressBlocked(address)
+        let isBlocked = self.contactsViewHelper.isSignalServiceAddressBlocked(address)
 
         let addRecipientCompletion = { [weak self] in
             guard let self = self else {
@@ -384,12 +402,14 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
         } else {
             let confirmationText = NSLocalizedString("SAFETY_NUMBER_CHANGED_CONFIRM_ADD_TO_GROUP_ACTION",
                                                      comment: "button title to confirm adding a recipient to a group when their safety number has recently changed")
-            let didShowSNAlert = SafetyNumberConfirmationAlert.presentAlertIfNecessary(address: address,
-                                                                                       confirmationText: confirmationText) { didConfirmIdentity in
-                                                                                        if didConfirmIdentity {
-                                                                                            addRecipientCompletion()
-                                                                                        }
+            let didShowSNAlert = SafetyNumberConfirmationSheet.presentIfNecessary(
+                address: address,
+                confirmationText: confirmationText
+            ) { didConfirmIdentity in
+                guard didConfirmIdentity else { return }
+                addRecipientCompletion()
             }
+
             if didShowSNAlert {
                 return
             }
@@ -408,18 +428,14 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
             owsFailDebug("Missing delegate.")
             return
         }
-        guard RemoteConfig.groupsV2CreateGroups ||
-            RemoteConfig.groupsV2IncomingMessages else {
-                return
-        }
         guard groupMemberViewDelegate.shouldTryToEnableGroupsV2ForMembers else {
             return
         }
         DispatchQueue.global().async {
             if !self.doesRecipientSupportGroupsV2(recipient) {
-                self.tryToEnableGroupsV2ForAddress(address,
-                                                   isBlocking: false,
-                                                   ignoreErrors: true)
+                _ = self.tryToEnableGroupsV2ForAddress(address,
+                                                       isBlocking: false,
+                                                       ignoreErrors: true)
             }
         }
     }
@@ -433,10 +449,6 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
         guard let groupMemberViewDelegate = groupMemberViewDelegate else {
             owsFailDebug("Missing delegate.")
             return AnyPromise(Promise.value(()))
-        }
-        guard RemoteConfig.groupsV2CreateGroups ||
-            RemoteConfig.groupsV2IncomingMessages else {
-                return AnyPromise(Promise.value(()))
         }
         guard groupMemberViewDelegate.shouldTryToEnableGroupsV2ForMembers else {
             return AnyPromise(Promise.value(()))
@@ -454,7 +466,7 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
     func recipientPicker(_ recipientPickerViewController: RecipientPickerViewController,
                          showInvalidRecipientAlert recipient: PickedRecipient) {
         AssertIsOnMainThread()
-        showInvalidGroupMemberAlert(recipient: recipient)
+        GroupViewUtils.showInvalidGroupMemberAlert(fromViewController: self)
     }
 
     private func doesRecipientSupportGroupsV2(_ recipient: PickedRecipient) -> Bool {
@@ -491,7 +503,8 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
     }
 
     func recipientPicker(_ recipientPickerViewController: RecipientPickerViewController,
-                         accessoryMessageForRecipient recipient: PickedRecipient) -> String? {
+                         accessoryMessageForRecipient recipient: PickedRecipient,
+                         transaction: SDSAnyReadTransaction) -> String? {
         guard let address = recipient.address else {
             owsFailDebug("Missing address.")
             return nil
@@ -502,7 +515,7 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
         }
 
         let isCurrentMember = recipientSet.contains(recipient)
-        let isBlocked = self.recipientPicker.contactsViewHelper.isSignalServiceAddressBlocked(address)
+        let isBlocked = self.contactsViewHelper.isSignalServiceAddressBlocked(address)
 
         if isCurrentMember {
             return nil
@@ -514,7 +527,8 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
     }
 
     func recipientPicker(_ recipientPickerViewController: RecipientPickerViewController,
-                         accessoryViewForRecipient recipient: PickedRecipient) -> UIView? {
+                         accessoryViewForRecipient recipient: PickedRecipient,
+                         transaction: SDSAnyReadTransaction) -> ContactCellAccessoryView? {
         guard let address = recipient.address else {
             owsFailDebug("Missing address.")
             return nil
@@ -529,10 +543,11 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
         }
 
         let isCurrentMember = recipientSet.contains(recipient)
-        let isBlocked = self.recipientPicker.contactsViewHelper.isSignalServiceAddressBlocked(address)
-        let isPreExistingMember = groupMemberViewDelegate.groupMemberViewIsPreExistingMember(recipient)
+        let isBlocked = self.contactsViewHelper.isSignalServiceAddressBlocked(address)
+        let isPreExistingMember = groupMemberViewDelegate.groupMemberViewIsPreExistingMember(recipient,
+                                                                                             transaction: transaction)
 
-        let imageView = UIImageView()
+        let imageView = CVImageView()
         if isPreExistingMember {
             imageView.setTemplateImageName("check-circle-solid-24", tintColor: Theme.washColor)
         } else if isCurrentMember {
@@ -543,14 +558,13 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
         } else {
             imageView.setTemplateImageName("empty-circle-outline-24", tintColor: .ows_gray25)
         }
-        return imageView
+        return ContactCellAccessoryView(accessoryView: imageView, size: .square(24))
     }
 
     func recipientPicker(_ recipientPickerViewController: RecipientPickerViewController,
-                         attributedSubtitleForRecipient recipient: PickedRecipient) -> NSAttributedString? {
-        guard DebugFlags.groupsV2memberStatusIndicators else {
-            return nil
-        }
+                         attributedSubtitleForRecipient recipient: PickedRecipient,
+                         transaction: SDSAnyReadTransaction) -> NSAttributedString? {
+
         guard let address = recipient.address else {
             owsFailDebug("Recipient missing address.")
             return nil
@@ -560,20 +574,42 @@ extension BaseGroupMemberViewController: RecipientPickerDelegate {
             // This is internal-only; we don't need to localize.
             items.append("No UUID")
         }
-        databaseStorage.read { transaction in
-            if !GroupManager.doesUserHaveGroupsV2Capability(address: address,
-                                                            transaction: transaction) {
-                // This is internal-only; we don't need to localize.
-                items.append("No capability")
+        let hasProfileKey = nil != Self.profileManager.profileKeyData(for: address,
+                                                                      transaction: transaction)
+        // Only show the "missing gv2 capability" warning if we have the
+        // user's profile key.
+        if !GroupManager.doesUserHaveGroupsV2Capability(address: address,
+                                                        transaction: transaction),
+           hasProfileKey {
+            // This is internal-only; we don't need to localize.
+            items.append("No capability")
+        }
+
+        func defaultSubtitle() -> NSAttributedString? {
+            guard !address.isLocalAddress else {
+                return nil
             }
+            guard let bioForDisplay = Self.profileManagerImpl.profileBioForDisplay(for: address,
+                                                                                   transaction: transaction) else {
+                return nil
+            }
+            return NSAttributedString(string: bioForDisplay)
         }
 
         guard !items.isEmpty else {
-            return nil
+            return defaultSubtitle()
+        }
+        if GroupManager.areMigrationsBlocking {
+            let warning = NSLocalizedString("NEW_GROUP_CREATION_MEMBER_DOES_NOT_SUPPORT_NEW_GROUPS",
+                                            comment: "Indicates that a group member does not support New Groups.")
+            return warning.attributedString()
+       }
+        guard DebugFlags.groupsV2memberStatusIndicators else {
+            return defaultSubtitle()
         }
         return NSAttributedString(string: items.joined(separator: ", "),
                                   attributes: [
-                                    .font: UIFont.ows_dynamicTypeSubheadline.ows_semibold(),
+                                    .font: UIFont.ows_dynamicTypeSubheadline.ows_semibold,
                                     .foregroundColor: Theme.secondaryTextAndIconColor
         ])
     }

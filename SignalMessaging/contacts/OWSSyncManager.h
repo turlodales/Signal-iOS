@@ -1,8 +1,6 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
-
-#import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -10,11 +8,14 @@ extern NSString *const OWSSyncManagerConfigurationSyncDidCompleteNotification;
 extern NSString *const OWSSyncManagerKeysSyncDidCompleteNotification;
 
 @class AnyPromise;
+@class MessageSender;
 @class OWSContactsManager;
 @class OWSIdentityManager;
-@class OWSMessageSender;
 @class OWSProfileManager;
 @class SDSKeyValueStore;
+
+@protocol SyncManagerProtocol;
+@protocol SyncManagerProtocolObjc;
 
 @interface OWSSyncManager : NSObject <SyncManagerProtocolObjc>
 
@@ -24,8 +25,6 @@ extern NSString *const OWSSyncManagerKeysSyncDidCompleteNotification;
 - (instancetype)init NS_UNAVAILABLE;
 
 - (instancetype)initDefault NS_DESIGNATED_INITIALIZER;
-
-+ (id<SyncManagerProtocol>)shared;
 
 @end
 

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "Theme.h"
@@ -20,23 +20,13 @@ NSString *const ThemeKeyCurrentMode = @"ThemeKeyCurrentMode";
 @property (nonatomic) NSNumber *isDarkThemeEnabledNumber;
 @property (nonatomic) NSNumber *cachedCurrentThemeNumber;
 
+#if TESTABLE_BUILD
+@property (nonatomic, nullable) NSNumber *isDarkThemeEnabledForTests;
+#endif
+
 @end
 
 @implementation Theme
-
-#pragma mark - Dependencies
-
-- (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
-
-- (StorageCoordinator *)storageCoordinator
-{
-    return SSKEnvironment.shared.storageCoordinator;
-}
-
-#pragma mark -
 
 + (SDSKeyValueStore *)keyValueStore
 {
@@ -45,7 +35,7 @@ NSString *const ThemeKeyCurrentMode = @"ThemeKeyCurrentMode";
 
 #pragma mark -
 
-+ (instancetype)sharedInstance
++ (Theme *)shared
 {
     static dispatch_once_t onceToken;
     static Theme *instance;
@@ -66,9 +56,20 @@ NSString *const ThemeKeyCurrentMode = @"ThemeKeyCurrentMode";
 
     OWSSingletonAssert();
 
-    [AppReadiness runNowOrWhenAppDidBecomeReady:^{
-        [self notifyIfThemeModeIsNotDefault];
-    }];
+    AppReadinessRunNowOrWhenAppDidBecomeReadySync(^{
+        // IOS-782: +[Theme shared] re-enterant initialization
+        // AppReadiness will invoke the block synchronously if the app is already ready.
+        // This doesn't work here, because we'll end up reenterantly calling +shared
+        // if the app is in dark mode and the first call to +[Theme shared] happens
+        // after the app is ready.
+        //
+        // It looks like that pattern is only hit in the share extension, but we're better off
+        // asyncing always to ensure the dependency chain is broken. We're okay waiting, since
+        // there's no guarantee that this block in synchronously executed anyway.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self notifyIfThemeModeIsNotDefault];
+        });
+    });
 
     return self;
 }
@@ -84,14 +85,20 @@ NSString *const ThemeKeyCurrentMode = @"ThemeKeyCurrentMode";
 
 + (BOOL)isDarkThemeEnabled
 {
-    return [self.sharedInstance isDarkThemeEnabled];
+    return [self.shared isDarkThemeEnabled];
 }
 
 - (BOOL)isDarkThemeEnabled
 {
-    OWSAssertIsOnMainThread();
+    //    OWSAssertIsOnMainThread();
 
-    if (!self.storageCoordinator.isStorageReady) {
+#if TESTABLE_BUILD
+    if (self.isDarkThemeEnabledForTests != nil) {
+        return self.isDarkThemeEnabledForTests.boolValue;
+    }
+#endif
+
+    if (!AppReadiness.isAppReady) {
         // Don't cache this value until it reflects the data store.
         return self.isSystemDarkThemeEnabled;
     }
@@ -122,9 +129,16 @@ NSString *const ThemeKeyCurrentMode = @"ThemeKeyCurrentMode";
     return self.isDarkThemeEnabledNumber.boolValue;
 }
 
+#if TESTABLE_BUILD
++ (void)setIsDarkThemeEnabledForTests:(BOOL)value
+{
+    self.shared.isDarkThemeEnabledForTests = @(value);
+}
+#endif
+
 + (ThemeMode)getOrFetchCurrentTheme
 {
-    return [self.sharedInstance getOrFetchCurrentTheme];
+    return [self.shared getOrFetchCurrentTheme];
 }
 
 - (ThemeMode)getOrFetchCurrentTheme
@@ -133,7 +147,7 @@ NSString *const ThemeKeyCurrentMode = @"ThemeKeyCurrentMode";
         return self.cachedCurrentThemeNumber.unsignedIntegerValue;
     }
 
-    if (!self.storageCoordinator.isStorageReady) {
+    if (!AppReadiness.isAppReady) {
         return self.defaultTheme;
     }
 
@@ -165,16 +179,16 @@ NSString *const ThemeKeyCurrentMode = @"ThemeKeyCurrentMode";
 
 + (void)setCurrentTheme:(ThemeMode)mode
 {
-    [self.sharedInstance setCurrentTheme:mode];
+    [self.shared setCurrentTheme:mode];
 }
 
 - (void)setCurrentTheme:(ThemeMode)mode
 {
     OWSAssertIsOnMainThread();
 
-    [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+    DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
         [Theme.keyValueStore setUInt:mode key:ThemeKeyCurrentMode transaction:transaction];
-    }];
+    });
 
     NSNumber *previousMode = self.isDarkThemeEnabledNumber;
 
@@ -219,7 +233,7 @@ NSString *const ThemeKeyCurrentMode = @"ThemeKeyCurrentMode";
 
 + (void)systemThemeChanged
 {
-    [self.sharedInstance systemThemeChanged];
+    [self.shared systemThemeChanged];
 }
 
 - (void)systemThemeChanged
@@ -290,6 +304,11 @@ NSString *const ThemeKeyCurrentMode = @"ThemeKeyCurrentMode";
     return UIColor.ows_gray25Color;
 }
 
++ (UIColor *)ternaryTextColor
+{
+    return UIColor.ows_gray45Color;
+}
+
 + (UIColor *)boldColor
 {
     return (Theme.isDarkThemeEnabled ? UIColor.ows_whiteColor : UIColor.blackColor);
@@ -313,11 +332,6 @@ NSString *const ThemeKeyCurrentMode = @"ThemeKeyCurrentMode";
 + (UIColor *)outlineColor
 {
     return Theme.isDarkThemeEnabled ? UIColor.ows_gray75Color : UIColor.ows_gray15Color;
-}
-
-+ (UIColor *)reactionBackgroundColor
-{
-    return Theme.isDarkThemeEnabled ? UIColor.ows_gray75Color : UIColor.ows_whiteColor;
 }
 
 + (UIColor *)backdropColor
@@ -389,22 +403,62 @@ NSString *const ThemeKeyCurrentMode = @"ThemeKeyCurrentMode";
 
 + (UIColor *)tableCellBackgroundColor
 {
-    return Theme.isDarkThemeEnabled ? UIColor.ows_gray90Color : Theme.backgroundColor;
+    return Theme.isDarkThemeEnabled ? UIColor.ows_gray95Color : Theme.backgroundColor;
 }
 
 + (UIColor *)tableViewBackgroundColor
 {
-    return (Theme.isDarkThemeEnabled ? UIColor.ows_gray95Color : UIColor.ows_gray02Color);
+    return (Theme.isDarkThemeEnabled ? UIColor.ows_blackColor : UIColor.ows_gray02Color);
+}
+
++ (UIColor *)tableCell2BackgroundColor
+{
+    return Theme.isDarkThemeEnabled ? UIColor.ows_gray90Color : UIColor.ows_whiteColor;
+}
+
++ (UIColor *)tableCell2PresentedBackgroundColor
+{
+    return Theme.isDarkThemeEnabled ? UIColor.ows_gray80Color : UIColor.ows_whiteColor;
+}
+
++ (UIColor *)tableCell2SelectedBackgroundColor
+{
+    return Theme.isDarkThemeEnabled ? UIColor.ows_gray80Color : UIColor.ows_gray15Color;
+}
+
++ (UIColor *)tableCell2PresentedSelectedBackgroundColor
+{
+    return Theme.isDarkThemeEnabled ? UIColor.ows_gray75Color : UIColor.ows_gray15Color;
+}
+
++ (UIColor *)tableView2BackgroundColor
+{
+    return (Theme.isDarkThemeEnabled ? UIColor.ows_blackColor : UIColor.ows_gray10Color);
+}
+
++ (UIColor *)tableView2PresentedBackgroundColor
+{
+    return (Theme.isDarkThemeEnabled ? UIColor.ows_gray90Color : UIColor.ows_gray10Color);
+}
+
++ (UIColor *)tableView2SeparatorColor
+{
+    return (Theme.isDarkThemeEnabled ? UIColor.ows_gray75Color : UIColor.ows_gray20Color);
+}
+
++ (UIColor *)tableView2PresentedSeparatorColor
+{
+    return (Theme.isDarkThemeEnabled ? UIColor.ows_gray65Color : UIColor.ows_gray20Color);
 }
 
 + (UIColor *)darkThemeBackgroundColor
 {
-    return UIColor.ows_gray95Color;
+    return UIColor.ows_blackColor;
 }
 
 + (UIColor *)darkThemePrimaryColor
 {
-    return UIColor.ows_gray05Color;
+    return UIColor.ows_gray02Color;
 }
 
 + (UIColor *)lightThemePrimaryColor

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -144,6 +144,38 @@ extension KnownStickerPack: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension KnownStickerPack: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == KnownStickerPack.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let dateCreated: Date = modelToCopy.dateCreated
+            // NOTE: If this generates build errors, you made need to
+            // implement DeepCopyable for this type in DeepCopy.swift.
+            let info: StickerPackInfo = try DeepCopies.deepCopy(modelToCopy.info)
+            let referenceCount: Int = modelToCopy.referenceCount
+
+            return KnownStickerPack(grdbId: id,
+                                    uniqueId: uniqueId,
+                                    dateCreated: dateCreated,
+                                    info: info,
+                                    referenceCount: referenceCount)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension KnownStickerPackSerializer {
@@ -278,9 +310,11 @@ public extension KnownStickerPack {
 
 @objc
 public class KnownStickerPackCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<KnownStickerPackRecord>?
 
-    init(cursor: RecordCursor<KnownStickerPackRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<KnownStickerPackRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -322,10 +356,10 @@ public extension KnownStickerPack {
         let database = transaction.database
         do {
             let cursor = try KnownStickerPackRecord.fetchCursor(database)
-            return KnownStickerPackCursor(cursor: cursor)
+            return KnownStickerPackCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return KnownStickerPackCursor(cursor: nil)
+            return KnownStickerPackCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -335,8 +369,6 @@ public extension KnownStickerPack {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return KnownStickerPack.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(KnownStickerPackRecord.databaseTableName) WHERE \(knownStickerPackColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -367,28 +399,20 @@ public extension KnownStickerPack {
                             batchSize: UInt,
                             block: @escaping (KnownStickerPack, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            KnownStickerPack.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? KnownStickerPack else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = KnownStickerPack.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = KnownStickerPack.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -416,10 +440,6 @@ public extension KnownStickerPack {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: KnownStickerPack.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -451,8 +471,6 @@ public extension KnownStickerPack {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: KnownStickerPack.collection())
         case .grdbRead(let grdbTransaction):
             return KnownStickerPackRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -462,8 +480,6 @@ public extension KnownStickerPack {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: KnownStickerPack.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try KnownStickerPackRecord.deleteAll(grdbTransaction.database)
@@ -512,8 +528,6 @@ public extension KnownStickerPack {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: KnownStickerPack.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(KnownStickerPackRecord.databaseTableName) WHERE \(knownStickerPackColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -531,11 +545,11 @@ public extension KnownStickerPack {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try KnownStickerPackRecord.fetchCursor(transaction.database, sqlRequest)
-            return KnownStickerPackCursor(cursor: cursor)
+            return KnownStickerPackCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return KnownStickerPackCursor(cursor: nil)
+            return KnownStickerPackCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -585,3 +599,20 @@ class KnownStickerPackSerializer: SDSSerializer {
         return KnownStickerPackRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, dateCreated: dateCreated, info: info, referenceCount: referenceCount)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension KnownStickerPack {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> KnownStickerPack {
+        guard let record = try asRecord() as? KnownStickerPackRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try KnownStickerPack.fromRecord(record)
+    }
+}
+#endif

@@ -1,0 +1,5 @@
+• Hem creat aplicacions noves amb animacions noves a l’hora d’enviar i rebre missatges, seleccionar missatges i respondre als missatges a la vista de conversa.
+• La durada de la bateria és preciosa, de manera que hem fet diversos canvis en la manera de gestionar les notificacions a l’aplicació, cosa que redueix l’ús de la bateria de manera significativa. Informeu de qualsevol problema que vegeu amb la fiabilitat de les notificacions.
+• Voleu rebre un missatge no desitjat? Ara podeu informar de correu brossa quan toqueu a blocar.
+
+Interested in helping improve Signal? We're hiring. Visit https://signal.org/workworkwork to learn more.

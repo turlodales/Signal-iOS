@@ -1,75 +1,61 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSAttachmentStream.h"
-#import "MIMETypeUtil.h"
 #import "NSData+Image.h"
-#import "OWSError.h"
-#import "OWSFileSystem.h"
-#import "TSAttachmentPointer.h"
 #import <AVFoundation/AVFoundation.h>
 #import <SignalCoreKit/Threading.h>
+#import <SignalServiceKit/MIMETypeUtil.h>
+#import <SignalServiceKit/OWSError.h>
+#import <SignalServiceKit/OWSFileSystem.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSAttachmentPointer.h>
+#import <SignalServiceKit/TSAttachmentStream.h>
+#import <SignalServiceKit/UIImage+OWS.h>
+#import <YYImage/YYImage.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
-const NSUInteger kThumbnailDimensionPointsSmall = 200;
-const NSUInteger kThumbnailDimensionPointsMedium = 450;
-// This size is large enough to render full screen.
-const NSUInteger ThumbnailDimensionPointsLarge()
-{
-    // We use the screen size here rather than the application size, as we
-    // want the thumbnail to be big enough to adapt to when the app is running
-    // full screen.
-    CGSize screenSizePoints = UIScreen.mainScreen.bounds.size;
-    const CGFloat kMinZoomFactor = 2.f;
-    return MAX(screenSizePoints.width, screenSizePoints.height) * kMinZoomFactor;
-}
-
 typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 
-@interface TSAttachmentStream () <AudioWaveformSamplingObserver>
+NSString *NSStringForAttachmentThumbnailQuality(AttachmentThumbnailQuality value)
+{
+    switch (value) {
+        case AttachmentThumbnailQuality_Small:
+            return @"Small";
+        case AttachmentThumbnailQuality_Medium:
+            return @"Medium";
+        case AttachmentThumbnailQuality_MediumLarge:
+            return @"MediumLarge";
+        case AttachmentThumbnailQuality_Large:
+            return @"Large";
+    }
+}
+
+@interface TSAttachmentStream ()
 
 // We only want to generate the file path for this attachment once, so that
 // changes in the file path generation logic don't break existing attachments.
 @property (nullable, nonatomic) NSString *localRelativeFilePath;
 
 // These properties should only be accessed while synchronized on self.
+//
+// In pixels, not points.
 @property (nullable, nonatomic) NSNumber *cachedImageWidth;
 @property (nullable, nonatomic) NSNumber *cachedImageHeight;
 
 // This property should only be accessed on the main thread.
 @property (nullable, nonatomic) NSNumber *cachedAudioDurationSeconds;
-@property (nullable, nonatomic) AudioWaveform *cachedAudioWaveform;
 
 @property (atomic, nullable) NSNumber *isValidImageCached;
 @property (atomic, nullable) NSNumber *isValidVideoCached;
+@property (atomic, nullable) NSNumber *isAnimatedCached;
 
 @end
 
 #pragma mark -
 
 @implementation TSAttachmentStream
-
-#pragma mark - Dependencies
-
-+ (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
-
-- (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
-
-- (StorageCoordinator *)storageCoordinator
-{
-    return SSKEnvironment.shared.storageCoordinator;
-}
-
-#pragma mark -
 
 - (instancetype)initWithContentType:(NSString *)contentType
                           byteCount:(UInt32)byteCount
@@ -105,7 +91,8 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
         return self;
     }
 
-    _contentType = pointer.contentType;
+    OWSAssertDebug([NSObject isNullableObject:self.contentType equalTo:pointer.contentType]);
+
     // TSAttachmentStream doesn't have any "incoming vs. outgoing"
     // state, but this constructor is used only for new incoming
     // attachments which don't need to be uploaded.
@@ -161,6 +148,7 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
                 cachedImageWidth:(nullable NSNumber *)cachedImageWidth
                creationTimestamp:(NSDate *)creationTimestamp
                           digest:(nullable NSData *)digest
+                isAnimatedCached:(nullable NSNumber *)isAnimatedCached
                       isUploaded:(BOOL)isUploaded
               isValidImageCached:(nullable NSNumber *)isValidImageCached
               isValidVideoCached:(nullable NSNumber *)isValidVideoCached
@@ -190,6 +178,7 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     _cachedImageWidth = cachedImageWidth;
     _creationTimestamp = creationTimestamp;
     _digest = digest;
+    _isAnimatedCached = isAnimatedCached;
     _isUploaded = isUploaded;
     _isValidImageCached = isValidImageCached;
     _isValidVideoCached = isValidVideoCached;
@@ -309,7 +298,9 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
         *error = OWSErrorMakeAssertionError(@"Missing URL for attachment.");
         return NO;
     }
-    OWSLogDebug(@"Writing attachment to file: %@", originalMediaURL);
+    if (!SSKDebugFlags.reduceLogChatter) {
+        OWSLogDebug(@"Writing attachment to file: %@", originalMediaURL);
+    }
     return [dataSource moveToUrlAndConsume:originalMediaURL error:error];
 }
 
@@ -321,14 +312,6 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 + (NSString *)sharedDataAttachmentsDirPath
 {
     return [[OWSFileSystem appSharedDataDirectoryPath] stringByAppendingPathComponent:@"Attachments"];
-}
-
-+ (nullable NSError *)migrateToSharedData
-{
-    OWSLogInfo(@"");
-
-    return [OWSFileSystem moveAppFilePath:self.legacyAttachmentsDirPath
-                       sharedDataFilePath:self.sharedDataAttachmentsDirPath];
 }
 
 + (NSString *)attachmentsFolder
@@ -426,10 +409,9 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 
 - (void)removeFile
 {
-    NSError *error;
-
     NSString *thumbnailsDirPath = self.thumbnailsDirPath;
     if ([[NSFileManager defaultManager] fileExistsAtPath:thumbnailsDirPath]) {
+        NSError *error;
         BOOL success = [[NSFileManager defaultManager] removeItemAtPath:thumbnailsDirPath error:&error];
         if (error || !success) {
             OWSLogError(@"remove thumbnails dir failed with: %@", error);
@@ -438,10 +420,8 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 
     NSString *_Nullable legacyThumbnailPath = self.legacyThumbnailPath;
     if (legacyThumbnailPath) {
-        BOOL success = [[NSFileManager defaultManager] removeItemAtPath:legacyThumbnailPath error:&error];
-
-        if (error || !success) {
-            OWSLogError(@"remove legacy thumbnail failed with: %@", error);
+        if (![OWSFileSystem deleteFileIfExists:legacyThumbnailPath]) {
+            OWSLogError(@"remove legacy thumbnail failed.");
         }
     }
 
@@ -450,12 +430,9 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
         OWSFailDebug(@"Missing path for attachment.");
         return;
     }
-    BOOL success = [[NSFileManager defaultManager] removeItemAtPath:filePath error:&error];
-    if (error || !success) {
-        OWSLogError(@"remove file failed with: %@", error);
+    if (![OWSFileSystem deleteFileIfExists:filePath]) {
+        OWSLogError(@"remove file failed");
     }
-
-
 
     // Remove the attachment specific directory and any associated files stored for this attachment.
     NSString *_Nullable attachmentFolder = self.uniqueIdAttachmentFolder;
@@ -467,7 +444,7 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 - (void)anyDidInsertWithTransaction:(SDSAnyWriteTransaction *)transaction
 {
     [super anyDidInsertWithTransaction:transaction];
-    [AnyMediaGalleryFinder didInsertAttachmentStream:self transaction:transaction];
+    [MediaGalleryManager didInsertAttachmentStream:self transaction:transaction];
 }
 
 - (void)anyDidRemoveWithTransaction:(SDSAnyWriteTransaction *)transaction
@@ -475,7 +452,7 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     [super anyDidRemoveWithTransaction:transaction];
 
     [self removeFile];
-    [AnyMediaGalleryFinder didRemoveAttachmentStream:self transaction:transaction];
+    [MediaGalleryManager didRemoveAttachmentStream:self transaction:transaction];
 }
 
 - (BOOL)isValidVisualMedia
@@ -505,10 +482,12 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     BOOL didUpdateCache = NO;
     @synchronized(self) {
         if (!self.isValidImageCached) {
-            OWSLogVerbose(@"Updating isValidImageCached.");
+            if (!SSKDebugFlags.reduceLogChatter) {
+                OWSLogVerbose(@"Updating isValidImageCached.");
+            }
             self.isValidImageCached = @([NSData ows_isValidImageAtPath:self.originalFilePath
                                                               mimeType:self.contentType]);
-            if (!self.isValidImageCached) {
+            if (!self.isValidImageCached.boolValue) {
                 OWSLogWarn(@"Invalid image.");
             }
             didUpdateCache = YES;
@@ -527,7 +506,7 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 
 - (BOOL)canAsyncUpdate
 {
-    return (!CurrentAppContext().isRunningTests && !self.storageCoordinator.isMigrating);
+    return !CurrentAppContext().isRunningTests;
 }
 
 - (BOOL)isValidVideo
@@ -557,6 +536,59 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     return result;
 }
 
+- (BOOL)isAnimated
+{
+    BOOL result;
+    BOOL didUpdateCache = NO;
+    @synchronized(self) {
+        if (!self.isAnimatedCached) {
+            if (!SSKDebugFlags.reduceLogChatter) {
+                OWSLogVerbose(@"Updating isAnimatedCached.");
+            }
+            self.isAnimatedCached = @([self hasAnimatedImageContent]);
+            didUpdateCache = YES;
+        }
+        result = self.isAnimatedCached.boolValue;
+    }
+
+    if (didUpdateCache && self.canAsyncUpdate) {
+        [self applyChangeAsyncToLatestCopyWithChangeBlock:^(
+            TSAttachmentStream *latestInstance) { latestInstance.isAnimatedCached = @(result); }];
+    }
+
+    return result;
+}
+
+- (BOOL)shouldBeRenderedByYY
+{
+    if ([self.contentType isEqualToString:OWSMimeTypeImageWebp] ||
+        [self.contentType isEqualToString:OWSMimeTypeImageGif]) {
+        return YES;
+    }
+    return self.isAnimated;
+}
+
+- (BOOL)hasAnimatedImageContent
+{
+    if ([self.contentType isEqualToString:OWSMimeTypeImageGif]) {
+        return YES;
+    }
+    if (![self.contentType isEqualToString:OWSMimeTypeImageWebp]
+        && ![self.contentType isEqualToString:OWSMimeTypeImagePng]) {
+        return NO;
+    }
+    NSString *_Nullable filePath = self.originalFilePath;
+    if (filePath == nil) {
+        OWSFailDebug(@"Missing filePath.");
+        return NO;
+    }
+    ImageMetadata *imageMetadata = [NSData imageMetadataWithPath:filePath mimeType:self.contentType];
+    if (!imageMetadata.isValid) {
+        return NO;
+    }
+    return imageMetadata.isAnimated;
+}
+
 #pragma mark -
 
 - (nullable UIImage *)originalImage
@@ -571,7 +603,9 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
         if (![self isValidImage]) {
             return nil;
         }
-        UIImage *_Nullable image = [[UIImage alloc] initWithContentsOfFile:self.originalFilePath];
+
+        Class imageClass = self.isWebpImage ? [YYImage class] : [UIImage class];
+        UIImage *_Nullable image = [[imageClass alloc] initWithContentsOfFile:self.originalFilePath];
         if (image == nil) {
             OWSFailDebug(
                 @"Couldn't load original image: %d.", [OWSFileSystem fileOrFolderExistsAtPath:self.originalFilePath]);
@@ -611,7 +645,7 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 {
     NSError *error;
     UIImage *_Nullable image = [OWSMediaUtils thumbnailForVideoAtPath:self.originalFilePath
-                                                         maxDimension:ThumbnailDimensionPointsLarge()
+                                                   maxDimensionPoints:[TSAttachmentStream thumbnailDimensionPointsLarge]
                                                                 error:&error];
     if (error || !image) {
         OWSLogError(@"Could not create video still: %@.", error);
@@ -642,13 +676,13 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     }
 }
 
-- (CGSize)calculateImageSize
+- (CGSize)calculateImageSizePixels
 {
     if ([self isVideo]) {
         if (![self isValidVideo]) {
             return CGSizeZero;
         }
-        return [self videoStillImage].size;
+        return [[self videoStillImage] pixelSize];
     } else if ([self isImage] || [self isAnimated]) {
         // imageSizeForFilePath checks validity.
         return [NSData imageSizeForFilePath:self.originalFilePath mimeType:self.contentType];
@@ -662,7 +696,7 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     return ([self isVideo] || [self isImage] || [self isAnimated]);
 }
 
-- (CGSize)imageSize
+- (CGSize)imageSizePixels
 {
     if (!self.shouldHaveImageSize) {
         OWSFailDebug(@"Content type does not have image sync.");
@@ -675,21 +709,21 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
             return CGSizeMake(self.cachedImageWidth.floatValue, self.cachedImageHeight.floatValue);
         }
 
-        CGSize imageSize = [self calculateImageSize];
-        if (imageSize.width <= 0 || imageSize.height <= 0) {
+        CGSize imageSizePixels = [self calculateImageSizePixels];
+        if (imageSizePixels.width <= 0 || imageSizePixels.height <= 0) {
             return CGSizeZero;
         }
-        self.cachedImageWidth = @(imageSize.width);
-        self.cachedImageHeight = @(imageSize.height);
+        self.cachedImageWidth = @(imageSizePixels.width);
+        self.cachedImageHeight = @(imageSizePixels.height);
 
         if (self.canAsyncUpdate) {
             [self applyChangeAsyncToLatestCopyWithChangeBlock:^(TSAttachmentStream *latestInstance) {
-                latestInstance.cachedImageWidth = @(imageSize.width);
-                latestInstance.cachedImageHeight = @(imageSize.height);
+                latestInstance.cachedImageWidth = @(imageSizePixels.width);
+                latestInstance.cachedImageHeight = @(imageSizePixels.height);
             }];
         }
 
-        return imageSize;
+        return imageSizePixels;
     }
 }
 
@@ -719,7 +753,7 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     OWSAssertDebug(changeBlock);
 
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+        DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
             // We load a new instance before using anyUpdateWithTransaction()
             // since it isn't thread-safe to mutate the current instance async.
             TSAttachmentStream *_Nullable latestInstance =
@@ -737,7 +771,7 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
                                                                block:^(TSAttachmentStream *attachmentStream) {
                                                                    changeBlock(attachmentStream);
                                                                }];
-        }];
+        });
 
         if (completion != nil) {
             completion();
@@ -747,15 +781,14 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 
 #pragma mark -
 
-- (CGFloat)calculateAudioDurationSeconds
+- (NSTimeInterval)calculateAudioDurationSeconds
 {
-    OWSAssertIsOnMainThread();
     OWSAssertDebug([self isAudio]);
 
     if (CurrentAppContext().isRunningTests) {
         // Return an arbitrary non-zero value to avoid
         // expected exceptions in AVFoundation.
-        return 1.f;
+        return 1;
     }
 
     NSError *error;
@@ -763,251 +796,161 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     if (error && [error.domain isEqualToString:NSOSStatusErrorDomain]
         && (error.code == kAudioFileInvalidFileError || error.code == kAudioFileStreamError_InvalidFile)) {
         // Ignore "invalid audio file" errors.
-        return 0.f;
+        return 0;
     }
     if (!error) {
         [audioPlayer prepareToPlay];
-        return (CGFloat)[audioPlayer duration];
+        return [audioPlayer duration];
     } else {
         OWSLogError(@"Could not find audio duration: %@", self.originalMediaURL);
         return 0;
     }
 }
 
-- (CGFloat)audioDurationSeconds
+- (NSTimeInterval)audioDurationSeconds
 {
-    OWSAssertIsOnMainThread();
+    @synchronized(self) {
+        if (self.cachedAudioDurationSeconds) {
+            return self.cachedAudioDurationSeconds.doubleValue;
+        }
 
-    if (self.cachedAudioDurationSeconds) {
-        return self.cachedAudioDurationSeconds.floatValue;
+        NSTimeInterval audioDurationSeconds = [self calculateAudioDurationSeconds];
+        self.cachedAudioDurationSeconds = @(audioDurationSeconds);
+
+        if (self.canAsyncUpdate) {
+            [self applyChangeAsyncToLatestCopyWithChangeBlock:^(TSAttachmentStream *latestInstance) {
+                latestInstance.cachedAudioDurationSeconds = @(audioDurationSeconds);
+            }];
+        }
+
+        return audioDurationSeconds;
     }
-
-    CGFloat audioDurationSeconds = [self calculateAudioDurationSeconds];
-    self.cachedAudioDurationSeconds = @(audioDurationSeconds);
-
-    if (self.canAsyncUpdate) {
-        [self applyChangeAsyncToLatestCopyWithChangeBlock:^(TSAttachmentStream *latestInstance) {
-            latestInstance.cachedAudioDurationSeconds = @(audioDurationSeconds);
-        }];
-    }
-
-    return audioDurationSeconds;
 }
 
 - (nullable AudioWaveform *)audioWaveform
 {
-    @synchronized(self) {
-        if (self.cachedAudioWaveform) {
-            return self.cachedAudioWaveform;
-        }
-
-        NSString *_Nullable audioWaveformPath = self.audioWaveformPath;
-
-        // This attachment doesn't support waveforms, likely because it's not audio.
-        if (!audioWaveformPath) {
-            OWSAssertDebug(!self.isAudio);
-            return nil;
-        }
-
-        AudioWaveform *_Nullable waveform;
-
-        // We have a cached waveform on disk, read it into memory.
-        if ([[NSFileManager defaultManager] fileExistsAtPath:audioWaveformPath]) {
-            NSError *error;
-            waveform = [[AudioWaveform alloc] initWithContentsOfFile:audioWaveformPath error:&error];
-            if (error || !waveform) {
-                OWSFailDebug(@"Failed to intialize audio waveform from cached file: %@", error);
-
-                // Remove the file from disk and create a new one.
-                if (![OWSFileSystem deleteFileIfExists:audioWaveformPath]) {
-                    OWSFailDebug(@"failed to remove corrupt waveform from disk: %@", error);
-                    return nil;
-                }
-
-                return self.audioWaveform;
-            }
-        } else {
-            AVURLAsset *asset = [AVURLAsset assetWithURL:self.originalMediaURL];
-
-            // If the asset isn't readable, we may not be able to generate a waveform for this file
-            if (!asset.isReadable) {
-                // Android sends voice messages in a hacky m4a container that we can't process
-                // when it has the m4a extension. If we hint to the OS that it's an AAC file with
-                // the file extension, we can. This is pretty brittle and hopefully android will
-                // be able to fix the issue in the future in which case `isReadable` will become
-                // true and this path will no longer be hit.
-                if (self.isVoiceMessage && [self.originalFilePath hasSuffix:@"m4a"]) {
-                    NSString *symlinkPath = [self.uniqueIdAttachmentFolder stringByAppendingString:@"/Voice-Memo.aac"];
-                    if (![NSFileManager.defaultManager fileExistsAtPath:symlinkPath]) {
-                        [self ensureUniqueIdAttachmentFolder];
-                        NSError *error;
-                        [[NSFileManager defaultManager] createSymbolicLinkAtPath:symlinkPath
-                                                             withDestinationPath:self.originalFilePath
-                                                                           error:&error];
-                        if (error) {
-                            OWSFailDebug(@"Failed to create voice memo symlink: %@", error);
-                            return nil;
-                        }
-                    }
-                    asset = [AVURLAsset assetWithURL:[NSURL fileURLWithPath:symlinkPath]];
-                }
-            }
-
-            if (!asset.isReadable) {
-                OWSFailDebug(@"unexpectedly encountered unreadable audio file.");
-                return nil;
-            }
-
-            waveform = [[AudioWaveform alloc] initWithAsset:asset];
-
-            // Listen for sampling completion so we can cache the final waveform to disk.
-            [waveform addSamplingObserver:self];
-        }
-
-        self.cachedAudioWaveform = waveform;
-
-        return waveform;
-    }
+    return [AudioWaveformManager audioWaveformForAttachment:self];
 }
 
 #pragma mark - Thumbnails
 
-- (nullable UIImage *)thumbnailImageWithSizeHint:(CGSize)sizeHint
-                                         success:(OWSThumbnailSuccess)success
-                                         failure:(OWSThumbnailFailure)failure
+- (void)thumbnailImageWithSizeHint:(CGSize)sizeHint
+                           success:(OWSThumbnailSuccess)success
+                           failure:(OWSThumbnailFailure)failure
 {
     CGFloat maxDimensionHint = MAX(sizeHint.width, sizeHint.height);
     NSUInteger thumbnailDimensionPoints;
-    if (maxDimensionHint <= kThumbnailDimensionPointsSmall) {
-        thumbnailDimensionPoints = kThumbnailDimensionPointsSmall;
-    } else if (maxDimensionHint <= kThumbnailDimensionPointsMedium) {
-        thumbnailDimensionPoints = kThumbnailDimensionPointsMedium;
+    if (maxDimensionHint <= TSAttachmentStream.thumbnailDimensionPointsSmall) {
+        thumbnailDimensionPoints = TSAttachmentStream.thumbnailDimensionPointsSmall;
+    } else if (maxDimensionHint <= TSAttachmentStream.thumbnailDimensionPointsMedium) {
+        thumbnailDimensionPoints = TSAttachmentStream.thumbnailDimensionPointsMedium;
     } else {
-        thumbnailDimensionPoints = ThumbnailDimensionPointsLarge();
+        thumbnailDimensionPoints = [TSAttachmentStream thumbnailDimensionPointsLarge];
     }
 
-    return [self thumbnailImageWithThumbnailDimensionPoints:thumbnailDimensionPoints success:success failure:failure];
+    [self thumbnailImageWithThumbnailDimensionPoints:thumbnailDimensionPoints success:success failure:failure];
 }
 
-- (nullable UIImage *)thumbnailImageSmallWithSuccess:(OWSThumbnailSuccess)success failure:(OWSThumbnailFailure)failure
+- (void)thumbnailImageWithQuality:(AttachmentThumbnailQuality)quality
+                          success:(OWSThumbnailSuccess)success
+                          failure:(OWSThumbnailFailure)failure
 {
-    return [self thumbnailImageWithThumbnailDimensionPoints:kThumbnailDimensionPointsSmall
-                                                    success:success
-                                                    failure:failure];
+    NSUInteger thumbnailDimensionPoints = [TSAttachmentStream thumbnailDimensionPointsForThumbnailQuality:quality];
+    [self thumbnailImageWithThumbnailDimensionPoints:thumbnailDimensionPoints success:success failure:failure];
 }
 
-- (nullable UIImage *)thumbnailImageMediumWithSuccess:(OWSThumbnailSuccess)success failure:(OWSThumbnailFailure)failure
+- (void)thumbnailImageWithThumbnailDimensionPoints:(NSUInteger)thumbnailDimensionPoints
+                                           success:(OWSThumbnailSuccess)success
+                                           failure:(OWSThumbnailFailure)failure
 {
-    return [self thumbnailImageWithThumbnailDimensionPoints:kThumbnailDimensionPointsMedium
-                                                    success:success
-                                                    failure:failure];
+    [self loadedThumbnailWithThumbnailDimensionPoints:thumbnailDimensionPoints
+        success:^(OWSLoadedThumbnail *thumbnail) { DispatchMainThreadSafe(^{ success(thumbnail.image); }); }
+        failure:^{ DispatchMainThreadSafe(^{ failure(); }); }];
 }
 
-- (nullable UIImage *)thumbnailImageLargeWithSuccess:(OWSThumbnailSuccess)success failure:(OWSThumbnailFailure)failure
+- (void)loadedThumbnailWithThumbnailDimensionPoints:(NSUInteger)thumbnailDimensionPoints
+                                            success:(OWSLoadedThumbnailSuccess)success
+                                            failure:(OWSThumbnailFailure)failure
 {
-    return [self thumbnailImageWithThumbnailDimensionPoints:ThumbnailDimensionPointsLarge()
-                                                    success:success
-                                                    failure:failure];
-}
-
-- (nullable UIImage *)thumbnailImageWithThumbnailDimensionPoints:(NSUInteger)thumbnailDimensionPoints
-                                                         success:(OWSThumbnailSuccess)success
-                                                         failure:(OWSThumbnailFailure)failure
-{
-    OWSLoadedThumbnail *_Nullable loadedThumbnail;
-    loadedThumbnail = [self loadedThumbnailWithThumbnailDimensionPoints:thumbnailDimensionPoints
-        success:^(OWSLoadedThumbnail *thumbnail) {
-            DispatchMainThreadSafe(^{
-                success(thumbnail.image);
-            });
-        }
-        failure:^{
-            DispatchMainThreadSafe(^{
+    [self.thumbnailLoadingOperationQueue addOperationWithBlock:^{
+        @autoreleasepool {
+            if (!self.isValidVisualMedia) {
+                // Never thumbnail (or try to use the original of) invalid media.
+                OWSFailDebug(@"Invalid image.");
                 failure();
-            });
-        }];
-    return loadedThumbnail.image;
+                return;
+            }
+
+            CGSize originalSizePoints = self.imageSizePoints;
+            if (originalSizePoints.width < 1 || originalSizePoints.height < 1) {
+                failure();
+                return;
+            }
+
+            if (originalSizePoints.width <= thumbnailDimensionPoints
+                && originalSizePoints.height <= thumbnailDimensionPoints) {
+                // There's no point in generating a thumbnail if the original is smaller than the
+                // thumbnail size.
+                NSString *originalFilePath = self.originalFilePath;
+                UIImage *_Nullable originalImage = self.originalImage;
+                if (originalImage == nil) {
+                    OWSFailDebug(@"originalImage was unexpectedly nil");
+                    failure();
+                } else {
+                    success([[OWSLoadedThumbnail alloc] initWithImage:originalImage filePath:originalFilePath]);
+                }
+                return;
+            }
+
+            NSString *thumbnailPath = [self pathForThumbnailDimensionPoints:thumbnailDimensionPoints];
+            if ([[NSFileManager defaultManager] fileExistsAtPath:thumbnailPath]) {
+                UIImage *_Nullable image = [UIImage imageWithContentsOfFile:thumbnailPath];
+                if (!image) {
+                    OWSFailDebug(@"couldn't load image.");
+                    failure();
+                } else {
+                    success([[OWSLoadedThumbnail alloc] initWithImage:image filePath:thumbnailPath]);
+                }
+                return;
+            }
+
+            [OWSThumbnailService.shared ensureThumbnailForAttachment:self
+                                            thumbnailDimensionPoints:thumbnailDimensionPoints
+                                                             success:success
+                                                             failure:^(NSError *error) {
+                                                                 OWSLogError(@"Failed to create thumbnail: %@", error);
+                                                                 failure();
+                                                             }];
+        }
+    }];
+    return;
 }
 
-- (nullable OWSLoadedThumbnail *)loadedThumbnailWithThumbnailDimensionPoints:(NSUInteger)thumbnailDimensionPoints
-                                                                     success:(OWSLoadedThumbnailSuccess)success
-                                                                     failure:(OWSThumbnailFailure)failure
+- (NSOperationQueue *)thumbnailLoadingOperationQueue
 {
-    if (!self.isValidVisualMedia) {
-        // Never thumbnail (or try to use the original of) invalid media.
-        OWSFailDebug(@"Invalid image.");
-        // Any time we return nil from this method we have to call the failure handler
-        // or else the caller waits for an async thumbnail
-        failure();
-        return nil;
-    }
-
-    CGSize originalSize = self.imageSize;
-    if (originalSize.width < 1 || originalSize.height < 1) {
-        // Any time we return nil from this method we have to call the failure handler
-        // or else the caller waits for an async thumbnail
-        failure();
-        return nil;
-    }
-    if (originalSize.width <= thumbnailDimensionPoints || originalSize.height <= thumbnailDimensionPoints) {
-        // There's no point in generating a thumbnail if the original is smaller than the
-        // thumbnail size.
-        UIImage *_Nullable originalImage = self.originalImage;
-        if (originalImage == nil) {
-            OWSFailDebug(@"originalImage was unexpectedly nil");
-            // Any time we return nil from this method we have to call the failure handler
-            // or else the caller waits for an async thumbnail
-            failure();
-            return nil;
-        }
-
-        return [[OWSLoadedThumbnail alloc] initWithImage:originalImage filePath:self.originalFilePath];
-    }
-
-    NSString *thumbnailPath = [self pathForThumbnailDimensionPoints:thumbnailDimensionPoints];
-    if ([[NSFileManager defaultManager] fileExistsAtPath:thumbnailPath]) {
-        UIImage *_Nullable image = [UIImage imageWithContentsOfFile:thumbnailPath];
-        if (!image) {
-            OWSFailDebug(@"couldn't load image.");
-            // Any time we return nil from this method we have to call the failure handler
-            // or else the caller waits for an async thumbnail
-            failure();
-            return nil;
-        }
-        return [[OWSLoadedThumbnail alloc] initWithImage:image filePath:thumbnailPath];
-    }
-
-    [OWSThumbnailService.shared ensureThumbnailForAttachment:self
-                                    thumbnailDimensionPoints:thumbnailDimensionPoints
-                                                     success:success
-                                                     failure:^(NSError *error) {
-                                                         OWSLogError(@"Failed to create thumbnail: %@", error);
-                                                         failure();
-                                                     }];
-    return nil;
+    static dispatch_once_t onceToken;
+    static NSOperationQueue *operationQueue;
+    dispatch_once(&onceToken, ^{
+        operationQueue = [NSOperationQueue new];
+        operationQueue.name = @"thumbnailLoadingOperationQueue";
+        operationQueue.maxConcurrentOperationCount = 4;
+    });
+    return operationQueue;
 }
 
-- (nullable OWSLoadedThumbnail *)loadedThumbnailSmallSync
+- (nullable OWSLoadedThumbnail *)loadedThumbnailSyncWithDimensionPoints:(NSUInteger)thumbnailDimensionPoints
 {
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
 
     __block OWSLoadedThumbnail *_Nullable asyncLoadedThumbnail = nil;
-    OWSLoadedThumbnail *_Nullable syncLoadedThumbnail = nil;
-    syncLoadedThumbnail = [self loadedThumbnailWithThumbnailDimensionPoints:kThumbnailDimensionPointsSmall
+    [self loadedThumbnailWithThumbnailDimensionPoints:thumbnailDimensionPoints
         success:^(OWSLoadedThumbnail *thumbnail) {
             @synchronized(self) {
                 asyncLoadedThumbnail = thumbnail;
             }
             dispatch_semaphore_signal(semaphore);
         }
-        failure:^{
-            dispatch_semaphore_signal(semaphore);
-        }];
-
-    if (syncLoadedThumbnail) {
-        return syncLoadedThumbnail;
-    }
-
+        failure:^{ dispatch_semaphore_signal(semaphore); }];
     // Wait up to N seconds.
     dispatch_semaphore_wait(semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC)));
     @synchronized(self) {
@@ -1015,11 +958,13 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     }
 }
 
-- (nullable UIImage *)thumbnailImageSmallSync
+- (nullable UIImage *)thumbnailImageSyncWithQuality:(AttachmentThumbnailQuality)quality
 {
-    OWSLoadedThumbnail *_Nullable loadedThumbnail = [self loadedThumbnailSmallSync];
+    NSUInteger thumbnailDimensionPoints = [TSAttachmentStream thumbnailDimensionPointsForThumbnailQuality:quality];
+    OWSLoadedThumbnail *_Nullable loadedThumbnail =
+        [self loadedThumbnailSyncWithDimensionPoints:thumbnailDimensionPoints];
     if (!loadedThumbnail) {
-        OWSLogInfo(@"Couldn't load small thumbnail sync.");
+        OWSLogInfo(@"Couldn't load %@ thumbnail sync.", NSStringForAttachmentThumbnailQuality(quality));
         return nil;
     }
     return loadedThumbnail.image;
@@ -1027,7 +972,8 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 
 - (nullable NSData *)thumbnailDataSmallSync
 {
-    OWSLoadedThumbnail *_Nullable loadedThumbnail = [self loadedThumbnailSmallSync];
+    OWSLoadedThumbnail *_Nullable loadedThumbnail =
+        [self loadedThumbnailSyncWithDimensionPoints:TSAttachmentStream.thumbnailDimensionPointsSmall];
     if (!loadedThumbnail) {
         OWSLogInfo(@"Couldn't load small thumbnail sync.");
         return nil;
@@ -1151,7 +1097,9 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
 
 - (nullable SSKProtoAttachmentPointer *)buildProto
 {
-    OWSAssertDebug(self.serverId > 0);
+    BOOL isValidV1orV2 = self.serverId > 0;
+    BOOL isValidV3 = (self.cdnKey.length > 0 && self.cdnNumber > 0);
+    OWSAssertDebug(isValidV1orV2 || isValidV3);
 
     SSKProtoAttachmentPointerBuilder *builder = [SSKProtoAttachmentPointer builder];
     builder.cdnID = self.serverId;
@@ -1174,7 +1122,17 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     builder.size = self.byteCount;
     builder.key = self.encryptionKey;
     builder.digest = self.digest;
-    builder.flags = self.isVoiceMessage ? SSKProtoAttachmentPointerFlagsVoiceMessage : 0;
+
+    if (self.isVoiceMessage) {
+        builder.flags = SSKProtoAttachmentPointerFlagsVoiceMessage;
+    } else if (self.isBorderless) {
+        builder.flags = SSKProtoAttachmentPointerFlagsBorderless;
+    } else if (self.isLoopingVideo || self.isAnimated) {
+        builder.flags = SSKProtoAttachmentPointerFlagsGif;
+    } else {
+        builder.flags = 0;
+    }
+
     if (self.blurHash.length > 0) {
         builder.blurHash = self.blurHash;
     }
@@ -1183,10 +1141,10 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
     }
 
     if (self.shouldHaveImageSize) {
-        CGSize imageSize = self.imageSize;
-        if (imageSize.width < NSIntegerMax && imageSize.height < NSIntegerMax) {
-            NSInteger imageWidth = (NSInteger)round(imageSize.width);
-            NSInteger imageHeight = (NSInteger)round(imageSize.height);
+        CGSize imageSizePixels = self.imageSizePixels;
+        if (imageSizePixels.width < NSIntegerMax && imageSizePixels.height < NSIntegerMax) {
+            NSInteger imageWidth = (NSInteger)round(imageSizePixels.width);
+            NSInteger imageHeight = (NSInteger)round(imageSizePixels.height);
             if (imageWidth > 0 && imageHeight > 0) {
                 builder.width = (UInt32)imageWidth;
                 builder.height = (UInt32)imageHeight;
@@ -1201,28 +1159,6 @@ typedef void (^OWSLoadedThumbnailSuccess)(OWSLoadedThumbnail *loadedThumbnail);
         return nil;
     }
     return attachmentProto;
-}
-
-#pragma mark - AudioWaveformSamplingObserver
-
-- (void)audioWaveformDidFinishSampling:(AudioWaveform *)audioWaveform
-{
-    // We finished sampling the audio waveform, write it to disk.
-    __typeof(self) weakSelf = self;
-    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        __typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) {
-            return;
-        }
-
-        [strongSelf ensureUniqueIdAttachmentFolder];
-
-        NSError *error;
-        [audioWaveform writeToFile:strongSelf.audioWaveformPath atomically:YES error:&error];
-        if (error) {
-            OWSFailDebug(@"could not cache audio waveform to disk: %@", error);
-        }
-    });
 }
 
 @end

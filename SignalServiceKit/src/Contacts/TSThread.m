@@ -1,70 +1,50 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "TSThread.h"
-#import "OWSDisappearingMessagesConfiguration.h"
-#import "OWSReadTracking.h"
-#import "SSKEnvironment.h"
-#import "TSAccountManager.h"
-#import "TSIncomingMessage.h"
-#import "TSInfoMessage.h"
-#import "TSInteraction.h"
-#import "TSInvalidIdentityKeyReceivingErrorMessage.h"
-#import "TSOutgoingMessage.h"
 #import <SignalCoreKit/Cryptography.h>
 #import <SignalCoreKit/NSDate+OWS.h>
 #import <SignalCoreKit/NSString+OWS.h>
 #import <SignalServiceKit/AppReadiness.h>
+#import <SignalServiceKit/OWSDisappearingMessagesConfiguration.h>
+#import <SignalServiceKit/OWSReadTracking.h>
+#import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSAccountManager.h>
+#import <SignalServiceKit/TSIncomingMessage.h>
+#import <SignalServiceKit/TSInfoMessage.h>
+#import <SignalServiceKit/TSInteraction.h>
+#import <SignalServiceKit/TSInvalidIdentityKeyReceivingErrorMessage.h>
+#import <SignalServiceKit/TSOutgoingMessage.h>
+
+@import Intents;
 
 NS_ASSUME_NONNULL_BEGIN
-
-BOOL IsNoteToSelfEnabled(void)
-{
-    return YES;
-}
-
-ConversationColorName const ConversationColorNameCrimson = @"red";
-ConversationColorName const ConversationColorNameVermilion = @"orange";
-ConversationColorName const ConversationColorNameBurlap = @"brown";
-ConversationColorName const ConversationColorNameForest = @"green";
-ConversationColorName const ConversationColorNameWintergreen = @"light_green";
-ConversationColorName const ConversationColorNameTeal = @"teal";
-ConversationColorName const ConversationColorNameBlue = @"blue";
-ConversationColorName const ConversationColorNameIndigo = @"indigo";
-ConversationColorName const ConversationColorNameViolet = @"purple";
-ConversationColorName const ConversationColorNamePlum = @"pink";
-ConversationColorName const ConversationColorNameTaupe = @"blue_grey";
-ConversationColorName const ConversationColorNameSteel = @"grey";
-
-ConversationColorName const ConversationColorNameDefault = ConversationColorNameSteel;
 
 @interface TSThread ()
 
 @property (nonatomic, nullable) NSDate *creationDate;
-@property (nonatomic) BOOL isArchived;
-@property (nonatomic) BOOL isMarkedUnread;
+@property (nonatomic) BOOL isArchivedObsolete;
+@property (nonatomic) BOOL isMarkedUnreadObsolete;
+
 @property (nonatomic, copy, nullable) NSString *messageDraft;
-@property (atomic, nullable) NSDate *mutedUntilDate;
+@property (nonatomic, nullable) MessageBodyRanges *messageDraftBodyRanges;
+
+@property (atomic) uint64_t mutedUntilTimestampObsolete;
 @property (nonatomic) int64_t lastInteractionRowId;
+
+@property (nonatomic, nullable) NSDate *mutedUntilDateObsolete;
+@property (nonatomic) uint64_t lastVisibleSortIdObsolete;
+@property (nonatomic) double lastVisibleSortIdOnScreenPercentageObsolete;
+
+@property (nonatomic) TSThreadMentionNotificationMode mentionNotificationMode;
 
 @end
 
 #pragma mark -
 
 @implementation TSThread
-
-#pragma mark - Dependencies
-
-- (TSAccountManager *)tsAccountManager
-{
-    OWSAssertDebug(SSKEnvironment.shared.tsAccountManager);
-
-    return SSKEnvironment.shared.tsAccountManager;
-}
-
-#pragma mark -
 
 + (NSString *)collection {
     return @"TSThread";
@@ -77,7 +57,13 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
 
 - (instancetype)init
 {
-    return [super init];
+    self = [super init];
+
+    if (self) {
+        _conversationColorNameObsolete = @"Obsolete";
+    }
+
+    return self;
 }
 
 - (instancetype)initWithUniqueId:(NSString *)uniqueId
@@ -87,11 +73,7 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
     if (self) {
         _creationDate    = [NSDate date];
         _messageDraft    = nil;
-
-        // This is overriden in TSContactThread to use the phone number when available
-        // We can't use self.colorSeed here because the subclass hasn't done its
-        // initializing work yet to set it up.
-        _conversationColorName = [self.class stableColorNameForNewConversationWithString:uniqueId];
+        _conversationColorNameObsolete = @"Obsolete";
     }
 
     return self;
@@ -105,13 +87,18 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
 
 - (instancetype)initWithGrdbId:(int64_t)grdbId
                       uniqueId:(NSString *)uniqueId
-           conversationColorName:(ConversationColorName)conversationColorName
+   conversationColorNameObsolete:(NSString *)conversationColorNameObsolete
                     creationDate:(nullable NSDate *)creationDate
-                      isArchived:(BOOL)isArchived
-                  isMarkedUnread:(BOOL)isMarkedUnread
+              isArchivedObsolete:(BOOL)isArchivedObsolete
+          isMarkedUnreadObsolete:(BOOL)isMarkedUnreadObsolete
             lastInteractionRowId:(int64_t)lastInteractionRowId
+       lastVisibleSortIdObsolete:(uint64_t)lastVisibleSortIdObsolete
+lastVisibleSortIdOnScreenPercentageObsolete:(double)lastVisibleSortIdOnScreenPercentageObsolete
+         mentionNotificationMode:(TSThreadMentionNotificationMode)mentionNotificationMode
                     messageDraft:(nullable NSString *)messageDraft
-                  mutedUntilDate:(nullable NSDate *)mutedUntilDate
+          messageDraftBodyRanges:(nullable MessageBodyRanges *)messageDraftBodyRanges
+          mutedUntilDateObsolete:(nullable NSDate *)mutedUntilDateObsolete
+     mutedUntilTimestampObsolete:(uint64_t)mutedUntilTimestampObsolete
            shouldThreadBeVisible:(BOOL)shouldThreadBeVisible
 {
     self = [super initWithGrdbId:grdbId
@@ -121,13 +108,18 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
         return self;
     }
 
-    _conversationColorName = conversationColorName;
+    _conversationColorNameObsolete = conversationColorNameObsolete;
     _creationDate = creationDate;
-    _isArchived = isArchived;
-    _isMarkedUnread = isMarkedUnread;
+    _isArchivedObsolete = isArchivedObsolete;
+    _isMarkedUnreadObsolete = isMarkedUnreadObsolete;
     _lastInteractionRowId = lastInteractionRowId;
+    _lastVisibleSortIdObsolete = lastVisibleSortIdObsolete;
+    _lastVisibleSortIdOnScreenPercentageObsolete = lastVisibleSortIdOnScreenPercentageObsolete;
+    _mentionNotificationMode = mentionNotificationMode;
     _messageDraft = messageDraft;
-    _mutedUntilDate = mutedUntilDate;
+    _messageDraftBodyRanges = messageDraftBodyRanges;
+    _mutedUntilDateObsolete = mutedUntilDateObsolete;
+    _mutedUntilTimestampObsolete = mutedUntilTimestampObsolete;
     _shouldThreadBeVisible = shouldThreadBeVisible;
 
     return self;
@@ -153,27 +145,8 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
         }
     }
 
-    if (_conversationColorName.length == 0) {
-        ConversationColorName colorName = [self.class stableColorNameForLegacyConversationWithString:self.colorSeed];
-        OWSAssertDebug(colorName);
-
-        _conversationColorName = colorName;
-    } else if (![[[self class] conversationColorNames] containsObject:_conversationColorName]) {
-        // If we'd persisted a non-mapped color name
-        ConversationColorName _Nullable mappedColorName = self.class.legacyConversationColorMap[_conversationColorName];
-
-        if (!mappedColorName) {
-            // We previously used the wrong values for the new colors, it's possible we persited them.
-            // map them to the proper value
-            mappedColorName = self.class.legacyFixupConversationColorMap[_conversationColorName];
-        }
-
-        if (!mappedColorName) {
-            OWSFailDebug(@"failure: unexpected unmappable conversationColorName: %@", _conversationColorName);
-            mappedColorName = ConversationColorNameDefault;
-        }
-
-        _conversationColorName = mappedColorName;
+    if (_conversationColorNameObsolete.length == 0) {
+        _conversationColorNameObsolete = @"Obsolete";
     }
 
     NSDate *_Nullable lastMessageDate = [coder decodeObjectOfClass:NSDate.class forKey:@"lastMessageDate"];
@@ -182,8 +155,8 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
         [self.class legacyIsArchivedWithLastMessageDate:lastMessageDate archivalDate:archivalDate];
 
     if ([coder decodeObjectForKey:@"archivedAsOfMessageSortId"] != nil) {
-        OWSAssertDebug(!_isArchived);
-        _isArchived = YES;
+        OWSAssertDebug(!_isArchivedObsolete);
+        _isArchivedObsolete = YES;
     }
 
     return self;
@@ -193,16 +166,58 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
 {
     [super anyDidInsertWithTransaction:transaction];
 
+    [ThreadAssociatedData createIfMissingForThreadUniqueId:self.uniqueId transaction:transaction];
+
+#if TESTABLE_BUILD
+    OWSAssertDebug(nil != [ThreadAssociatedData fetchForThreadUniqueId:self.uniqueId transaction:transaction]);
+#endif
+
     if (self.shouldThreadBeVisible && ![SSKPreferences hasSavedThreadWithTransaction:transaction]) {
         [SSKPreferences setHasSavedThread:YES transaction:transaction];
     }
+
+    [self.modelReadCaches.threadReadCache didInsertOrUpdateThread:self transaction:transaction];
+}
+
+- (void)anyDidUpdateWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    [super anyDidUpdateWithTransaction:transaction];
+
+#if TESTABLE_BUILD
+    OWSAssertDebug(nil != [ThreadAssociatedData fetchForThreadUniqueId:self.uniqueId transaction:transaction]);
+#endif
+
+    if (self.shouldThreadBeVisible && ![SSKPreferences hasSavedThreadWithTransaction:transaction]) {
+        [SSKPreferences setHasSavedThread:YES transaction:transaction];
+    }
+
+    [self.modelReadCaches.threadReadCache didInsertOrUpdateThread:self transaction:transaction];
+
+    [PinnedThreadManager handleUpdatedThread:self transaction:transaction];
+}
+
+- (void)anyDidRemoveWithTransaction:(SDSAnyWriteTransaction *)transaction
+{
+    [super anyDidRemoveWithTransaction:transaction];
+
+    [self.modelReadCaches.threadReadCache didRemoveThread:self transaction:transaction];
 }
 
 - (void)anyWillRemoveWithTransaction:(SDSAnyWriteTransaction *)transaction
 {
+    [SDSDatabaseStorage.shared updateIdMappingWithThread:self transaction:transaction];
+
     [super anyWillRemoveWithTransaction:transaction];
 
     [self removeAllThreadInteractionsWithTransaction:transaction];
+
+    // Remove any associated data
+    [ThreadAssociatedData removeForThreadUniqueId:self.uniqueId transaction:transaction];
+
+    // TODO: If we ever use transaction finalizations for more than
+    // de-bouncing thread touches, we should promote this to TSYapDatabaseObject
+    // (or at least include it in the "will remove" hook for any relevant models.
+    [transaction addRemovedFinalizationKey:self.transactionFinalizationKey];
 }
 
 - (void)removeAllThreadInteractionsWithTransaction:(SDSAnyWriteTransaction *)transaction
@@ -240,8 +255,10 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
     // As an optimization, we called `ignoreInteractionUpdatesForThreadUniqueId` so as not
     // to re-save the thread after *each* interaction deletion. However, we still need to resave
     // the thread just once, after all the interactions are deleted.
-    self.lastInteractionRowId = 0;
-    [self anyOverwritingUpdateWithTransaction:transaction];
+    [self anyUpdateWithTransaction:transaction
+                             block:^(TSThread *thread) {
+                                 thread.lastInteractionRowId = 0;
+                             }];
 }
 
 - (BOOL)isNoteToSelf
@@ -255,26 +272,6 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
 }
 
 #pragma mark - To be subclassed.
-
-- (BOOL)isGroupThread {
-    OWSAbstractMethod();
-
-    return NO;
-}
-
-- (BOOL)isGroupV1Thread
-{
-    OWSAbstractMethod();
-
-    return NO;
-}
-
-- (BOOL)isGroupV2Thread
-{
-    OWSAbstractMethod();
-
-    return NO;
-}
 
 - (NSArray<SignalServiceAddress *> *)recipientAddresses
 {
@@ -363,59 +360,6 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
     return [[[InteractionFinder alloc] initWithThreadUniqueId:self.uniqueId] countWithTransaction:transaction];
 }
 
-- (void)markAllAsReadAndUpdateStorageService:(BOOL)updateStorageService
-                                 transaction:(SDSAnyWriteTransaction *)transaction
-{
-    BOOL hasPendingMessageRequest = [self hasPendingMessageRequestWithTransaction:transaction.unwrapGrdbWrite];
-    OWSReadCircumstance circumstance = hasPendingMessageRequest
-        ? OWSReadCircumstanceReadOnThisDeviceWhilePendingMessageRequest
-        : OWSReadCircumstanceReadOnThisDevice;
-
-    InteractionFinder *interactionFinder = [[InteractionFinder alloc] initWithThreadUniqueId:self.uniqueId];
-
-    for (id<OWSReadTracking> message in
-        [interactionFinder allUnreadMessagesWithTransaction:transaction.unwrapGrdbRead]) {
-        [message markAsReadAtTimestamp:[NSDate ows_millisecondTimeStamp]
-                                thread:self
-                          circumstance:circumstance
-                           transaction:transaction];
-    }
-
-    [self clearMarkedAsUnreadAndUpdateStorageService:updateStorageService transaction:transaction];
-
-    // Just to be defensive, we'll also check for unread messages.
-    OWSAssertDebug([interactionFinder allUnreadMessagesWithTransaction:transaction.unwrapGrdbRead].count < 1);
-}
-
-- (void)clearMarkedAsUnreadAndUpdateStorageService:(BOOL)updateStorageService
-                                       transaction:(SDSAnyWriteTransaction *)transaction
-{
-    __block BOOL wasMarkedUnread;
-    [self anyUpdateWithTransaction:transaction
-                             block:^(TSThread *thread) {
-                                 wasMarkedUnread = thread.isMarkedUnread;
-                                 thread.isMarkedUnread = NO;
-                             }];
-
-    if (updateStorageService && wasMarkedUnread) {
-        [self recordPendingStorageServiceUpdates];
-    }
-}
-
-- (void)markAsUnreadAndUpdateStorageService:(BOOL)updateStorageService transaction:(SDSAnyWriteTransaction *)transaction
-{
-    __block BOOL wasMarkedUnread;
-    [self anyUpdateWithTransaction:transaction
-                             block:^(TSThread *thread) {
-                                 wasMarkedUnread = thread.isMarkedUnread;
-                                 thread.isMarkedUnread = YES;
-                             }];
-
-    if (updateStorageService && !wasMarkedUnread) {
-        [self recordPendingStorageServiceUpdates];
-    }
-}
-
 - (nullable TSInteraction *)lastInteractionForInboxWithTransaction:(SDSAnyReadTransaction *)transaction
 {
     OWSAssertDebug(transaction);
@@ -423,39 +367,13 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
         mostRecentInteractionForInboxWithTransaction:transaction];
 }
 
-// Returns YES IFF the interaction should show up in the inbox as the last message.
-+ (BOOL)shouldInteractionAppearInInbox:(TSInteraction *)interaction
+- (nullable TSInteraction *)firstInteractionAtOrAroundSortId:(uint64_t)sortId
+                                                 transaction:(SDSAnyReadTransaction *)transaction
 {
-    OWSAssertDebug(interaction);
-
-    if (!interaction.shouldBeSaved) {
-        OWSFailDebug(@"Unexpected interaction type: %@", interaction.class);
-        return NO;
-    }
-    if (interaction.isDynamicInteraction) {
-        OWSFailDebug(@"Unexpected interaction type: %@", interaction.class);
-        return NO;
-    }
-    if ([interaction isKindOfClass:[OWSOutgoingSyncMessage class]]) {
-        OWSFailDebug(@"Unexpected interaction type: %@", interaction.class);
-        return NO;
-    }
-
-    if ([interaction isKindOfClass:[TSErrorMessage class]]) {
-        TSErrorMessage *errorMessage = (TSErrorMessage *)interaction;
-        if (errorMessage.errorType == TSErrorMessageNonBlockingIdentityChange) {
-            // Otherwise all group threads with the recipient will percolate to the top of the inbox, even though
-            // there was no meaningful interaction.
-            return NO;
-        }
-    } else if ([interaction isKindOfClass:[TSInfoMessage class]]) {
-        TSInfoMessage *infoMessage = (TSInfoMessage *)interaction;
-        if (infoMessage.messageType == TSInfoMessageVerificationStateChange) {
-            return NO;
-        }
-    }
-
-    return YES;
+    OWSAssertDebug(transaction);
+    return
+        [[[InteractionFinder alloc] initWithThreadUniqueId:self.uniqueId] firstInteractionAtOrAroundSortId:sortId
+                                                                                               transaction:transaction];
 }
 
 - (void)updateWithInsertedMessage:(TSInteraction *)message transaction:(SDSAnyWriteTransaction *)transaction
@@ -470,16 +388,12 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
 
 - (int64_t)messageSortIdForMessage:(TSInteraction *)message transaction:(SDSAnyWriteTransaction *)transaction
 {
-    if (transaction.transitional_yapWriteTransaction) {
-        return message.sortId;
+    if (message.grdbId == nil) {
+        OWSFailDebug(@"Missing messageSortId.");
+    } else if (message.grdbId.unsignedLongLongValue == 0) {
+        OWSFailDebug(@"Invalid messageSortId.");
     } else {
-        if (message.grdbId == nil) {
-            OWSFailDebug(@"Missing messageSortId.");
-        } else if (message.grdbId.unsignedLongLongValue == 0) {
-            OWSFailDebug(@"Invalid messageSortId.");
-        } else {
-            return message.grdbId.longLongValue;
-        }
+        return message.grdbId.longLongValue;
     }
     return 0;
 }
@@ -491,14 +405,25 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
     OWSAssertDebug(message != nil);
     OWSAssertDebug(transaction != nil);
 
-    if (![self.class shouldInteractionAppearInInbox:message]) {
+    BOOL hasLastVisibleInteraction = [self hasLastVisibleInteractionWithTransaction:transaction];
+    BOOL needsToClearLastVisibleSortId = hasLastVisibleInteraction && wasMessageInserted;
+
+    if (![message shouldAppearInInboxWithTransaction:transaction]) {
+        // We want to clear the last visible sort ID on any new message,
+        // even if the message doesn't appear in the inbox view.
+        if (needsToClearLastVisibleSortId) {
+            [self clearLastVisibleInteractionWithTransaction:transaction];
+        }
+
         return;
     }
 
     int64_t messageSortId = [self messageSortIdForMessage:message transaction:transaction];
     BOOL needsToMarkAsVisible = !self.shouldThreadBeVisible;
 
-    BOOL needsToClearArchived = self.isArchived && wasMessageInserted;
+    ThreadAssociatedData *associatedData = [ThreadAssociatedData fetchOrDefaultForThread:self transaction:transaction];
+
+    BOOL needsToClearArchived = associatedData.isArchived && wasMessageInserted;
 
     // Don't clear archived during migrations.
     if (!CurrentAppContext().isRunningTests && !AppReadiness.isAppReady) {
@@ -511,16 +436,32 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
         needsToClearArchived = NO;
     }
 
+    // Don't clear archive if muted and the user has
+    // requested we don't for muted conversations.
+    if (associatedData.isMuted && [SSKPreferences shouldKeepMutedChatsArchivedWithTransaction:transaction]) {
+        needsToClearArchived = NO;
+    }
+
     BOOL needsToUpdateLastInteractionRowId = messageSortId > self.lastInteractionRowId;
-    if (needsToMarkAsVisible || needsToClearArchived || needsToUpdateLastInteractionRowId) {
-        self.shouldThreadBeVisible = YES;
-        self.lastInteractionRowId = MAX(self.lastInteractionRowId, messageSortId);
-        if (needsToClearArchived) {
-            self.isArchived = NO;
+
+    BOOL needsToClearIsMarkedUnread = associatedData.isMarkedUnread && wasMessageInserted;
+
+    if (needsToMarkAsVisible || needsToClearArchived || needsToUpdateLastInteractionRowId
+        || needsToClearLastVisibleSortId || needsToClearIsMarkedUnread) {
+        [self anyUpdateWithTransaction:transaction
+                                 block:^(TSThread *thread) {
+                                     thread.shouldThreadBeVisible = YES;
+                                     thread.lastInteractionRowId = MAX(thread.lastInteractionRowId, messageSortId);
+                                 }];
+        [associatedData clearIsArchived:needsToClearArchived
+                    clearIsMarkedUnread:needsToClearIsMarkedUnread
+                   updateStorageService:YES
+                            transaction:transaction];
+        if (needsToClearLastVisibleSortId) {
+            [self clearLastVisibleInteractionWithTransaction:transaction];
         }
-        [self anyOverwritingUpdateWithTransaction:transaction];
     } else {
-        [self.databaseStorage touchThread:self transaction:transaction];
+        [self scheduleTouchFinalizationWithTransaction:transaction];
     }
 }
 
@@ -531,13 +472,50 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
 
     int64_t messageSortId = [self messageSortIdForMessage:message transaction:transaction];
     BOOL needsToUpdateLastInteractionRowId = messageSortId == self.lastInteractionRowId;
-    if (needsToUpdateLastInteractionRowId) {
-        TSInteraction *_Nullable latestInteraction = [self lastInteractionForInboxWithTransaction:transaction];
-        self.lastInteractionRowId = latestInteraction ? latestInteraction.sortId : 0;
-        [self anyOverwritingUpdateWithTransaction:transaction];
+
+    NSNumber *_Nullable lastVisibleSortId = [self lastVisibleSortIdWithTransaction:transaction];
+    BOOL needsToUpdateLastVisibleSortId
+        = (lastVisibleSortId != nil && lastVisibleSortId.unsignedLongLongValue == messageSortId);
+
+    if (needsToUpdateLastInteractionRowId || needsToUpdateLastVisibleSortId) {
+        [self anyUpdateWithTransaction:transaction
+                                 block:^(TSThread *thread) {
+                                     if (needsToUpdateLastInteractionRowId) {
+                                         TSInteraction *_Nullable latestInteraction =
+                                             [thread lastInteractionForInboxWithTransaction:transaction];
+                                         thread.lastInteractionRowId = latestInteraction ? latestInteraction.sortId : 0;
+                                     }
+                                 }];
+
+        if (needsToUpdateLastVisibleSortId) {
+            TSInteraction *_Nullable messageBeforeDeletedMessage =
+                [self firstInteractionAtOrAroundSortId:lastVisibleSortId.unsignedLongLongValue transaction:transaction];
+            if (messageBeforeDeletedMessage != nil) {
+                [self setLastVisibleInteractionWithSortId:messageBeforeDeletedMessage.sortId
+                                       onScreenPercentage:1
+                                              transaction:transaction];
+            } else {
+                [self clearLastVisibleInteractionWithTransaction:transaction];
+            }
+        }
     } else {
-        [self.databaseStorage touchThread:self transaction:transaction];
+        [self scheduleTouchFinalizationWithTransaction:transaction];
     }
+}
+
+- (void)scheduleTouchFinalizationWithTransaction:(SDSAnyWriteTransaction *)transactionForMethod
+{
+    OWSAssertDebug(transactionForMethod != nil);
+
+    // If we insert, update or remove N interactions in a given
+    // transactions, we don't need to touch the same thread more
+    // than once.
+    [transactionForMethod addTransactionFinalizationBlockForKey:self.transactionFinalizationKey
+                                                          block:^(SDSAnyWriteTransaction *transactionForBlock) {
+                                                              [self.databaseStorage touchThread:self
+                                                                                  shouldReindex:NO
+                                                                                    transaction:transactionForBlock];
+                                                          }];
 }
 
 - (void)softDeleteThreadWithTransaction:(SDSAnyWriteTransaction *)transaction
@@ -548,6 +526,9 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
                                  thread.messageDraft = nil;
                                  thread.shouldThreadBeVisible = NO;
                              }];
+
+    // Delete any intents we previously donated for this thread.
+    [INInteraction deleteInteractionsWithGroupIdentifier:self.uniqueId completion:^(NSError *error) {}];
 }
 
 - (BOOL)hasPendingMessageRequestWithTransaction:(GRDBReadTransaction *)transaction
@@ -591,235 +572,41 @@ ConversationColorName const ConversationColorNameDefault = ConversationColorName
     return [archivalDate compare:lastMessageDate] != NSOrderedAscending;
 }
 
-- (void)archiveThreadAndUpdateStorageService:(BOOL)updateStorageService
-                                 transaction:(SDSAnyWriteTransaction *)transaction
-{
-    [self anyUpdateWithTransaction:transaction
-                             block:^(TSThread *thread) {
-                                 thread.isArchived = YES;
-                             }];
-
-    // We already update storage service below, so we don't need to here.
-    [self markAllAsReadAndUpdateStorageService:NO transaction:transaction];
-
-    if (updateStorageService) {
-        [self recordPendingStorageServiceUpdates];
-    }
-}
-
-- (void)unarchiveThreadAndUpdateStorageService:(BOOL)updateStorageService
-                                   transaction:(SDSAnyWriteTransaction *)transaction
-{
-    [self anyUpdateWithTransaction:transaction
-                             block:^(TSThread *thread) {
-                                 thread.isArchived = NO;
-                             }];
-
-    if (updateStorageService) {
-        [self recordPendingStorageServiceUpdates];
-    }
-}
-
-- (void)recordPendingStorageServiceUpdates
-{
-    if ([self isKindOfClass:[TSGroupThread class]]) {
-        TSGroupThread *groupThread = (TSGroupThread *)self;
-        [SSKEnvironment.shared.storageServiceManager recordPendingUpdatesWithGroupModel:groupThread.groupModel];
-    } else if ([self isKindOfClass:[TSContactThread class]]) {
-        TSContactThread *contactThread = (TSContactThread *)self;
-        [SSKEnvironment.shared.storageServiceManager
-            recordPendingUpdatesWithUpdatedAddresses:@[ contactThread.contactAddress ]];
-    } else {
-        OWSFailDebug(@"unexpected thread type");
-    }
-}
-
 #pragma mark - Drafts
 
-- (NSString *)currentDraftWithTransaction:(SDSAnyReadTransaction *)transaction
+- (nullable MessageBody *)currentDraftWithTransaction:(SDSAnyReadTransaction *)transaction
 {
     TSThread *_Nullable thread = [TSThread anyFetchWithUniqueId:self.uniqueId transaction:transaction];
     if (thread.messageDraft != nil) {
-        return thread.messageDraft;
+        return [[MessageBody alloc] initWithText:thread.messageDraft
+                                          ranges:thread.messageDraftBodyRanges ?: MessageBodyRanges.empty];
     } else {
-        return @"";
+        return nil;
     }
 }
 
-- (void)updateWithDraft:(NSString *)draftString transaction:(SDSAnyWriteTransaction *)transaction
+- (void)updateWithDraft:(nullable MessageBody *)draftMessageBody transaction:(SDSAnyWriteTransaction *)transaction
 {
     [self anyUpdateWithTransaction:transaction
                              block:^(TSThread *thread) {
-                                 thread.messageDraft = draftString;
+                                 thread.messageDraft = draftMessageBody.text;
+                                 thread.messageDraftBodyRanges = draftMessageBody.ranges;
                              }];
 }
 
-#pragma mark - Muted
-
-- (BOOL)isMuted
-{
-    NSDate *mutedUntilDate = self.mutedUntilDate;
-    NSDate *now = [NSDate date];
-    return (mutedUntilDate != nil &&
-            [mutedUntilDate timeIntervalSinceDate:now] > 0);
-}
-
-- (void)updateWithMutedUntilDate:(nullable NSDate *)mutedUntilDate transaction:(SDSAnyWriteTransaction *)transaction
+- (void)updateWithMentionNotificationMode:(TSThreadMentionNotificationMode)mentionNotificationMode
+                              transaction:(SDSAnyWriteTransaction *)transaction
 {
     [self anyUpdateWithTransaction:transaction
                              block:^(TSThread *thread) {
-                                 [thread setMutedUntilDate:mutedUntilDate];
+                                 thread.mentionNotificationMode = mentionNotificationMode;
                              }];
 }
 
-#pragma mark - Conversation Color
-
-- (ConversationColorName)conversationColorName
-{
-    OWSAssertDebug([self.class.conversationColorNames containsObject:_conversationColorName]);
-    return _conversationColorName;
-}
-
-+ (NSArray<ConversationColorName> *)colorNamesForNewConversation
-{
-    // all conversation colors except "steel"
-    return @[
-        ConversationColorNameCrimson,
-        ConversationColorNameVermilion,
-        ConversationColorNameBurlap,
-        ConversationColorNameForest,
-        ConversationColorNameWintergreen,
-        ConversationColorNameTeal,
-        ConversationColorNameBlue,
-        ConversationColorNameIndigo,
-        ConversationColorNameViolet,
-        ConversationColorNamePlum,
-        ConversationColorNameTaupe,
-    ];
-}
-
-+ (NSArray<ConversationColorName> *)conversationColorNames
-{
-    return [self.colorNamesForNewConversation arrayByAddingObject:ConversationColorNameDefault];
-}
-
-+ (ConversationColorName)stableConversationColorNameForString:(NSString *)colorSeed
-                                                   colorNames:(NSArray<ConversationColorName> *)colorNames
-{
-    NSData *contactData = [colorSeed dataUsingEncoding:NSUTF8StringEncoding];
-
-    unsigned long long hash = 0;
-    NSUInteger hashingLength = sizeof(hash);
-    NSData *_Nullable hashData = [Cryptography computeSHA256Digest:contactData truncatedToBytes:hashingLength];
-    if (hashData) {
-        [hashData getBytes:&hash length:hashingLength];
-    } else {
-        OWSFailDebug(@"could not compute hash for color seed.");
-    }
-
-    NSUInteger index = (hash % colorNames.count);
-    return [colorNames objectAtIndex:index];
-}
-
-+ (ConversationColorName)stableColorNameForNewConversationWithString:(NSString *)colorSeed
-{
-    return [self stableConversationColorNameForString:colorSeed colorNames:self.colorNamesForNewConversation];
-}
-
-// After introducing new conversation colors, we want to try to maintain as close as possible to the old color for an
-// existing thread.
-+ (ConversationColorName)stableColorNameForLegacyConversationWithString:(NSString *)colorSeed
-{
-    NSString *legacyColorName =
-        [self stableConversationColorNameForString:colorSeed colorNames:self.legacyConversationColorNames];
-    ConversationColorName _Nullable mappedColorName = self.class.legacyConversationColorMap[legacyColorName];
-
-    if (!mappedColorName) {
-        OWSFailDebug(@"failure: unexpected unmappable legacyColorName: %@", legacyColorName);
-        return ConversationColorNameDefault;
-    }
-
-    return mappedColorName;
-}
-
-+ (NSArray<NSString *> *)legacyConversationColorNames
-{
-    return @[
-             @"red",
-             @"pink",
-             @"purple",
-             @"indigo",
-             @"blue",
-             @"cyan",
-             @"teal",
-             @"green",
-             @"deep_orange",
-             @"grey"
-    ];
-}
-
-+ (NSDictionary<NSString *, ConversationColorName> *)legacyConversationColorMap
-{
-    static NSDictionary<NSString *, ConversationColorName> *colorMap;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        colorMap = @{
-            @"red" : ConversationColorNameCrimson,
-            @"deep_orange" : ConversationColorNameCrimson,
-            @"orange" : ConversationColorNameVermilion,
-            @"amber" : ConversationColorNameVermilion,
-            @"brown" : ConversationColorNameBurlap,
-            @"yellow" : ConversationColorNameBurlap,
-            @"pink" : ConversationColorNamePlum,
-            @"purple" : ConversationColorNameViolet,
-            @"deep_purple" : ConversationColorNameViolet,
-            @"indigo" : ConversationColorNameIndigo,
-            @"blue" : ConversationColorNameBlue,
-            @"light_blue" : ConversationColorNameBlue,
-            @"cyan" : ConversationColorNameTeal,
-            @"teal" : ConversationColorNameTeal,
-            @"green" : ConversationColorNameForest,
-            @"light_green" : ConversationColorNameWintergreen,
-            @"lime" : ConversationColorNameWintergreen,
-            @"blue_grey" : ConversationColorNameTaupe,
-            @"grey" : ConversationColorNameSteel,
-        };
-    });
-
-    return colorMap;
-}
-
-// we temporarily used the wrong value for the new color names.
-+ (NSDictionary<NSString *, ConversationColorName> *)legacyFixupConversationColorMap
-{
-    static NSDictionary<NSString *, ConversationColorName> *colorMap;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        colorMap = @{
-            @"crimson" : ConversationColorNameCrimson,
-            @"vermilion" : ConversationColorNameVermilion,
-            @"burlap" : ConversationColorNameBurlap,
-            @"forest" : ConversationColorNameForest,
-            @"wintergreen" : ConversationColorNameWintergreen,
-            @"teal" : ConversationColorNameTeal,
-            @"blue" : ConversationColorNameBlue,
-            @"indigo" : ConversationColorNameIndigo,
-            @"violet" : ConversationColorNameViolet,
-            @"plum" : ConversationColorNamePlum,
-            @"taupe" : ConversationColorNameTaupe,
-            @"steel" : ConversationColorNameSteel,
-        };
-    });
-
-    return colorMap;
-}
-
-- (void)updateConversationColorName:(ConversationColorName)colorName transaction:(SDSAnyWriteTransaction *)transaction
+- (void)updateWithShouldThreadBeVisible:(BOOL)shouldThreadBeVisible transaction:(SDSAnyWriteTransaction *)transaction
 {
     [self anyUpdateWithTransaction:transaction
-                             block:^(TSThread *thread) {
-                                 thread.conversationColorName = colorName;
-                             }];
+                             block:^(TSThread *thread) { thread.shouldThreadBeVisible = shouldThreadBeVisible; }];
 }
 
 @end

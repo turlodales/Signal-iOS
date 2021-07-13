@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -9,15 +9,21 @@ open class CDNDownloadOperation: OWSOperation {
 
     // MARK: - Dependencies
 
-    private var cdnSessionManager: AFHTTPSessionManager {
-        return OWSSignalService.sharedInstance().cdnSessionManager(forCdnNumber: 0)
+    private var cdn0urlSession: OWSURLSession {
+        signalService.urlSessionForCdn(cdnNumber: 0)
     }
 
     // MARK: -
 
-    private var task: URLSessionDownloadTask?
-
-    private var tempFilePath: String?
+    private let _task = AtomicOptional<URLSessionTask>(nil)
+    private var task: URLSessionTask? {
+        get {
+            _task.get()
+        }
+        set {
+            _task.set(newValue)
+        }
+    }
 
     public override init() {
         super.init()
@@ -27,172 +33,150 @@ open class CDNDownloadOperation: OWSOperation {
 
     deinit {
         task?.cancel()
-
-        if let tempFilePath = tempFilePath {
-            DispatchQueue.global(qos: .background).async {
-                OWSFileSystem.deleteFileIfExists(tempFilePath)
-            }
-        }
     }
 
-    let kMaxStickerDownloadSize: UInt = 100 * 1000
+    let kMaxStickerDataDownloadSize: UInt = 1000 * 1000
+    let kMaxStickerPackDownloadSize: UInt = 1000 * 1000
 
-    public func tryToDownload(urlPath: String, maxDownloadSize: UInt?) throws -> Promise<Data> {
+    public func tryToDownload(urlPath: String, maxDownloadSize: UInt?) throws -> Promise<URL> {
         guard !isCorrupt(urlPath: urlPath) else {
             Logger.warn("Skipping download of corrupt data.")
             throw StickerError.corruptData
         }
-        guard let baseUrl = cdnSessionManager.baseURL else {
-            owsFailDebug("Missing baseUrl.")
-            throw StickerError.assertionFailure
-        }
-        guard let url = URL(string: urlPath, relativeTo: baseUrl) else {
-            owsFailDebug("Invalid url.")
-            throw StickerError.assertionFailure
-        }
 
-        var requestError: NSError?
-        let request = cdnSessionManager.requestSerializer.request(withMethod: "GET",
-                                                                  urlString: url.absoluteString,
-                                                                  parameters: nil,
-                                                                  error: &requestError)
-        if let error = requestError {
-            owsFailDebug("Could not create request failed: \(error)")
-            error.isRetryable = false
-            throw error
-        }
-        request.setValue(OWSMimeTypeApplicationOctetStream, forHTTPHeaderField: "Content-Type")
+        // We use a seperate promise so that we can cancel from the progress block.
+        let (promise, resolver) = Promise<URL>.pending()
 
-        let tempDirPath = OWSTemporaryDirectoryAccessibleAfterFirstAuth()
-        let tempFilePath = (tempDirPath as NSString).appendingPathComponent(UUID().uuidString)
-        self.tempFilePath = tempFilePath
-        let tempFileURL = URL(fileURLWithPath: tempFilePath)
-
-        var hasCheckedContentLength = false
-        let (promise, resolver) = Promise<Data>.pending()
-        let task = cdnSessionManager.downloadTask(with: request as URLRequest,
-                                                  progress: { [weak self] (progress) in
-                                                    guard let self = self else {
-                                                        return
-                                                    }
-                                                    guard let task = self.task else {
-                                                        return
-                                                    }
-
-                                                    // Don't do anything until we've received at least one byte of data.
-                                                    guard progress.completedUnitCount > 0 else {
-                                                        return
-                                                    }
-
-                                                    let abortDownload = { (message: String) -> Void in
-                                                        owsFailDebug(message)
-                                                        task.cancel()
-                                                        resolver.reject(StickerError.assertionFailure)
-                                                    }
-
-                                                    // A malicious service might send a misleading content length header,
-                                                    // so....
-                                                    //
-                                                    // If the current downloaded bytes or the expected total byes
-                                                    // exceed the max download size, abort the download.
-                                                    if let maxDownloadSize = maxDownloadSize {
-                                                        guard progress.totalUnitCount <= maxDownloadSize,
-                                                            progress.completedUnitCount <= maxDownloadSize else {
-                                                                return abortDownload("Attachment download exceed expected content length: \(progress.totalUnitCount), \(progress.completedUnitCount).")
+        let hasCheckedContentLength = AtomicBool(false)
+        firstly(on: .global()) { () -> Promise<OWSUrlDownloadResponse> in
+            let headers = ["Content-Type": OWSMimeTypeApplicationOctetStream]
+            let urlSession = self.cdn0urlSession
+            return urlSession.urlDownloadTaskPromise(urlPath,
+                                                     method: .get,
+                                                     headers: headers) { [weak self] (task: URLSessionTask, progress: Progress) in
+                                                        guard let self = self else {
+                                                            return
                                                         }
-                                                    }
+                                                        self.task = task
+                                                        self.handleDownloadProgress(task: task,
+                                                                                    progress: progress,
+                                                                                    resolver: resolver,
+                                                                                    maxDownloadSize: maxDownloadSize,
+                                                                                    hasCheckedContentLength: hasCheckedContentLength)
+            }
+        }.recover(on: .global()) { (error: Error) -> Promise<OWSUrlDownloadResponse> in
+            throw error.withDefaultRetry
+        }.map(on: .global()) { [weak self] (response: OWSUrlDownloadResponse) -> Void in
+            guard let _ = self else {
+                throw OWSAssertionError("Operation has been deallocated.").asUnretryableError
+            }
+            let downloadUrl = response.downloadUrl
+            guard let fileSize = OWSFileSystem.fileSize(of: downloadUrl) else {
+                owsFailDebug("Couldn't determine file size.")
+                throw StickerError.assertionFailure.asUnretryableError
+            }
+            if let maxDownloadSize = maxDownloadSize {
+                guard fileSize.uint64Value <= maxDownloadSize else {
+                    owsFailDebug("Download length exceeds max size.")
+                    throw StickerError.assertionFailure.asUnretryableError
+                }
+            }
 
-                                                    // We only need to check the content length header once.
-                                                    guard !hasCheckedContentLength else {
-                                                        return
-                                                    }
+            do {
+                let temporaryFileUrl = OWSFileSystem.temporaryFileUrl(isAvailableWhileDeviceLocked: true)
+                try OWSFileSystem.moveFile(from: downloadUrl, to: temporaryFileUrl)
+                resolver.fulfill(temporaryFileUrl)
+            } catch {
+                owsFailDebug("Could not move to temporary file: \(error)")
+                // Fail immediately; do not retry.
+                throw error.asUnretryableError
+            }
+        }.catch(on: .global()) { (error: Error) in
+            Logger.warn("Download failed: \(error)")
+            resolver.reject(error)
+        }
 
-                                                    // Once we've received some bytes of the download, check the content length
-                                                    // header for the download.
-                                                    //
-                                                    // If the task doesn't exist, or doesn't have a response, or is missing
-                                                    // the expected headers, or has an invalid or oversize content length, etc.,
-                                                    // abort the download.
-                                                    guard let httpResponse = task.response as? HTTPURLResponse else {
-                                                        return abortDownload("Invalid or missing response.")
-                                                    }
-                                                    guard let headers = httpResponse.allHeaderFields as? [String: Any] else {
-                                                        return abortDownload("Invalid response headers.")
-                                                    }
-                                                    guard let contentLengthString = headers["Content-Length"] as? String else {
-                                                        return abortDownload("Invalid or missing content length.")
-                                                    }
-                                                    guard let contentLength = Int64(contentLengthString) else {
-                                                        return abortDownload("Invalid content length.")
-                                                    }
-                                                    if let maxDownloadSize = maxDownloadSize {
-                                                        guard contentLength < maxDownloadSize else {
-                                                            return abortDownload("Content length exceeds max download size.")
-                                                        }
-                                                    }
-
-                                                    // This response has a valid content length that is less
-                                                    // than our max download size.  Proceed with the download.
-                                                    hasCheckedContentLength = true
-        },
-                                                  destination: { (_, _) -> URL in
-                                                    return tempFileURL
-        },
-                                                  completionHandler: { [weak self] (_, completionUrl, error) in
-                                                    guard let _ = self else {
-                                                        return
-                                                    }
-                                                    if let error = error {
-                                                        Logger.warn("Download failed: \(error)")
-                                                        let errorCopy = error as NSError
-                                                        errorCopy.isRetryable = !errorCopy.hasFatalAFStatusCode()
-                                                        return resolver.reject(errorCopy)
-                                                    }
-                                                    guard completionUrl == tempFileURL else {
-                                                        owsFailDebug("Unexpected temp file path.")
-                                                        return resolver.reject(StickerError.assertionFailure)
-                                                    }
-                                                    guard let fileSize = OWSFileSystem.fileSize(ofPath: tempFilePath) else {
-                                                        owsFailDebug("Couldn't determine file size.")
-                                                        return resolver.reject(StickerError.assertionFailure)
-                                                    }
-                                                    if let maxDownloadSize = maxDownloadSize {
-                                                        guard fileSize.uint64Value <= maxDownloadSize else {
-                                                            owsFailDebug("Download length exceeds max size.")
-                                                            return resolver.reject(StickerError.assertionFailure)
-                                                        }
-                                                    }
-
-                                                    do {
-                                                        let data = try Data(contentsOf: tempFileURL)
-                                                        resolver.fulfill(data)
-                                                    } catch let error as NSError {
-                                                        owsFailDebug("Could not load data failed: \(error)")
-
-                                                        // Fail immediately; do not retry.
-                                                        error.isRetryable = false
-                                                        return resolver.reject(error)
-                                                    }
-        })
-        self.task = task
-        task.resume()
         return promise
     }
 
-    override public func retryInterval() -> TimeInterval {
-        // Arbitrary backoff factor...
-        // With backOffFactor of 1.9
-        // try  1 delay:  0.00s
-        // try  2 delay:  0.19s
-        // ...
-        // try  5 delay:  1.30s
-        // ...
-        // try 11 delay: 61.31s
-        let backoffFactor = 1.9
-        let maxBackoff = kHourInterval
+    public func tryToDownload(urlPath: String, maxDownloadSize: UInt?) throws -> Promise<Data> {
+        return try tryToDownload(urlPath: urlPath, maxDownloadSize: maxDownloadSize).map { (downloadUrl: URL) in
+            do {
+                let data = try Data(contentsOf: downloadUrl)
+                try OWSFileSystem.deleteFile(url: downloadUrl)
+                return data
+            } catch {
+                owsFailDebug("Could not load data failed: \(error)")
+                // Fail immediately; do not retry.
+                throw error.asUnretryableError
+            }
+        }
+    }
 
-        let seconds = 0.1 * min(maxBackoff, pow(backoffFactor, Double(self.errorCount)))
-        return seconds
+    private func handleDownloadProgress(task: URLSessionTask,
+                                        progress: Progress,
+                                        resolver: Resolver<URL>,
+                                        maxDownloadSize: UInt?,
+                                        hasCheckedContentLength: AtomicBool) {
+        // Don't do anything until we've received at least one byte of data.
+        guard progress.completedUnitCount > 0 else {
+            return
+        }
+
+        let abortDownload = { (message: String) -> Void in
+            owsFailDebug(message)
+            resolver.reject(StickerError.assertionFailure)
+            task.cancel()
+        }
+
+        // A malicious service might send a misleading content length header,
+        // so....
+        //
+        // If the current downloaded bytes or the expected total byes
+        // exceed the max download size, abort the download.
+        if let maxDownloadSize = maxDownloadSize {
+            guard progress.totalUnitCount <= maxDownloadSize,
+                progress.completedUnitCount <= maxDownloadSize else {
+                    return abortDownload("Attachment download exceed expected content length: \(progress.totalUnitCount), \(progress.completedUnitCount).")
+            }
+        }
+
+        // We only need to check the content length header once.
+        guard !hasCheckedContentLength.get() else {
+            return
+        }
+
+        // Once we've received some bytes of the download, check the content length
+        // header for the download.
+        //
+        // If the task doesn't exist, or doesn't have a response, or is missing
+        // the expected headers, or has an invalid or oversize content length, etc.,
+        // abort the download.
+        guard let httpResponse = task.response as? HTTPURLResponse else {
+            return abortDownload("Invalid or missing response.")
+        }
+        guard let headers = httpResponse.allHeaderFields as? [String: Any] else {
+            return abortDownload("Invalid response headers.")
+        }
+        guard let contentLengthString = headers["Content-Length"] as? String else {
+            return abortDownload("Invalid or missing content length.")
+        }
+        guard let contentLength = Int64(contentLengthString) else {
+            return abortDownload("Invalid content length.")
+        }
+        if let maxDownloadSize = maxDownloadSize {
+            guard contentLength < maxDownloadSize else {
+                return abortDownload("Content length exceeds max download size.")
+            }
+        }
+
+        // This response has a valid content length that is less
+        // than our max download size.  Proceed with the download.
+        hasCheckedContentLength.set(true)
+    }
+
+    override public func retryInterval() -> TimeInterval {
+        return OWSOperation.retryIntervalForExponentialBackoff(failureCount: errorCount)
     }
 
     // MARK: - Corrupt Data

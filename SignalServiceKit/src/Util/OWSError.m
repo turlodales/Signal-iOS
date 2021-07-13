@@ -1,8 +1,8 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSError.h"
+#import <SignalServiceKit/OWSError.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -51,6 +51,17 @@ NSError *OWSErrorMakeAssertionError(NSString *descriptionFormat, ...)
         NSLocalizedString(@"ERROR_DESCRIPTION_UNKNOWN_ERROR", @"Worst case generic error message"));
 }
 
+NSError *OWSErrorMakeGenericError(NSString *descriptionFormat, ...)
+{
+    va_list args;
+    va_start(args, descriptionFormat);
+    NSString *description = [[NSString alloc] initWithFormat:descriptionFormat arguments:args];
+    va_end(args);
+    OWSLogWarn(@"%@", description);
+    return OWSErrorWithCodeDescription(OWSErrorCodeGenericFailure,
+        NSLocalizedString(@"ERROR_DESCRIPTION_UNKNOWN_ERROR", @"Worst case generic error message"));
+}
+
 NSError *OWSErrorMakeUntrustedIdentityError(NSString *description, SignalServiceAddress *address)
 {
     return [NSError
@@ -72,5 +83,16 @@ NSError *OWSErrorMakeMessageSendFailedDueToBlockListError()
         NSLocalizedString(@"ERROR_DESCRIPTION_MESSAGE_SEND_FAILED_DUE_TO_BLOCK_LIST",
             @"Error message indicating that message send failed due to block list"));
 }
+
+@implementation NSError (OWSError)
+
+- (BOOL)ows_isSSKErrorWithCode:(NSUInteger)code
+{
+    BOOL sameDomain = [self.domain isEqualToString:OWSSignalServiceKitErrorDomain];
+    BOOL sameCode = (self.code == code);
+    return (sameDomain && sameCode);
+}
+
+@end
 
 NS_ASSUME_NONNULL_END

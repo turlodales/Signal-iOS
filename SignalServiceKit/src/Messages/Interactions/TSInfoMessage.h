@@ -1,9 +1,9 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSReadTracking.h"
-#import "TSMessage.h"
+#import <SignalServiceKit/OWSReadTracking.h>
+#import <SignalServiceKit/TSMessage.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -25,7 +25,8 @@ typedef NS_ENUM(NSInteger, TSInfoMessageType) {
     TSInfoMessageAddGroupToProfileWhitelistOffer,
     TSInfoMessageUnknownProtocolVersion,
     TSInfoMessageUserJoinedSignal,
-    TSInfoMessageSyncedThread
+    TSInfoMessageSyncedThread,
+    TSInfoMessageProfileUpdate
 };
 
 
@@ -36,6 +37,7 @@ extern InfoMessageUserInfoKey const InfoMessageUserInfoKeyNewGroupModel;
 extern InfoMessageUserInfoKey const InfoMessageUserInfoKeyOldDisappearingMessageToken;
 extern InfoMessageUserInfoKey const InfoMessageUserInfoKeyNewDisappearingMessageToken;
 extern InfoMessageUserInfoKey const InfoMessageUserInfoKeyGroupUpdateSourceAddress;
+extern InfoMessageUserInfoKey const InfoMessageUserInfoKeyProfileChanges;
 
 + (instancetype)userNotRegisteredMessageInThread:(TSThread *)thread address:(SignalServiceAddress *)address;
 
@@ -99,6 +101,7 @@ extern InfoMessageUserInfoKey const InfoMessageUserInfoKeyGroupUpdateSourceAddre
                   uniqueThreadId:(NSString *)uniqueThreadId
                    attachmentIds:(NSArray<NSString *> *)attachmentIds
                             body:(nullable NSString *)body
+                      bodyRanges:(nullable MessageBodyRanges *)bodyRanges
                     contactShare:(nullable OWSContact *)contactShare
                  expireStartedAt:(uint64_t)expireStartedAt
                        expiresAt:(uint64_t)expiresAt
@@ -115,7 +118,7 @@ extern InfoMessageUserInfoKey const InfoMessageUserInfoKeyGroupUpdateSourceAddre
                      messageType:(TSInfoMessageType)messageType
                             read:(BOOL)read
              unregisteredAddress:(nullable SignalServiceAddress *)unregisteredAddress
-NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(grdbId:uniqueId:receivedAtTimestamp:sortId:timestamp:uniqueThreadId:attachmentIds:body:contactShare:expireStartedAt:expiresAt:expiresInSeconds:isViewOnceComplete:isViewOnceMessage:linkPreview:messageSticker:quotedMessage:storedShouldStartExpireTimer:wasRemotelyDeleted:customMessage:infoMessageUserInfo:messageType:read:unregisteredAddress:));
+NS_DESIGNATED_INITIALIZER NS_SWIFT_NAME(init(grdbId:uniqueId:receivedAtTimestamp:sortId:timestamp:uniqueThreadId:attachmentIds:body:bodyRanges:contactShare:expireStartedAt:expiresAt:expiresInSeconds:isViewOnceComplete:isViewOnceMessage:linkPreview:messageSticker:quotedMessage:storedShouldStartExpireTimer:wasRemotelyDeleted:customMessage:infoMessageUserInfo:messageType:read:unregisteredAddress:));
 
 // clang-format on
 

@@ -1,16 +1,16 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWS2FAManager.h"
-#import "AppReadiness.h"
 #import "NSNotificationCenter+OWS.h"
-#import "OWSRequestFactory.h"
-#import "SSKEnvironment.h"
-#import "TSAccountManager.h"
-#import "TSNetworkManager.h"
 #import <PromiseKit/AnyPromise.h>
+#import <SignalServiceKit/AppReadiness.h>
+#import <SignalServiceKit/OWSRequestFactory.h>
+#import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSAccountManager.h>
+#import <SignalServiceKit/TSNetworkManager.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -50,13 +50,6 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
 
 #pragma mark -
 
-+ (instancetype)sharedManager
-{
-    OWSAssertDebug(SSKEnvironment.shared.ows2FAManager);
-
-    return SSKEnvironment.shared.ows2FAManager;
-}
-
 - (instancetype)init
 {
     self = [super init];
@@ -67,7 +60,7 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
 
     OWSSingletonAssert();
 
-    [AppReadiness runNowOrWhenAppDidBecomeReadyPolite:^{
+    AppReadinessRunNowOrWhenMainAppDidBecomeReadyAsync(^{
         if (self.mode == OWS2FAMode_V1) {
             OWSLogInfo(@"Migrating V1 reglock to V2 reglock");
 
@@ -79,37 +72,22 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
                     OWSFailDebug(@"Failed to migrate V1 reglock to V2 reglock: %@", error.localizedDescription);
                 });
         }
-    }];
+    });
 
     return self;
 }
 
-#pragma mark - Dependencies
-
-- (TSNetworkManager *)networkManager {
-    OWSAssertDebug(SSKEnvironment.shared.networkManager);
-
-    return SSKEnvironment.shared.networkManager;
-}
-
-- (TSAccountManager *)tsAccountManager {
-    return TSAccountManager.sharedInstance;
-}
-
-- (SDSDatabaseStorage *)databaseStorage
-{
-    return SSKEnvironment.shared.databaseStorage;
-}
-
-#pragma mark -
-
 - (nullable NSString *)pinCode
 {
     __block NSString *_Nullable value;
-    [self.databaseStorage readWithBlock:^(SDSAnyReadTransaction *transaction) {
-        value = [OWS2FAManager.keyValueStore getString:kOWS2FAManager_PinCode transaction:transaction];
-    }];
+    [self.databaseStorage
+        readWithBlock:^(SDSAnyReadTransaction *transaction) { value = [self pinCodeWithTransaction:transaction]; }];
     return value;
+}
+
+- (nullable NSString *)pinCodeWithTransaction:(SDSAnyReadTransaction *)transaction
+{
+    return [OWS2FAManager.keyValueStore getString:kOWS2FAManager_PinCode transaction:transaction];
 }
 
 - (void)setPinCode:(nullable NSString *)pin transaction:(SDSAnyWriteTransaction *)transaction
@@ -119,7 +97,7 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
         return;
     }
 
-    if (OWSKeyBackupService.hasMasterKey) {
+    if (OWSKeyBackupService.hasBackedUpMasterKey) {
         pin = [OWSKeyBackupService normalizePin:pin];
     } else {
         // Convert the pin to arabic numerals, we never want to
@@ -133,7 +111,7 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
 - (OWS2FAMode)mode
 {
     // Identify what version of 2FA we're using
-    if (OWSKeyBackupService.hasMasterKey) {
+    if (OWSKeyBackupService.hasBackedUpMasterKey) {
         return OWS2FAMode_V2;
     } else if (self.pinCode != nil) {
         return OWS2FAMode_V1;
@@ -173,7 +151,7 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
     [self setDefaultRepetitionIntervalWithTransaction:transaction];
 
     // Schedule next reminder relative to now
-    [self setLastSuccessfulReminderDate:[NSDate new] transaction:transaction];
+    [self setLastCompletedReminderDate:[NSDate new] transaction:transaction];
 
     [transaction addSyncCompletion:^{
         [[NSNotificationCenter defaultCenter] postNotificationNameAsync:NSNotificationName_2FAStateDidChange
@@ -188,6 +166,7 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
 
 - (void)requestEnable2FAWithPin:(NSString *)pin
                            mode:(OWS2FAMode)mode
+                rotateMasterKey:(BOOL)rotateMasterKey
                         success:(nullable OWS2FASuccess)success
                         failure:(nullable OWS2FAFailure)failure
 {
@@ -199,13 +178,13 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
         case OWS2FAMode_V2: {
             // Enabling V2 2FA doesn't inherently enable registration lock,
             // it's managed by a separate setting.
-            [OWSKeyBackupService generateAndBackupKeysWithPin:pin]
+            [OWSKeyBackupService generateAndBackupKeysWithPin:pin rotateMasterKey:rotateMasterKey]
                 .then(^{
                     OWSAssertIsOnMainThread();
 
-                    [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+                    DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
                         [self markEnabledWithPin:pin transaction:transaction];
-                    }];
+                    });
 
                     if (success) {
                         success();
@@ -228,9 +207,9 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
                 success:^(NSURLSessionDataTask *task, id responseObject) {
                     OWSAssertIsOnMainThread();
 
-                    [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+                    DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
                         [self markEnabledWithPin:pin transaction:transaction];
-                    }];
+                    });
 
                     if (success) {
                         success();
@@ -263,9 +242,9 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
                 .ensure(^{
                     OWSAssertIsOnMainThread();
 
-                    [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+                    DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
                         [self markDisabledWithTransaction:transaction];
-                    }];
+                    });
                 })
                 .then(^() {
                     OWSAssertIsOnMainThread();
@@ -290,9 +269,10 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
                                      success:^(NSURLSessionDataTask *task, id responseObject) {
                                          OWSAssertIsOnMainThread();
 
-                                         [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
-                                             [self markDisabledWithTransaction:transaction];
-                                         }];
+                                         DatabaseStorageWrite(
+                                             self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
+                                                 [self markDisabledWithTransaction:transaction];
+                                             });
 
                                          if (success) {
                                              success();
@@ -316,28 +296,15 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
 
 #pragma mark - Reminders
 
-- (nullable NSDate *)lastSuccessfulReminderDateWithTransaction:(SDSAnyReadTransaction *)transaction
+- (nullable NSDate *)lastCompletedReminderDateWithTransaction:(SDSAnyReadTransaction *)transaction
 {
     return [OWS2FAManager.keyValueStore getDate:kOWS2FAManager_LastSuccessfulReminderDateKey transaction:transaction];
 }
 
-- (void)setLastSuccessfulReminderDate:(nullable NSDate *)date transaction:(SDSAnyWriteTransaction *)transaction
+- (void)setLastCompletedReminderDate:(nullable NSDate *)date transaction:(SDSAnyWriteTransaction *)transaction
 {
-    OWSLogDebug(@"Setting setLastSuccessfulReminderDate:%@", date);
+    OWSLogDebug(@"Setting setLastCompletedReminderDate:%@", date);
     [OWS2FAManager.keyValueStore setDate:date key:kOWS2FAManager_LastSuccessfulReminderDateKey transaction:transaction];
-}
-
-- (BOOL)isDueForV1Reminder
-{
-    if (!self.tsAccountManager.isRegisteredPrimaryDevice) {
-        return NO;
-    }
-
-    if (self.mode != OWS2FAMode_V1) {
-        return NO;
-    }
-
-    return self.nextReminderDate.timeIntervalSinceNow < 0;
 }
 
 - (BOOL)isDueForV2ReminderWithTransaction:(SDSAnyReadTransaction *)transaction
@@ -346,8 +313,13 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
         return NO;
     }
 
-    if (!OWSKeyBackupService.hasMasterKey) {
+    if (!OWSKeyBackupService.hasBackedUpMasterKey) {
         return NO;
+    }
+
+    if ([self pinCodeWithTransaction:transaction].length == 0) {
+        OWSLogInfo(@"Missing 2FA pin, prompting for reminder so we can backfill it.");
+        return YES;
     }
 
     if (![self areRemindersEnabledTransaction:transaction]) {
@@ -383,9 +355,9 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
     // We don't need to migrate this pin, either because it's v2 or short enough that
     // we never truncated it. Mark it as complete so we don't need to check again.
 
-    [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+    DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
         [self markLegacyPinAsMigratedWithTransaction:transaction];
-    }];
+    });
 
     return NO;
 }
@@ -409,9 +381,9 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
                                  result(isValid);
 
                                  if (isValid) {
-                                     [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
+                                     DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
                                          [self setPinCode:pin transaction:transaction];
-                                     }];
+                                     });
                                  }
                              }];
         }
@@ -439,11 +411,11 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
 
 - (NSDate *)nextReminderDateWithTransaction:(SDSAnyReadTransaction *)transaction
 {
-    NSDate *lastSuccessfulReminderDate =
-        [self lastSuccessfulReminderDateWithTransaction:transaction] ?: [NSDate distantPast];
+    NSDate *lastCompletedReminderDate =
+        [self lastCompletedReminderDateWithTransaction:transaction] ?: [NSDate distantPast];
     NSTimeInterval repetitionInterval = [self repetitionIntervalWithTransaction:transaction];
 
-    return [lastSuccessfulReminderDate dateByAddingTimeInterval:repetitionInterval];
+    return [lastCompletedReminderDate dateByAddingTimeInterval:repetitionInterval];
 }
 
 - (NSArray<NSNumber *> *)allRepetitionIntervals
@@ -479,28 +451,27 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
                                       transaction:transaction];
 }
 
-- (void)updateRepetitionIntervalWithWasSuccessful:(BOOL)wasSuccessful
+- (void)reminderCompletedWithIncorrectAttempts:(BOOL)incorrectAttempts
 {
-    [self.databaseStorage writeWithBlock:^(SDSAnyWriteTransaction *transaction) {
-        if (wasSuccessful) {
-            [self setLastSuccessfulReminderDate:[NSDate new] transaction:transaction];
-        }
+    DatabaseStorageWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
+        [self setLastCompletedReminderDate:[NSDate new] transaction:transaction];
 
         NSTimeInterval oldInterval = [self repetitionIntervalWithTransaction:transaction];
-        NSTimeInterval newInterval = [self adjustRepetitionInterval:oldInterval wasSuccessful:wasSuccessful];
+        NSTimeInterval newInterval = [self adjustRepetitionInterval:oldInterval
+                                              withIncorrectAttempts:incorrectAttempts];
 
-        OWSLogInfo(@"%@ guess. Updating repetition interval: %f -> %f",
-            (wasSuccessful ? @"successful" : @"failed"),
+        OWSLogInfo(@"Updating repetition interval: %f -> %f. Had incorrect attempts: %d",
             oldInterval,
-            newInterval);
+            newInterval,
+            incorrectAttempts);
 
         [OWS2FAManager.keyValueStore setDouble:newInterval
                                            key:kOWS2FAManager_RepetitionInterval
                                    transaction:transaction];
-    }];
+    });
 }
 
-- (NSTimeInterval)adjustRepetitionInterval:(NSTimeInterval)oldInterval wasSuccessful:(BOOL)wasSuccessful
+- (NSTimeInterval)adjustRepetitionInterval:(NSTimeInterval)oldInterval withIncorrectAttempts:(BOOL)incorrectAttempts
 {
     NSArray<NSNumber *> *allIntervals = self.allRepetitionIntervals;
 
@@ -510,7 +481,7 @@ const NSUInteger kLegacyTruncated2FAv1PinLength = 16;
         }];
 
     NSUInteger newIndex;
-    if (wasSuccessful) {
+    if (!incorrectAttempts) {
         newIndex = oldIndex + 1;
     } else {
         // prevent overflow

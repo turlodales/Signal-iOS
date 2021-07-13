@@ -1,28 +1,22 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "DebugUISyncMessages.h"
 #import "DebugUIContacts.h"
-#import "OWSTableViewController.h"
 #import "Signal-Swift.h"
 #import "ThreadUtil.h"
-#import <AxolotlKit/PreKeyBundle.h>
 #import <PromiseKit/AnyPromise.h>
 #import <SignalCoreKit/Randomness.h>
 #import <SignalMessaging/Environment.h>
-#import <SignalServiceKit/OWSBatchMessageProcessor.h>
+#import <SignalMessaging/OWSTableViewController.h>
 #import <SignalServiceKit/OWSBlockingManager.h>
 #import <SignalServiceKit/OWSDisappearingMessagesConfiguration.h>
-#import <SignalServiceKit/OWSGroupInfoRequestMessage.h>
 #import <SignalServiceKit/OWSIdentityManager.h>
-#import <SignalServiceKit/OWSReadReceiptManager.h>
-#import <SignalServiceKit/OWSVerificationStateChangeMessage.h>
-#import <SignalServiceKit/SSKSessionStore.h>
+#import <SignalServiceKit/OWSReceiptManager.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 #import <SignalServiceKit/TSCall.h>
 #import <SignalServiceKit/TSIncomingMessage.h>
-#import <SignalServiceKit/TSInvalidIdentityKeyReceivingErrorMessage.h>
 #import <SignalServiceKit/TSThread.h>
 
 #ifdef DEBUG
@@ -30,13 +24,6 @@
 NS_ASSUME_NONNULL_BEGIN
 
 @implementation DebugUISyncMessages
-
-#pragma mark - Dependencies
-
-+ (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
 
 #pragma mark - Factory Methods
 
@@ -92,17 +79,17 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (OWSIdentityManager *)identityManager
 {
-    return [OWSIdentityManager sharedManager];
+    return [OWSIdentityManager shared];
 }
 
 + (OWSBlockingManager *)blockingManager
 {
-    return [OWSBlockingManager sharedManager];
+    return [OWSBlockingManager shared];
 }
 
 + (OWSProfileManager *)profileManager
 {
-    return [OWSProfileManager sharedManager];
+    return [OWSProfileManager shared];
 }
 
 + (id<SyncManagerProtocol>)syncManager
@@ -121,9 +108,9 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (void)sendGroupSyncMessage
 {
-    [self.databaseStorage asyncWriteWithBlock:^(SDSAnyWriteTransaction *transaction) {
+    DatabaseStorageAsyncWrite(self.databaseStorage, ^(SDSAnyWriteTransaction *transaction) {
         [self.syncManager syncGroupsWithTransaction:transaction];
-    }];
+    });
 }
 
 + (void)sendBlockListSyncMessage
@@ -138,7 +125,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (void)sendVerificationSyncMessage
 {
-    [OWSIdentityManager.sharedManager tryToSyncQueuedVerificationStates];
+    [OWSIdentityManager.shared tryToSyncQueuedVerificationStates];
 }
 
 + (void)syncConversationSettingsWithThread:(TSThread *)thread

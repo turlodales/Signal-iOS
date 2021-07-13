@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import <PureLayout/PureLayout.h>
@@ -35,8 +35,9 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value);
 - (NSLayoutConstraint *)autoHCenterInSuperview;
 - (NSLayoutConstraint *)autoVCenterInSuperview;
 
-- (void)autoPinWidthToWidthOfView:(UIView *)view;
-- (void)autoPinHeightToHeightOfView:(UIView *)view;
+- (void)autoPinEdgesToEdgesOfView:(UIView *)view;
+- (void)autoPinHorizontalEdgesToEdgesOfView:(UIView *)view;
+- (void)autoPinVerticalEdgesToEdgesOfView:(UIView *)view;
 
 - (NSLayoutConstraint *)autoPinToSquareAspectRatio;
 - (NSLayoutConstraint *)autoPinToAspectRatioWithSize:(CGSize)size;
@@ -103,6 +104,7 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value);
 - (NSLayoutConstraint *)autoPinTrailingToEdgeOfView:(UIView *)view;
 - (NSLayoutConstraint *)autoPinTrailingToEdgeOfView:(UIView *)view offset:(CGFloat)margin;
 // Return Right on LTR and Left on RTL.
++ (NSTextAlignment)textAlignmentUnnatural;
 - (NSTextAlignment)textAlignmentUnnatural;
 // Leading and trailing anchors honor layout margins.
 // When using a UIView as a "div" to structure layout, we don't want it to have margins.
@@ -110,13 +112,9 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value);
 
 - (NSArray<NSLayoutConstraint *> *)autoPinToEdgesOfView:(UIView *)view;
 
-- (void)traverseViewHierarchyWithVisitor:(UIViewVisitorBlock)visitor;
+- (void)traverseViewHierarchyUpwardWithVisitor:(UIViewVisitorBlock)visitor;
 
-#pragma mark - Containers
-
-+ (UIView *)containerView;
-
-+ (UIView *)verticalStackWithSubviews:(NSArray<UIView *> *)subviews spacing:(int)spacing;
+- (void)traverseViewHierarchyDownwardWithVisitor:(UIViewVisitorBlock)visitor;
 
 #pragma mark - Debugging
 
@@ -149,8 +147,10 @@ CGFloat ScaleFromIPhone5(CGFloat iPhone5Value);
 
 @interface UIStackView (OWS)
 
-- (UIView *)addBackgroundViewWithBackgroundColor:(UIColor *)backgroundColor;
+- (void)addHairlineWithColor:(UIColor *)color;
+- (void)insertHairlineWithColor:(UIColor *)color atIndex:(NSInteger)index;
 
+- (UIView *)addBackgroundViewWithBackgroundColor:(UIColor *)backgroundColor;
 - (UIView *)addBackgroundViewWithBackgroundColor:(UIColor *)backgroundColor cornerRadius:(CGFloat)cornerRadius;
 
 - (UIView *)addBorderViewWithColor:(UIColor *)color strokeWidth:(CGFloat)strokeWidth cornerRadius:(CGFloat)cornerRadius;

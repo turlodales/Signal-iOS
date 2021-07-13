@@ -1,74 +1,97 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import XCTest
 import Contacts
 @testable import Signal
 @testable import SignalMessaging
+@testable import SignalServiceKit
 import Contacts
 
 // TODO: We might be able to merge this with OWSFakeContactsManager.
 @objc
 class GRDBFullTextSearcherContactsManager: NSObject, ContactsManagerProtocol {
-    let signalAccountReadCache = SignalAccountReadCache()
+    func isSystemContactWithSignalAccount(_ address: SignalServiceAddress) -> Bool {
+        false
+    }
+
+    func isSystemContactWithSignalAccount(_ address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> Bool {
+        false
+    }
+
+    func hasNameInSystemContacts(for address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> Bool {
+        false
+    }
+
+    private var mockDisplayNameMap = [SignalServiceAddress: String]()
+
+    func setMockDisplayName(_ name: String, for address: SignalServiceAddress) {
+        mockDisplayNameMap[address] = name
+    }
+
+    func comparableName(for address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> String {
+        self.displayName(for: address)
+    }
 
     func comparableName(for signalAccount: SignalAccount, transaction: SDSAnyReadTransaction) -> String {
-        return self.displayName(for: signalAccount.recipientAddress)
+        self.displayName(for: signalAccount.recipientAddress)
     }
 
     func displayName(for address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> String {
-        return self.displayName(for: address)
+        self.displayName(for: address)
+    }
+
+    func shortDisplayName(for address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> String {
+        self.displayName(for: address)
     }
 
     func displayName(for address: SignalServiceAddress) -> String {
-        if address == aliceRecipient {
-            return "Alice"
-        } else if address == bobRecipient {
-            return "Bob Barker"
-        } else {
-            return ""
-        }
+        mockDisplayNameMap[address] ?? ""
     }
 
     public func displayName(for signalAccount: SignalAccount) -> String {
-        return "Fake name"
+        "Fake name"
     }
 
     public func displayName(for thread: TSThread, transaction: SDSAnyReadTransaction) -> String {
-        return "Fake name"
+        "Fake name"
     }
 
     public func displayNameWithSneakyTransaction(thread: TSThread) -> String {
-        return "Fake name"
+        "Fake name"
     }
 
     func nameComponents(for address: SignalServiceAddress) -> PersonNameComponents? {
-        return PersonNameComponents()
+        PersonNameComponents()
     }
 
     func nameComponents(for address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> PersonNameComponents? {
-        return PersonNameComponents()
+        PersonNameComponents()
     }
 
     func signalAccounts() -> [SignalAccount] {
-        return []
+        []
     }
 
     func isSystemContact(phoneNumber: String) -> Bool {
-        return true
+        true
     }
 
     func isSystemContact(address: SignalServiceAddress) -> Bool {
-        return true
+        true
     }
 
     func isSystemContact(withSignalAccount recipientId: String) -> Bool {
-        return true
+        true
     }
 
-    func conversationColorName(for address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> String {
-        ConversationColorName.taupe.rawValue
+    func isSystemContact(withSignalAccount phoneNumber: String, transaction: SDSAnyReadTransaction) -> Bool {
+        true
+    }
+
+    func hasNameInSystemContacts(for address: SignalServiceAddress) -> Bool {
+        (mockDisplayNameMap[address] ?? "").count > 0
     }
 
     func compare(signalAccount left: SignalAccount, with right: SignalAccount) -> ComparisonResult {
@@ -79,26 +102,23 @@ class GRDBFullTextSearcherContactsManager: NSObject, ContactsManagerProtocol {
 
     public func sortSignalServiceAddresses(_ addresses: [SignalServiceAddress],
                                            transaction: SDSAnyReadTransaction) -> [SignalServiceAddress] {
-        return addresses
+        addresses
     }
 
     func cnContact(withId contactId: String?) -> CNContact? {
-        return nil
+        nil
     }
 
     func avatarData(forCNContactId contactId: String?) -> Data? {
-        return nil
+        nil
     }
 
     func avatarImage(forCNContactId contactId: String?) -> UIImage? {
-        return nil
+        nil
     }
 
     var unknownUserLabel: String = "unknown"
 }
-
-private let bobRecipient = SignalServiceAddress(phoneNumber: "+49030183000")
-private let aliceRecipient = SignalServiceAddress(phoneNumber: "+12345678900")
 
 // MARK: -
 
@@ -107,11 +127,7 @@ class GRDBFullTextSearcherTest: SignalBaseTest {
     // MARK: - Dependencies
 
     var searcher: FullTextSearcher {
-        return FullTextSearcher.shared
-    }
-
-    private var tsAccountManager: TSAccountManager {
-        return TSAccountManager.sharedInstance()
+        FullTextSearcher.shared
     }
 
     // MARK: - Test Life Cycle
@@ -122,11 +138,24 @@ class GRDBFullTextSearcherTest: SignalBaseTest {
         SDSDatabaseStorage.shouldLogDBQueries = DebugFlags.logSQLQueries
     }
 
+    private var bobRecipient: SignalServiceAddress!
+    private var aliceRecipient: SignalServiceAddress!
+
     override func setUp() {
         super.setUp()
 
+        // We need to create new instances of SignalServiceAddress
+        // for each test because we're using a new
+        // SignalServiceAddressCache for each test and we need
+        // consistent backingHashValue.
+        aliceRecipient = SignalServiceAddress(phoneNumber: "+12345678900")
+        bobRecipient = SignalServiceAddress(phoneNumber: "+49030183000")
+
         // Replace this singleton.
-        SSKEnvironment.shared.contactsManager = GRDBFullTextSearcherContactsManager()
+        let fakeContactsManager = GRDBFullTextSearcherContactsManager()
+        fakeContactsManager.setMockDisplayName("Alice", for: aliceRecipient)
+        fakeContactsManager.setMockDisplayName("Bob Barker", for: bobRecipient)
+        SSKEnvironment.shared.contactsManagerRef = fakeContactsManager
 
         // ensure local client has necessary "registered" state
         let localE164Identifier = "+13235551234"
@@ -134,21 +163,29 @@ class GRDBFullTextSearcherTest: SignalBaseTest {
         tsAccountManager.registerForTests(withLocalNumber: localE164Identifier, uuid: localUUID)
 
         self.write { transaction in
-            let bookClubGroupThread = try! GroupManager.createGroupForTests(members: [aliceRecipient, bobRecipient],
+            let bookClubGroupThread = try! GroupManager.createGroupForTests(members: [self.aliceRecipient, self.bobRecipient, self.tsAccountManager.localAddress!],
                                                                             name: "Book Club",
                                                                             transaction: transaction)
-            self.bookClubThread = ThreadViewModel(thread: bookClubGroupThread, transaction: transaction)
+            self.bookClubThread = ThreadViewModel(thread: bookClubGroupThread,
+                                                  forConversationList: true,
+                                                  transaction: transaction)
 
-            let snackClubGroupThread = try! GroupManager.createGroupForTests(members: [aliceRecipient],
+            let snackClubGroupThread = try! GroupManager.createGroupForTests(members: [self.aliceRecipient],
                                                                              name: "Snack Club",
                                                                              transaction: transaction)
-            self.snackClubThread = ThreadViewModel(thread: snackClubGroupThread, transaction: transaction)
+            self.snackClubThread = ThreadViewModel(thread: snackClubGroupThread,
+                                                   forConversationList: true,
+                                                   transaction: transaction)
 
-            let aliceContactThread = TSContactThread.getOrCreateThread(withContactAddress: aliceRecipient, transaction: transaction)
-            self.aliceThread = ThreadViewModel(thread: aliceContactThread, transaction: transaction)
+            let aliceContactThread = TSContactThread.getOrCreateThread(withContactAddress: self.aliceRecipient, transaction: transaction)
+            self.aliceThread = ThreadViewModel(thread: aliceContactThread,
+                                               forConversationList: true,
+                                               transaction: transaction)
 
-            let bobContactThread = TSContactThread.getOrCreateThread(withContactAddress: bobRecipient, transaction: transaction)
-            self.bobEmptyThread = ThreadViewModel(thread: bobContactThread, transaction: transaction)
+            let bobContactThread = TSContactThread.getOrCreateThread(withContactAddress: self.bobRecipient, transaction: transaction)
+            self.bobEmptyThread = ThreadViewModel(thread: bobContactThread,
+                                                  forConversationList: true,
+                                                  transaction: transaction)
 
             let helloAlice = TSOutgoingMessage(in: aliceContactThread, messageBody: "Hello Alice", attachmentId: nil)
             helloAlice.anyInsert(transaction: transaction)
@@ -363,7 +400,7 @@ class GRDBFullTextSearcherTest: SignalBaseTest {
 
         var thread: TSGroupThread! = nil
         self.write { transaction in
-            thread = try! GroupManager.createGroupForTests(members: [aliceRecipient, bobRecipient],
+            thread = try! GroupManager.createGroupForTests(members: [self.aliceRecipient, self.bobRecipient, self.tsAccountManager.localAddress!],
                                                            name: "Lifecycle",
                                                            transaction: transaction)
         }
@@ -417,7 +454,7 @@ class GRDBFullTextSearcherTest: SignalBaseTest {
     func testModelLifecycle2() {
 
         self.write { transaction in
-            let thread = try! GroupManager.createGroupForTests(members: [aliceRecipient, bobRecipient],
+            let thread = try! GroupManager.createGroupForTests(members: [self.aliceRecipient, self.bobRecipient, self.tsAccountManager.localAddress!],
                                                                name: "Lifecycle",
                                                                transaction: transaction)
 
@@ -446,7 +483,7 @@ class GRDBFullTextSearcherTest: SignalBaseTest {
     func testModelLifecycle3() {
 
         self.write { transaction in
-            let thread = try! GroupManager.createGroupForTests(members: [aliceRecipient, bobRecipient],
+            let thread = try! GroupManager.createGroupForTests(members: [self.aliceRecipient, self.bobRecipient, self.tsAccountManager.localAddress!],
                                                                name: "Lifecycle",
                                                                transaction: transaction)
 
@@ -475,7 +512,7 @@ class GRDBFullTextSearcherTest: SignalBaseTest {
     func testDiacritics() {
 
         self.write { transaction in
-            let thread = try! GroupManager.createGroupForTests(members: [aliceRecipient, bobRecipient],
+            let thread = try! GroupManager.createGroupForTests(members: [self.aliceRecipient, self.bobRecipient, self.tsAccountManager.localAddress!],
                                                                name: "Lifecycle",
                                                                transaction: transaction)
 
@@ -516,7 +553,7 @@ class GRDBFullTextSearcherTest: SignalBaseTest {
 
         var thread: TSGroupThread! = nil
         self.write { transaction in
-            thread = try! GroupManager.createGroupForTests(members: [aliceRecipient, bobRecipient],
+            thread = try! GroupManager.createGroupForTests(members: [self.aliceRecipient, self.bobRecipient, self.tsAccountManager.localAddress!],
                                                            name: "Lifecycle",
                                                            transaction: transaction)
         }
@@ -557,7 +594,7 @@ class GRDBFullTextSearcherTest: SignalBaseTest {
 
         Bench(title: "Populate Index", memorySamplerRatio: 1) { _ in
             self.write { transaction in
-                let thread = try! GroupManager.createGroupForTests(members: [aliceRecipient, bobRecipient],
+                let thread = try! GroupManager.createGroupForTests(members: [self.aliceRecipient, self.bobRecipient, self.tsAccountManager.localAddress!],
                                                                    name: "Perf",
                                                                    transaction: transaction)
 
@@ -579,7 +616,12 @@ class GRDBFullTextSearcherTest: SignalBaseTest {
 
                 let getMatchCount = { (searchText: String) -> UInt in
                     var count: UInt = 0
-                    finder.enumerateObjects(searchText: searchText, transaction: transaction) { (match, snippet, _) in
+                    finder.enumerateObjects(
+                        searchText: searchText,
+                        collections: [TSMessage.collection()],
+                        maxResults: 500,
+                        transaction: transaction
+                    ) { (match, snippet, _) in
                         Logger.verbose("searchText: \(searchText), match: \(match), snippet: \(snippet)")
                         count += 1
                     }
@@ -624,7 +666,9 @@ class GRDBFullTextSearcherTest: SignalBaseTest {
 
     private func searchConversations(searchText: String) -> [ThreadViewModel] {
         let results = getResultSet(searchText: searchText)
-        return results.conversations.map { $0.thread }
+        let contactThreads = results.contactThreads.map { $0.thread }
+        let groupThreads = results.groupThreads.map { $0.thread }
+        return contactThreads + groupThreads
     }
 
     private func getResultSet(searchText: String) -> HomeScreenSearchResultSet {

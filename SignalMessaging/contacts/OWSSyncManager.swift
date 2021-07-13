@@ -1,14 +1,11 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import PromiseKit
 
 extension OWSSyncManager: SyncManagerProtocolSwift {
-
-    var profileManager: OWSProfileManager { .shared() }
-    var blockingManager: OWSBlockingManager { .shared() }
 
     // MARK: - Sync Requests
 
@@ -79,7 +76,7 @@ extension OWSSyncManager: SyncManagerProtocolSwift {
 
         KeyBackupService.storeSyncedKey(type: .storageService, data: syncMessage.storageService, transaction: transaction)
 
-        transaction.addAsyncCompletion {
+        transaction.addAsyncCompletionOffMain {
             NotificationCenter.default.postNotificationNameAsync(.OWSSyncManagerKeysSyncDidComplete, object: nil)
         }
     }
@@ -96,10 +93,9 @@ extension OWSSyncManager: SyncManagerProtocolSwift {
     ) {
         let thread: TSThread
         if let groupId = syncMessage.groupID {
-            guard let groupThread = TSGroupThread.anyFetchGroupThread(
-                uniqueId: TSGroupThread.threadId(fromGroupId: groupId),
-                transaction: transaction
-            ) else {
+            TSGroupThread.ensureGroupIdMapping(forGroupId: groupId, transaction: transaction)
+            guard let groupThread = TSGroupThread.fetch(groupId: groupId,
+                                                        transaction: transaction) else {
                 return owsFailDebug("message request response for missing group thread")
             }
             thread = groupThread
@@ -121,10 +117,10 @@ extension OWSSyncManager: SyncManagerProtocolSwift {
         case .delete:
             thread.softDelete(with: transaction)
         case .block:
-            blockingManager.addBlockedThread(thread, wasLocallyInitiated: false, transaction: transaction)
+            blockingManager.addBlockedThread(thread, blockMode: .remote, transaction: transaction)
         case .blockAndDelete:
             thread.softDelete(with: transaction)
-            blockingManager.addBlockedThread(thread, wasLocallyInitiated: false, transaction: transaction)
+            blockingManager.addBlockedThread(thread, blockMode: .remote, transaction: transaction)
         case .unknown:
             owsFailDebug("unexpected message request response type")
         }
@@ -139,31 +135,30 @@ extension OWSSyncManager: SyncManagerProtocolSwift {
         }
 
         databaseStorage.asyncWrite { [weak self] transaction in
-            guard let self = self else { return }
-
-            let syncMessageRequestResponse = OWSSyncMessageRequestResponseMessage(thread: thread, responseType: responseType)
-            self.messageSenderJobQueue.add(message: syncMessageRequestResponse.asPreparer, transaction: transaction)
+            self?.sendMessageRequestResponseSyncMessage(thread: thread, responseType: responseType, transaction: transaction)
         }
+    }
+
+    @objc
+    public func sendMessageRequestResponseSyncMessage(
+        thread: TSThread,
+        responseType: OWSSyncMessageRequestResponseType,
+        transaction: SDSAnyWriteTransaction
+    ) {
+        Logger.info("")
+
+        guard tsAccountManager.isRegisteredAndReady else {
+            return owsFailDebug("Unexpectedly tried to send sync message before registration.")
+        }
+
+        let syncMessageRequestResponse = OWSSyncMessageRequestResponseMessage(thread: thread, responseType: responseType)
+        messageSenderJobQueue.add(message: syncMessageRequestResponse.asPreparer, transaction: transaction)
     }
 }
 
-public extension SyncManagerProtocolSwift {
+// MARK: -
 
-    // MARK: -
-
-    var tsAccountManager: TSAccountManager {
-        return .sharedInstance()
-    }
-
-    var databaseStorage: SDSDatabaseStorage {
-        return .shared
-    }
-
-    var messageSenderJobQueue: MessageSenderJobQueue {
-        return SSKEnvironment.shared.messageSenderJobQueue
-    }
-
-    // MARK: -
+public extension OWSSyncManager {
 
     func sendInitialSyncRequestsAwaitingCreatedThreadOrdering(timeoutSeconds: TimeInterval) -> Promise<[String]> {
         Logger.info("")

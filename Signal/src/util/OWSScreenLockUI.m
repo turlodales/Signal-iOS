@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSScreenLockUI.h"
@@ -57,7 +57,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSScreenLockUI
 
-+ (instancetype)sharedManager
++ (instancetype)shared
 {
     static OWSScreenLockUI *instance = nil;
     static dispatch_once_t onceToken;
@@ -138,11 +138,11 @@ NS_ASSUME_NONNULL_BEGIN
     //
     // It's not safe to access OWSScreenLock.isScreenLockEnabled
     // until the app is ready.
-    [AppReadiness runNowOrWhenAppWillBecomeReady:^{
-        self.isScreenLockLocked = OWSScreenLock.sharedManager.isScreenLockEnabled;
-        
+    AppReadinessRunNowOrWhenAppWillBecomeReady(^{
+        self.isScreenLockLocked = OWSScreenLock.shared.isScreenLockEnabled;
+
         [self ensureUI];
-    }];
+    });
 }
 
 #pragma mark - Methods
@@ -161,7 +161,7 @@ NS_ASSUME_NONNULL_BEGIN
         OWSLogVerbose(@"tryToActivateScreenLockUponBecomingActive NO 0");
         return;
     }
-    if (!OWSScreenLock.sharedManager.isScreenLockEnabled) {
+    if (!OWSScreenLock.shared.isScreenLockEnabled) {
         // Screen lock is not enabled.
         OWSLogVerbose(@"tryToActivateScreenLockUponBecomingActive NO 1");
         return;
@@ -178,7 +178,7 @@ NS_ASSUME_NONNULL_BEGIN
     }
     NSTimeInterval countdownInterval = fabs([self.screenLockCountdownDate timeIntervalSinceNow]);
     OWSAssertDebug(countdownInterval >= 0);
-    NSTimeInterval screenLockTimeout = OWSScreenLock.sharedManager.screenLockTimeout;
+    NSTimeInterval screenLockTimeout = OWSScreenLock.shared.screenLockTimeout;
     OWSAssertDebug(screenLockTimeout >= 0);
     if (countdownInterval >= screenLockTimeout) {
         self.isScreenLockLocked = YES;
@@ -251,9 +251,7 @@ NS_ASSUME_NONNULL_BEGIN
     OWSAssertIsOnMainThread();
 
     if (!AppReadiness.isAppReady) {
-        [AppReadiness runNowOrWhenAppWillBecomeReady:^{
-            [self ensureUI];
-        }];
+        AppReadinessRunNowOrWhenAppWillBecomeReady(^{ [self ensureUI]; });
         return;
     }
 
@@ -286,7 +284,7 @@ NS_ASSUME_NONNULL_BEGIN
 
     self.isShowingScreenLockUI = YES;
 
-    [OWSScreenLock.sharedManager
+    [OWSScreenLock.shared
         tryToUnlockScreenLockWithSuccess:^{
             OWSLogInfo(@"unlock screen lock succeeded.");
 
@@ -408,7 +406,7 @@ NS_ASSUME_NONNULL_BEGIN
 
     BOOL shouldShowBlockWindow = desiredUIState != ScreenLockUIStateNone;
 
-    [OWSWindowManager.sharedManager setIsScreenBlockActive:shouldShowBlockWindow];
+    [OWSWindowManager.shared setIsScreenBlockActive:shouldShowBlockWindow];
 
     [self.screenBlockingViewController updateUIWithState:desiredUIState
                                              isLogoAtTop:self.isShowingScreenLockUI
@@ -474,7 +472,7 @@ NS_ASSUME_NONNULL_BEGIN
         OWSLogVerbose(@"clockDidChange 0");
         return;
     }
-    self.isScreenLockLocked = OWSScreenLock.sharedManager.isScreenLockEnabled;
+    self.isScreenLockLocked = OWSScreenLock.shared.isScreenLockEnabled;
 
     // NOTE: this notifications fires _before_ applicationDidBecomeActive,
     // which is desirable.  Don't assume that though; call ensureUI

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 //  Originally based on EPContacts
@@ -12,7 +12,7 @@ import Contacts
 import SignalServiceKit
 
 @objc
-public protocol ContactsPickerDelegate: class {
+public protocol ContactsPickerDelegate: AnyObject {
     func contactsPicker(_: ContactsPicker, contactFetchDidFail error: NSError)
     func contactsPickerDidCancel(_: ContactsPicker)
     func contactsPicker(_: ContactsPicker, didSelectContact contact: Contact)
@@ -34,10 +34,6 @@ public class ContactsPicker: OWSViewController, UITableViewDelegate, UITableView
     // MARK: - Properties
 
     private let contactCellReuseIdentifier = "contactCellReuseIdentifier"
-
-    private var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
 
     private let collation = UILocalizedIndexedCollation.current()
     public var collationForTests: UILocalizedIndexedCollation {
@@ -94,7 +90,7 @@ public class ContactsPicker: OWSViewController, UITableViewDelegate, UITableView
     override open func viewDidLoad() {
         super.viewDidLoad()
 
-        searchBar.placeholder = NSLocalizedString("INVITE_FRIENDS_PICKER_SEARCHBAR_PLACEHOLDER", comment: "Search")
+        searchBar.placeholder = CommonStrings.searchBarPlaceholder
 
         // Auto size cells for dynamic type
         tableView.estimatedRowHeight = 60.0
@@ -174,9 +170,9 @@ public class ContactsPicker: OWSViewController, UITableViewDelegate, UITableView
                 self.presentActionSheet(alert)
 
             case CNAuthorizationStatus.notDetermined:
-                //This case means the user is prompted for the first time for allowing contacts
+                // This case means the user is prompted for the first time for allowing contacts
                 contactStore.requestAccess(for: CNEntityType.contacts) { (granted, error) -> Void in
-                    //At this point an alert is provided to the user to provide access to contacts. This will get invoked if a user responds to the alert
+                    // At this point an alert is provided to the user to provide access to contacts. This will get invoked if a user responds to the alert
                     if granted {
                         self.getContacts(onError: errorHandler)
                     } else {
@@ -185,7 +181,7 @@ public class ContactsPicker: OWSViewController, UITableViewDelegate, UITableView
                 }
 
             case  CNAuthorizationStatus.authorized:
-                //Authorization granted by user for this app.
+                // Authorization granted by user for this app.
                 var contacts = [CNContact]()
 
                 do {
@@ -243,7 +239,7 @@ public class ContactsPicker: OWSViewController, UITableViewDelegate, UITableView
         let cnContact = dataSource[indexPath.section][indexPath.row]
         let contact = Contact(systemContact: cnContact)
 
-        cell.configure(contact: contact, subtitleType: subtitleCellType, showsWhenSelected: self.allowsMultipleSelection, contactsManager: self.contactsManager)
+        cell.configure(contact: contact, subtitleType: subtitleCellType, showsWhenSelected: self.allowsMultipleSelection)
         let isSelected = selectedContacts.contains(where: { $0.uniqueId == contact.uniqueId })
         cell.isSelected = isSelected
 

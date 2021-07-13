@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -143,6 +143,38 @@ extension SignalRecipient: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension SignalRecipient: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == SignalRecipient.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            // NOTE: If this generates build errors, you made need to
+            // implement DeepCopyable for this type in DeepCopy.swift.
+            let devices: NSOrderedSet = try DeepCopies.deepCopy(modelToCopy.devices)
+            let recipientPhoneNumber: String? = modelToCopy.recipientPhoneNumber
+            let recipientUUID: String? = modelToCopy.recipientUUID
+
+            return SignalRecipient(grdbId: id,
+                                   uniqueId: uniqueId,
+                                   devices: devices,
+                                   recipientPhoneNumber: recipientPhoneNumber,
+                                   recipientUUID: recipientUUID)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension SignalRecipientSerializer {
@@ -277,9 +309,11 @@ public extension SignalRecipient {
 
 @objc
 public class SignalRecipientCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<SignalRecipientRecord>?
 
-    init(cursor: RecordCursor<SignalRecipientRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<SignalRecipientRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -290,7 +324,9 @@ public class SignalRecipientCursor: NSObject {
         guard let record = try cursor.next() else {
             return nil
         }
-        return try SignalRecipient.fromRecord(record)
+        let value = try SignalRecipient.fromRecord(record)
+        Self.modelReadCaches.signalRecipientReadCache.didReadSignalRecipient(value, transaction: transaction.asAnyRead)
+        return value
     }
 
     public func all() throws -> [SignalRecipient] {
@@ -321,10 +357,10 @@ public extension SignalRecipient {
         let database = transaction.database
         do {
             let cursor = try SignalRecipientRecord.fetchCursor(database)
-            return SignalRecipientCursor(cursor: cursor)
+            return SignalRecipientCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return SignalRecipientCursor(cursor: nil)
+            return SignalRecipientCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -334,8 +370,6 @@ public extension SignalRecipient {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return SignalRecipient.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(SignalRecipientRecord.databaseTableName) WHERE \(signalRecipientColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -366,28 +400,20 @@ public extension SignalRecipient {
                             batchSize: UInt,
                             block: @escaping (SignalRecipient, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            SignalRecipient.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? SignalRecipient else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = SignalRecipient.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = SignalRecipient.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -415,10 +441,6 @@ public extension SignalRecipient {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: SignalRecipient.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -450,8 +472,6 @@ public extension SignalRecipient {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: SignalRecipient.collection())
         case .grdbRead(let grdbTransaction):
             return SignalRecipientRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -461,8 +481,6 @@ public extension SignalRecipient {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: SignalRecipient.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try SignalRecipientRecord.deleteAll(grdbTransaction.database)
@@ -511,8 +529,6 @@ public extension SignalRecipient {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: SignalRecipient.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(SignalRecipientRecord.databaseTableName) WHERE \(signalRecipientColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -530,11 +546,11 @@ public extension SignalRecipient {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try SignalRecipientRecord.fetchCursor(transaction.database, sqlRequest)
-            return SignalRecipientCursor(cursor: cursor)
+            return SignalRecipientCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return SignalRecipientCursor(cursor: nil)
+            return SignalRecipientCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -549,7 +565,9 @@ public extension SignalRecipient {
                 return nil
             }
 
-            return try SignalRecipient.fromRecord(record)
+            let value = try SignalRecipient.fromRecord(record)
+            Self.modelReadCaches.signalRecipientReadCache.didReadSignalRecipient(value, transaction: transaction.asAnyRead)
+            return value
         } catch {
             owsFailDebug("error: \(error)")
             return nil
@@ -584,3 +602,20 @@ class SignalRecipientSerializer: SDSSerializer {
         return SignalRecipientRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, devices: devices, recipientPhoneNumber: recipientPhoneNumber, recipientUUID: recipientUUID)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension SignalRecipient {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> SignalRecipient {
+        guard let record = try asRecord() as? SignalRecipientRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try SignalRecipient.fromRecord(record)
+    }
+}
+#endif

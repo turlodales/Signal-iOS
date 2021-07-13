@@ -1,8 +1,8 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "TSConstants.h"
+#import <SignalServiceKit/TSConstants.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -28,6 +28,8 @@ typedef NS_ENUM(NSUInteger, OWSRegistrationState) {
     OWSRegistrationState_Reregistering,
 };
 
+NSString *NSStringForOWSRegistrationState(OWSRegistrationState value);
+
 @interface TSAccountManager : NSObject
 
 @property (nonatomic, readonly) SDSKeyValueStore *keyValueStore;
@@ -36,8 +38,6 @@ typedef NS_ENUM(NSUInteger, OWSRegistrationState) {
 @property (nonatomic, nullable) NSUUID *uuidAwaitingVerification;
 
 #pragma mark - Initializers
-
-+ (TSAccountManager *)sharedInstance;
 
 - (void)warmCaches;
 
@@ -106,10 +106,17 @@ typedef NS_ENUM(NSUInteger, OWSRegistrationState) {
 - (void)setStoredDeviceName:(NSString *)deviceName transaction:(SDSAnyWriteTransaction *)transaction;
 
 - (UInt32)storedDeviceId;
+- (UInt32)storedDeviceIdWithTransaction:(SDSAnyReadTransaction *)transaction;
 
 /// Onboarding state
 - (BOOL)isOnboarded;
 - (void)setIsOnboarded:(BOOL)isOnboarded transaction:(SDSAnyWriteTransaction *)transaction;
+
+- (BOOL)isDiscoverableByPhoneNumber;
+- (BOOL)hasDefinedIsDiscoverableByPhoneNumber;
+- (void)setIsDiscoverableByPhoneNumber:(BOOL)isDiscoverableByPhoneNumber
+                  updateStorageService:(BOOL)updateStorageService
+                           transaction:(SDSAnyWriteTransaction *)transaction;
 
 #pragma mark - Register with phone number
 
@@ -132,7 +139,7 @@ typedef NS_ENUM(NSUInteger, OWSRegistrationState) {
  *  @param pushToken Apple's Push Token
  */
 - (void)registerForPushNotificationsWithPushToken:(NSString *)pushToken
-                                        voipToken:(NSString *)voipToken
+                                        voipToken:(nullable NSString *)voipToken
                                           success:(void (^)(void))successHandler
                                           failure:(void (^)(NSError *error))failureHandler
     NS_SWIFT_NAME(registerForPushNotifications(pushToken:voipToken:success:failure:));
@@ -169,6 +176,7 @@ typedef NS_ENUM(NSUInteger, OWSRegistrationState) {
 // Returns YES on success.
 - (BOOL)resetForReregistration;
 - (nullable NSString *)reregistrationPhoneNumber;
+- (nullable NSUUID *)reregistrationUUID;
 @property (nonatomic, readonly) BOOL isReregistering;
 
 #pragma mark - Manual Message Fetch

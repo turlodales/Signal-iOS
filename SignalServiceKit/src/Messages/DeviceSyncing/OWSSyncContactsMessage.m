@@ -1,30 +1,28 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSSyncContactsMessage.h"
-#import "Contact.h"
-#import "ContactsManagerProtocol.h"
-#import "OWSContactsOutputStream.h"
-#import "OWSIdentityManager.h"
-#import "ProfileManagerProtocol.h"
-#import "SSKEnvironment.h"
-#import "SignalAccount.h"
-#import "TSAccountManager.h"
-#import "TSAttachment.h"
-#import "TSAttachmentStream.h"
-#import "TSContactThread.h"
 #import <Contacts/Contacts.h>
 #import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalServiceKit/Contact.h>
+#import <SignalServiceKit/ContactsManagerProtocol.h>
+#import <SignalServiceKit/OWSContactsOutputStream.h>
+#import <SignalServiceKit/OWSIdentityManager.h>
+#import <SignalServiceKit/OWSSyncContactsMessage.h>
+#import <SignalServiceKit/ProfileManagerProtocol.h>
+#import <SignalServiceKit/SSKEnvironment.h>
+#import <SignalServiceKit/SignalAccount.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSAccountManager.h>
+#import <SignalServiceKit/TSAttachment.h>
+#import <SignalServiceKit/TSAttachmentStream.h>
+#import <SignalServiceKit/TSContactThread.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @interface OWSSyncContactsMessage ()
 
 @property (nonatomic, readonly) NSArray<SignalAccount *> *signalAccounts;
-@property (nonatomic, readonly) OWSIdentityManager *identityManager;
-@property (nonatomic, readonly) id<ProfileManagerProtocol> profileManager;
 
 @end
 
@@ -32,8 +30,6 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (instancetype)initWithThread:(TSThread *)thread
                 signalAccounts:(NSArray<SignalAccount *> *)signalAccounts
-               identityManager:(OWSIdentityManager *)identityManager
-                profileManager:(id<ProfileManagerProtocol>)profileManager
 {
     self = [super initWithThread:thread];
     if (!self) {
@@ -41,8 +37,6 @@ NS_ASSUME_NONNULL_BEGIN
     }
 
     _signalAccounts = signalAccounts;
-    _identityManager = identityManager;
-    _profileManager = profileManager;
 
     return self;
 }
@@ -51,18 +45,6 @@ NS_ASSUME_NONNULL_BEGIN
 {
     return [super initWithCoder:coder];
 }
-
-#pragma mark - Dependencies
-
-- (id<ContactsManagerProtocol>)contactsManager {
-    return SSKEnvironment.shared.contactsManager;
-}
-
-- (TSAccountManager *)tsAccountManager {
-    return TSAccountManager.sharedInstance;
-}
-
-#pragma mark -
 
 - (nullable SSKProtoSyncMessageBuilder *)syncMessageBuilderWithTransaction:(SDSAnyReadTransaction *)transaction
 {
@@ -104,9 +86,11 @@ NS_ASSUME_NONNULL_BEGIN
             hasLocalAddress |= signalAccount.recipientAddress.isLocalAddress;
         }
         if (!hasLocalAddress) {
-            SignalAccount *signalAccount = [[SignalAccount alloc] initWithSignalServiceAddress:localAddress];
             // OWSContactsOutputStream requires all signalAccount to have a contact.
-            signalAccount.contact = [[Contact alloc] initWithSystemContact:[CNContact new]];
+            Contact *contact = [[Contact alloc] initWithSystemContact:[CNContact new]];
+            SignalAccount *signalAccount = [[SignalAccount alloc] initWithSignalServiceAddress:localAddress
+                                                                                       contact:contact
+                                                                      multipleAccountLabelText:nil];
             [signalAccounts addObject:signalAccount];
         }
     }
@@ -119,41 +103,47 @@ NS_ASSUME_NONNULL_BEGIN
     OWSContactsOutputStream *contactsOutputStream =
         [[OWSContactsOutputStream alloc] initWithOutputStream:dataOutputStream];
 
-    for (SignalAccount *signalAccount in signalAccounts) {
-        OWSRecipientIdentity *_Nullable recipientIdentity =
-            [self.identityManager recipientIdentityForAddress:signalAccount.recipientAddress];
-        NSData *_Nullable profileKeyData =
-            [self.profileManager profileKeyDataForAddress:signalAccount.recipientAddress transaction:transaction];
+    // We use batching to place an upper bound on memory
+    // usage.
+    [Batching enumerateArray:signalAccounts
+                   batchSize:12
+                   itemBlock:^(SignalAccount *signalAccount) {
+                       OWSRecipientIdentity *_Nullable recipientIdentity =
+                           [self.identityManager recipientIdentityForAddress:signalAccount.recipientAddress
+                                                                 transaction:transaction];
+                       NSData *_Nullable profileKeyData =
+                           [self.profileManager profileKeyDataForAddress:signalAccount.recipientAddress
+                                                             transaction:transaction];
 
-        OWSDisappearingMessagesConfiguration *_Nullable disappearingMessagesConfiguration;
-        NSString *conversationColorName;
+                       OWSDisappearingMessagesConfiguration *_Nullable disappearingMessagesConfiguration;
 
-        TSContactThread *_Nullable contactThread =
-            [TSContactThread getThreadWithContactAddress:signalAccount.recipientAddress transaction:transaction];
+                       TSContactThread *_Nullable contactThread =
+                           [TSContactThread getThreadWithContactAddress:signalAccount.recipientAddress
+                                                            transaction:transaction];
+                       ThreadAssociatedData *associatedData =
+                           [ThreadAssociatedData fetchOrDefaultForThread:contactThread
+                                                           ignoreMissing:contactThread == nil
+                                                             transaction:transaction];
 
-        NSNumber *_Nullable isArchived;
-        NSNumber *_Nullable inboxPosition;
-        if (contactThread) {
-            isArchived = [NSNumber numberWithBool:contactThread.isArchived];
-            inboxPosition = [[AnyThreadFinder new] sortIndexObjcWithThread:contactThread transaction:transaction];
-            conversationColorName = contactThread.conversationColorName;
-            disappearingMessagesConfiguration =
-                [contactThread disappearingMessagesConfigurationWithTransaction:transaction];
-        } else {
-            conversationColorName =
-                [TSThread stableColorNameForNewConversationWithString:signalAccount.recipientAddress.stringForDisplay];
-        }
+                       NSNumber *_Nullable isArchived;
+                       NSNumber *_Nullable inboxPosition;
+                       if (contactThread) {
+                           isArchived = [NSNumber numberWithBool:associatedData.isArchived];
+                           inboxPosition = [[AnyThreadFinder new] sortIndexObjcWithThread:contactThread
+                                                                              transaction:transaction];
+                           disappearingMessagesConfiguration =
+                               [contactThread disappearingMessagesConfigurationWithTransaction:transaction];
+                       }
 
-        [contactsOutputStream writeSignalAccount:signalAccount
-                               recipientIdentity:recipientIdentity
-                                  profileKeyData:profileKeyData
-                                 contactsManager:self.contactsManager
-                           conversationColorName:conversationColorName
-               disappearingMessagesConfiguration:disappearingMessagesConfiguration
-                                      isArchived:isArchived
-                                   inboxPosition:inboxPosition];
-    }
-    
+                       [contactsOutputStream writeSignalAccount:signalAccount
+                                              recipientIdentity:recipientIdentity
+                                                 profileKeyData:profileKeyData
+                                                contactsManager:self.contactsManager
+                              disappearingMessagesConfiguration:disappearingMessagesConfiguration
+                                                     isArchived:isArchived
+                                                  inboxPosition:inboxPosition];
+                   }];
+
     [dataOutputStream close];
 
     if (contactsOutputStream.hasError) {

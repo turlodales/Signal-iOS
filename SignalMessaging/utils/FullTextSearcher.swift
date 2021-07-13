@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -30,6 +30,8 @@ public struct ConversationSortKey: Comparable {
         return lhsDate < rhsDate
     }
 }
+
+// MARK: -
 
 public class ConversationSearchResult<SortKey>: Comparable where SortKey: Comparable {
     public let thread: ThreadViewModel
@@ -63,6 +65,8 @@ public class ConversationSearchResult<SortKey>: Comparable where SortKey: Compar
     }
 }
 
+// MARK: -
+
 @objc
 public class ContactSearchResult: NSObject, Comparable {
     public let signalAccount: SignalAccount
@@ -74,7 +78,7 @@ public class ContactSearchResult: NSObject, Comparable {
 
     init(signalAccount: SignalAccount, transaction: SDSAnyReadTransaction) {
         self.signalAccount = signalAccount
-        self.comparableName = Environment.shared.contactsManager.comparableName(for: signalAccount, transaction: transaction)
+        self.comparableName = Self.contactsManager.comparableName(for: signalAccount, transaction: transaction)
     }
 
     // MARK: Comparable
@@ -96,37 +100,99 @@ public class ContactSearchResult: NSObject, Comparable {
     }
 }
 
+// MARK: -
+
 public class HomeScreenSearchResultSet: NSObject {
     public let searchText: String
-    public let conversations: [ConversationSearchResult<ConversationSortKey>]
+    public let contactThreads: [ConversationSearchResult<ConversationSortKey>]
+    public let groupThreads: [GroupSearchResult]
     public let contacts: [ContactSearchResult]
     public let messages: [ConversationSearchResult<MessageSortKey>]
 
-    public init(searchText: String, conversations: [ConversationSearchResult<ConversationSortKey>], contacts: [ContactSearchResult], messages: [ConversationSearchResult<MessageSortKey>]) {
+    public init(
+        searchText: String,
+        contactThreads: [ConversationSearchResult<ConversationSortKey>],
+        groupThreads: [GroupSearchResult],
+        contacts: [ContactSearchResult],
+        messages: [ConversationSearchResult<MessageSortKey>]
+    ) {
         self.searchText = searchText
-        self.conversations = conversations
+        self.contactThreads = contactThreads
+        self.groupThreads = groupThreads
         self.contacts = contacts
         self.messages = messages
     }
 
     public class var empty: HomeScreenSearchResultSet {
-        return HomeScreenSearchResultSet(searchText: "", conversations: [], contacts: [], messages: [])
+        return HomeScreenSearchResultSet(searchText: "", contactThreads: [], groupThreads: [], contacts: [], messages: [])
     }
 
     public var isEmpty: Bool {
-        return conversations.isEmpty && contacts.isEmpty && messages.isEmpty
+        return contactThreads.isEmpty && groupThreads.isEmpty && contacts.isEmpty && messages.isEmpty
     }
 }
+
+// MARK: -
 
 @objc
 public class GroupSearchResult: NSObject, Comparable {
     public let thread: ThreadViewModel
+    public let matchedMembersSnippet: String?
 
     private let sortKey: ConversationSortKey
 
-    init(thread: ThreadViewModel, sortKey: ConversationSortKey) {
+    class func withMatchedMembersSnippet(
+        thread: ThreadViewModel,
+        sortKey: ConversationSortKey,
+        searchText: String,
+        transaction: SDSAnyReadTransaction
+    ) -> GroupSearchResult? {
+        guard let groupThread = thread.threadRecord as? TSGroupThread else {
+            owsFailDebug("Unexpected thread type")
+            return nil
+        }
+
+        let members: [(
+            address: SignalServiceAddress,
+            displayName: String,
+            comparableName: String,
+            isMatched: Bool
+        )] = groupThread.groupMembership.fullMembers.map { address in
+            var displayName = contactsManager.displayName(for: address, transaction: transaction)
+            var isMatched = false
+            if let matchRange = displayName.range(of: searchText, options: [.caseInsensitive, .diacriticInsensitive]) {
+                isMatched = true
+                displayName = displayName.replacingCharacters(
+                    in: matchRange,
+                    with: "<\(FullTextSearchFinder.matchTag)>\(displayName[matchRange])</\(FullTextSearchFinder.matchTag)>"
+                )
+            }
+            return (
+                address: address,
+                displayName: displayName,
+                comparableName: contactsManager.comparableName(for: address, transaction: transaction),
+                isMatched: isMatched
+            )
+        }
+
+        let matchedMembersSnippet = members.sorted { lhs, rhs in
+            // Bubble matched members to the top
+            if rhs.isMatched != lhs.isMatched { return lhs.isMatched }
+            // Sort numbers to the end of the list
+            if lhs.comparableName.hasPrefix("+") != rhs.comparableName.hasPrefix("+") {
+                return !lhs.comparableName.hasPrefix("+")
+            }
+            // Otherwise, sort by comparable name
+            return lhs.comparableName.caseInsensitiveCompare(rhs.comparableName) == .orderedAscending
+        }.map { $0.displayName }.joined(separator: ", ")
+
+        return GroupSearchResult(thread: thread, sortKey: sortKey, matchedMembersSnippet: matchedMembersSnippet)
+    }
+
+    init(thread: ThreadViewModel, sortKey: ConversationSortKey, matchedMembersSnippet: String? = nil) {
         self.thread = thread
         self.sortKey = sortKey
+        self.matchedMembersSnippet = matchedMembersSnippet
     }
 
     // MARK: Comparable
@@ -141,6 +207,8 @@ public class GroupSearchResult: NSObject, Comparable {
         return lhs.thread.threadRecord.uniqueId == rhs.thread.threadRecord.uniqueId
     }
 }
+
+// MARK: -
 
 @objc
 public class ComposeScreenSearchResultSet: NSObject {
@@ -179,6 +247,8 @@ public class ComposeScreenSearchResultSet: NSObject {
     }
 }
 
+// MARK: -
+
 @objc
 public class MessageSearchResult: NSObject, Comparable {
 
@@ -196,6 +266,8 @@ public class MessageSearchResult: NSObject, Comparable {
         return lhs.sortId < rhs.sortId
     }
 }
+
+// MARK: -
 
 @objc
 public class ConversationScreenSearchResultSet: NSObject {
@@ -235,14 +307,6 @@ public class FullTextSearcher: NSObject {
     @objc
     public static let kDefaultMaxResults: UInt = 500
 
-    // MARK: - Dependencies
-
-    private var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    // MARK: - 
-
     private let finder: FullTextSearchFinder
 
     @objc
@@ -254,17 +318,31 @@ public class FullTextSearcher: NSObject {
 
     @objc
     public func searchForComposeScreen(searchText: String,
+                                       omitLocalUser: Bool,
                                        maxResults: UInt = kDefaultMaxResults,
                                        transaction: SDSAnyReadTransaction) -> ComposeScreenSearchResultSet {
 
-        var signalContacts: [ContactSearchResult] = []
+        var signalContactMap = [SignalServiceAddress: ContactSearchResult]()
+        var signalRecipentResults: [ContactSearchResult] = []
         var groups: [GroupSearchResult] = []
 
-        var count: UInt = 0
-        self.finder.enumerateObjects(searchText: searchText, transaction: transaction) { (match: Any, _: String?, stop: UnsafeMutablePointer<ObjCBool>) in
+        var hasReachedMaxResults: Bool {
+            guard (signalContactMap.count + signalRecipentResults.count + groups.count) < maxResults else { return true }
+            return false
+        }
 
-            count += 1
-            guard count < maxResults else {
+        finder.enumerateObjects(
+            searchText: searchText,
+            collections: [
+                SignalAccount.collection(),
+                SignalRecipient.collection(),
+                TSThread.collection()
+            ],
+            maxResults: maxResults,
+            transaction: transaction
+        ) { match, _, stop in
+
+            guard !hasReachedMaxResults else {
                 stop.pointee = true
                 return
             }
@@ -272,37 +350,59 @@ public class FullTextSearcher: NSObject {
             switch match {
             case let signalAccount as SignalAccount:
                 let searchResult = ContactSearchResult(signalAccount: signalAccount, transaction: transaction)
-                signalContacts.append(searchResult)
+                assert(signalContactMap[signalAccount.recipientAddress] == nil)
+                signalContactMap[signalAccount.recipientAddress] = searchResult
+            case let signalRecipient as SignalRecipient:
+                guard signalRecipient.devices.count > 0 else {
+                    // Ignore unregistered recipients.
+                    return
+                }
+                let signalAccount = SignalAccount.transientSignalAccount(forSignalRecipient: signalRecipient)
+                let searchResult = ContactSearchResult(signalAccount: signalAccount, transaction: transaction)
+                signalRecipentResults.append(searchResult)
             case let groupThread as TSGroupThread:
                 let sortKey = ConversationSortKey(isContactThread: false,
                                                   creationDate: groupThread.creationDate,
                                                   lastInteractionRowId: groupThread.lastInteractionRowId)
-                let threadViewModel = ThreadViewModel(thread: groupThread, transaction: transaction)
+                let threadViewModel = ThreadViewModel(thread: groupThread,
+                                                      forConversationList: true,
+                                                      transaction: transaction)
                 let searchResult = GroupSearchResult(thread: threadViewModel, sortKey: sortKey)
                 groups.append(searchResult)
             case is TSContactThread:
                 // not included in compose screen results
                 break
-            case is TSMessage:
-                // not included in compose screen results
-                break
             default:
-                owsFailDebug("unhandled item: \(match)")
+                owsFailDebug("Unexpected match of type \(type(of: match))")
             }
         }
 
-        if matchesNoteToSelf(searchText: searchText, transaction: transaction) {
-            if !signalContacts.contains(where: { $0.signalAccount.recipientAddress.isLocalAddress }) {
-                if let localAddress = TSAccountManager.localAddress {
+        // Fill in user matches from SignalRecipients, but only if
+        // we don't already have a SignalAccount for the same user.
+        for signalRecipentResult in signalRecipentResults {
+            if signalContactMap[signalRecipentResult.recipientAddress] == nil {
+                signalContactMap[signalRecipentResult.recipientAddress] = signalRecipentResult
+            }
+        }
+
+        if let localAddress = TSAccountManager.localAddress {
+            if matchesNoteToSelf(searchText: searchText, transaction: transaction) {
+                if signalContactMap[localAddress] == nil {
                     let localAccount = SignalAccount(address: localAddress)
                     let localResult = ContactSearchResult(signalAccount: localAccount, transaction: transaction)
-                    signalContacts.append(localResult)
-                } else {
-                    owsFailDebug("localAddress was unexpectedly nil")
+                    signalContactMap[localAddress] = localResult
                 }
             }
+        } else {
+            owsFailDebug("localAddress was unexpectedly nil")
         }
 
+        // Filter out contact results with pending message requests.
+        var signalContacts = Array(signalContactMap.values).filter { (contactResult: ContactSearchResult) in
+            !self.shouldFilterContactResult(contactResult: contactResult,
+                                            omitLocalUser: omitLocalUser,
+                                            transaction: transaction)
+        }
         // Order contact results by display name.
         signalContacts.sort()
 
@@ -311,6 +411,23 @@ public class FullTextSearcher: NSObject {
         groups.sort(by: >)
 
         return ComposeScreenSearchResultSet(searchText: searchText, groups: groups, signalContacts: signalContacts)
+    }
+
+    func shouldFilterContactResult(contactResult: ContactSearchResult,
+                                   omitLocalUser: Bool,
+                                   transaction: SDSAnyReadTransaction) -> Bool {
+        let address = contactResult.recipientAddress
+        if address.isLocalAddress {
+            return omitLocalUser
+        }
+        if self.contactsManager.isSystemContact(address: address) {
+            return false
+        }
+        guard let thread = TSContactThread.getWithContactAddress(address, transaction: transaction) else {
+            // Filter out users with whom we've never had contact.
+            return true
+        }
+        return thread.hasPendingMessageRequest(transaction: transaction.unwrapGrdbRead)
     }
 
     func matchesNoteToSelf(searchText: String, transaction: SDSAnyReadTransaction) -> Bool {
@@ -329,9 +446,10 @@ public class FullTextSearcher: NSObject {
                                     maxResults: UInt = kDefaultMaxResults,
                                     transaction: SDSAnyReadTransaction) -> HomeScreenSearchResultSet {
 
-        var conversations: [ConversationSearchResult<ConversationSortKey>] = []
-        var contacts: [ContactSearchResult] = []
-        var messages: [ConversationSearchResult<MessageSortKey>] = []
+        var contactThreads: [ConversationSearchResult<ConversationSortKey>] = []
+        var groupThreads: [GroupSearchResult] = []
+        var contactsMap: [SignalServiceAddress: ContactSearchResult] = [:]
+        var messages: [UInt64: ConversationSearchResult<MessageSortKey>] = [:]
 
         var existingConversationAddresses: Set<SignalServiceAddress> = Set()
 
@@ -352,83 +470,181 @@ public class FullTextSearcher: NSObject {
             if let threadViewModel = threadViewModelCache[thread.uniqueId] {
                 return threadViewModel
             }
-            let threadViewModel = ThreadViewModel(thread: thread, transaction: transaction)
+            let threadViewModel = ThreadViewModel(thread: thread,
+                                                  forConversationList: true,
+                                                  transaction: transaction)
             threadViewModelCache[thread.uniqueId] = threadViewModel
             return threadViewModel
         }
 
-        var count: UInt = 0
-        self.finder.enumerateObjects(searchText: searchText, transaction: transaction) { (match: Any, snippet: String?, stop: UnsafeMutablePointer<ObjCBool>) in
+        var mentionedMessageCache = [SignalServiceAddress: [TSMessage]]()
+        let getMentionedMessages: (SignalServiceAddress) -> [TSMessage] = { address in
+            if let mentionedMessages = mentionedMessageCache[address] {
+                return mentionedMessages
+            }
+            let mentionedMessages = MentionFinder.messagesMentioning(
+                address: address,
+                transaction: transaction.unwrapGrdbRead
+            )
+            mentionedMessageCache[address] = mentionedMessages
+            return mentionedMessages
+        }
 
-            count += 1
-            guard count < maxResults else {
+        func appendMessage(_ message: TSMessage, snippet: String?) {
+            guard let thread = getThread(message.uniqueThreadId) else {
+                owsFailDebug("Missing thread: \(type(of: message))")
+                return
+            }
+
+            let threadViewModel = getThreadViewModel(thread)
+            let sortKey = message.sortId
+            let searchResult = ConversationSearchResult(thread: threadViewModel,
+                                                        sortKey: sortKey,
+                                                        messageId: message.uniqueId,
+                                                        messageDate: NSDate.ows_date(withMillisecondsSince1970: message.timestamp),
+                                                        snippet: snippet)
+            guard messages[sortKey] == nil else { return }
+            messages[sortKey] = searchResult
+        }
+
+        func appendSignalAccount(_ signalAccount: SignalAccount) {
+            guard contactsMap[signalAccount.recipientAddress] == nil else { return }
+            let searchResult = ContactSearchResult(signalAccount: signalAccount, transaction: transaction)
+            contactsMap[searchResult.recipientAddress] = searchResult
+
+            getMentionedMessages(signalAccount.recipientAddress)
+                .forEach { message in
+                    appendMessage(
+                        message,
+                        snippet: message.plaintextBody(with: transaction.unwrapGrdbRead)
+                    )
+            }
+        }
+
+        var remainingAllowedResults: UInt {
+            UInt(max(0, Int(maxResults) - (contactThreads.count + groupThreads.count + contactsMap.count + messages.count)))
+        }
+
+        var hasReachedMaxResults: Bool {
+            guard remainingAllowedResults > 0 else { return true }
+            return false
+        }
+
+        // We search for each type of result independetly. The order here matters –
+        // we want to give priority to chat and contact results above message results.
+        // This makes sure if I search for a string like "Matthew" the first results
+        // will be the chat with my contact named "Matthew", rather than messages
+        // where his name was mentioned.
+
+        finder.enumerateObjects(
+            searchText: searchText,
+            maxResults: remainingAllowedResults,
+            transaction: transaction
+        ) { (thread: TSThread, _, stop) in
+            guard !hasReachedMaxResults else {
                 stop.pointee = true
                 return
             }
 
-            if let thread = match as? TSThread {
-                let threadViewModel = getThreadViewModel(thread)
-                let sortKey = ConversationSortKey(isContactThread: thread is TSContactThread,
-                                                  creationDate: thread.creationDate,
-                                                  lastInteractionRowId: thread.lastInteractionRowId)
+            // Ignore deleted threads.
+            guard thread.shouldThreadBeVisible else { return }
+
+            let threadViewModel = getThreadViewModel(thread)
+            let sortKey = ConversationSortKey(
+                isContactThread: thread is TSContactThread,
+                creationDate: thread.creationDate,
+                lastInteractionRowId: thread.lastInteractionRowId
+            )
+
+            switch thread {
+            case is TSGroupThread:
+                guard let searchResult = GroupSearchResult.withMatchedMembersSnippet(
+                    thread: threadViewModel,
+                    sortKey: sortKey,
+                    searchText: searchText,
+                    transaction: transaction
+                ) else {
+                    return owsFailDebug("Unexpectedly failed to determine members snippet")
+                }
+                groupThreads.append(searchResult)
+            case let contactThread as TSContactThread:
                 let searchResult = ConversationSearchResult(thread: threadViewModel, sortKey: sortKey)
-                switch thread {
-                case is TSGroupThread:
-                    conversations.append(searchResult)
-                case let contactThread as TSContactThread:
-                    if contactThread.shouldThreadBeVisible {
-                        existingConversationAddresses.insert(contactThread.contactAddress)
-                        conversations.append(searchResult)
-                    }
-                default:
-                    owsFailDebug("unexpected thread: \(type(of: thread))")
-                }
-            } else if let message = match as? TSMessage {
-                guard let thread = getThread(message.uniqueThreadId) else {
-                    owsFailDebug("Missing thread: \(type(of: message))")
-                    return
-                }
-
-                let threadViewModel = getThreadViewModel(thread)
-                let sortKey = message.sortId
-                let searchResult = ConversationSearchResult(thread: threadViewModel,
-                                                            sortKey: sortKey,
-                                                            messageId: message.uniqueId,
-                                                            messageDate: NSDate.ows_date(withMillisecondsSince1970: message.timestamp),
-                                                            snippet: snippet)
-
-                messages.append(searchResult)
-            } else if let signalAccount = match as? SignalAccount {
-                let searchResult = ContactSearchResult(signalAccount: signalAccount, transaction: transaction)
-                contacts.append(searchResult)
-            } else {
-                owsFailDebug("unhandled item: \(match)")
+                existingConversationAddresses.insert(contactThread.contactAddress)
+                contactThreads.append(searchResult)
+            default:
+                owsFailDebug("unexpected thread: \(type(of: thread))")
             }
         }
 
+        finder.enumerateObjects(
+            searchText: searchText,
+            maxResults: remainingAllowedResults,
+            transaction: transaction
+        ) { (account: SignalAccount, _, stop) in
+            guard !hasReachedMaxResults else {
+                stop.pointee = true
+                return
+            }
+            appendSignalAccount(account)
+        }
+
+        finder.enumerateObjects(
+            searchText: searchText,
+            maxResults: remainingAllowedResults,
+            transaction: transaction
+        ) { (recipient: SignalRecipient, _, stop) in
+            guard !hasReachedMaxResults else {
+                stop.pointee = true
+                return
+            }
+
+            // Ignore unregistered recipients.
+            guard recipient.devices.count > 0 else { return }
+
+            let account = SignalAccount.transientSignalAccount(forSignalRecipient: recipient)
+            appendSignalAccount(account)
+        }
+
+        finder.enumerateObjects(
+            searchText: searchText,
+            maxResults: remainingAllowedResults,
+            transaction: transaction
+        ) { (message: TSMessage, snippet: String?, stop: UnsafeMutablePointer<ObjCBool>) in
+            guard !hasReachedMaxResults else {
+                stop.pointee = true
+                return
+            }
+            appendMessage(message, snippet: snippet)
+        }
+
         if matchesNoteToSelf(searchText: searchText, transaction: transaction) {
-            if !contacts.contains(where: { $0.signalAccount.recipientAddress.isLocalAddress }) {
-                if let localAddress = TSAccountManager.localAddress {
-                    let localAccount = SignalAccount(address: localAddress)
-                    let localResult = ContactSearchResult(signalAccount: localAccount, transaction: transaction)
-                    contacts.append(localResult)
-                } else {
-                    owsFailDebug("localAddress was unexpectedly nil")
-                }
+            if let localAddress = TSAccountManager.localAddress, contactsMap[localAddress] == nil {
+                let localAccount = SignalAccount(address: localAddress)
+                let localResult = ContactSearchResult(signalAccount: localAccount, transaction: transaction)
+                contactsMap[localAddress] = localResult
+            } else {
+                owsFailDebug("localAddress was unexpectedly nil")
             }
         }
 
         // Only show contacts which were not included in an existing 1:1 conversation.
-        var otherContacts: [ContactSearchResult] = contacts.filter { !existingConversationAddresses.contains($0.recipientAddress) }
+        var otherContacts: [ContactSearchResult] = contactsMap.values.filter { !existingConversationAddresses.contains($0.recipientAddress) }
 
         // Order the conversation and message results in reverse chronological order.
         // The contact results are pre-sorted by display name.
-        conversations.sort(by: >)
-        messages.sort(by: >)
+        contactThreads.sort(by: >)
+        groupThreads.sort(by: >)
+        let sortedMessages = messages.values.sorted(by: >)
         // Order "other" contact results by display name.
         otherContacts.sort()
 
-        return HomeScreenSearchResultSet(searchText: searchText, conversations: conversations, contacts: otherContacts, messages: messages)
+        return HomeScreenSearchResultSet(
+            searchText: searchText,
+            contactThreads: contactThreads,
+            groupThreads: groupThreads,
+            contacts: otherContacts,
+            messages: sortedMessages
+        )
     }
 
     public func searchWithinConversation(thread: TSThread,
@@ -436,32 +652,55 @@ public class FullTextSearcher: NSObject {
                                          maxResults: UInt = kDefaultMaxResults,
                                          transaction: SDSAnyReadTransaction) -> ConversationScreenSearchResultSet {
 
-        var messages: [MessageSearchResult] = []
+        var messages: [UInt64: MessageSearchResult] = [:]
 
-        var count: UInt = 0
-        self.finder.enumerateObjects(searchText: searchText, transaction: transaction) { (match: Any, _: String?, stop: UnsafeMutablePointer<ObjCBool>) in
+        finder.enumerateObjects(
+            searchText: searchText,
+            collections: [
+                TSMessage.collection(),
+                SignalRecipient.collection()
+            ],
+            maxResults: maxResults,
+            transaction: transaction
+        ) { match, _, stop in
 
-            count += 1
-            guard count < maxResults else {
+            guard messages.count < maxResults else {
                 stop.pointee = true
                 return
             }
 
-            if let message = match as? TSMessage {
+            func appendMessage(_ message: TSMessage) {
+                let messageId = message.uniqueId
+                let searchResult = MessageSearchResult(messageId: messageId, sortId: message.sortId)
+                messages[message.sortId] = searchResult
+            }
+
+            switch match {
+            case let message as TSMessage:
                 guard message.uniqueThreadId == thread.uniqueId else {
                     return
                 }
 
-                let messageId = message.uniqueId
-                let searchResult = MessageSearchResult(messageId: messageId, sortId: message.sortId)
-                messages.append(searchResult)
+                appendMessage(message)
+            case let recipient as SignalRecipient:
+                guard thread.recipientAddresses.contains(recipient.address) || recipient.address.isLocalAddress else {
+                    return
+                }
+                let messagesMentioningAccount = MentionFinder.messagesMentioning(
+                    address: recipient.address,
+                    in: thread,
+                    transaction: transaction.unwrapGrdbRead
+                )
+                messagesMentioningAccount.forEach { appendMessage($0) }
+            default:
+                owsFailDebug("Unexpected match of type \(type(of: match))")
             }
         }
 
         // We want most recent first
-        messages.sort(by: >)
+        let sortedMessages = messages.values.sorted(by: >)
 
-        return ConversationScreenSearchResultSet(searchText: searchText, messages: messages)
+        return ConversationScreenSearchResultSet(searchText: searchText, messages: sortedMessages)
     }
 
     @objc(filterThreads:withSearchText:transaction:)
@@ -477,7 +716,7 @@ public class FullTextSearcher: NSObject {
             case let contactThread as TSContactThread:
                 return self.contactThreadSearcher.matches(item: contactThread, query: searchText, transaction: transaction)
             default:
-                owsFailDebug("Unexpected thread type: \(thread)")
+                owsFailDebug("Unexpected thread type: \(thread.uniqueId)")
                 return false
             }
         }
@@ -529,7 +768,7 @@ public class FullTextSearcher: NSObject {
     private func conversationIndexingString(address: SignalServiceAddress, transaction: SDSAnyReadTransaction) -> String {
         var result = self.indexingString(address: address, transaction: transaction)
 
-        if IsNoteToSelfEnabled(), address.isLocalAddress {
+        if address.isLocalAddress {
             result += " \(MessageStrings.noteToSelf)"
         }
 
@@ -540,5 +779,16 @@ public class FullTextSearcher: NSObject {
         let displayName = contactsManager.displayName(for: address, transaction: transaction)
 
         return "\(address.phoneNumber ?? "") \(displayName)"
+    }
+}
+
+// MARK: -
+
+extension SignalAccount {
+    public static func transientSignalAccount(forSignalRecipient signalRecipient: SignalRecipient) -> SignalAccount {
+        SignalAccount(signalRecipient: signalRecipient,
+                      contact: nil,
+                      contactAvatarHash: nil,
+                      multipleAccountLabelText: nil)
     }
 }

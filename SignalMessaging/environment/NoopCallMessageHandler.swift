@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import SignalServiceKit
@@ -7,7 +7,7 @@ import SignalServiceKit
 @objc
 public class NoopCallMessageHandler: NSObject, OWSCallMessageHandler {
 
-    public func receivedOffer(_ offer: SSKProtoCallMessageOffer, from caller: SignalServiceAddress, sourceDevice device: UInt32, sentAtTimestamp: UInt64, supportsMultiRing: Bool) {
+    public func receivedOffer(_ offer: SSKProtoCallMessageOffer, from caller: SignalServiceAddress, sourceDevice device: UInt32, sentAtTimestamp: UInt64, serverReceivedTimestamp: UInt64, serverDeliveryTimestamp: UInt64, supportsMultiRing: Bool) {
         owsFailDebug("")
     }
 
@@ -25,5 +25,17 @@ public class NoopCallMessageHandler: NSObject, OWSCallMessageHandler {
 
     public func receivedBusy(_ busy: SSKProtoCallMessageBusy, from caller: SignalServiceAddress, sourceDevice device: UInt32) {
         owsFailDebug("")
+    }
+
+    public func receivedOpaque(_ opaque: SSKProtoCallMessageOpaque, from caller: SignalServiceAddress, sourceDevice device: UInt32, serverReceivedTimestamp: UInt64, serverDeliveryTimestamp: UInt64) {
+        owsFailDebug("")
+    }
+
+    public func receivedGroupCallUpdateMessage(_ update: SSKProtoDataMessageGroupCallUpdate, for groupThread: TSGroupThread, serverReceivedTimestamp: UInt64) {
+        owsFailDebug("")
+    }
+
+    public func externallyHandleCallMessage(envelope: SSKProtoEnvelope, plaintextData: Data, wasReceivedByUD: Bool, serverDeliveryTimestamp: UInt64, transaction: SDSAnyWriteTransaction) -> Bool {
+        return false
     }
 }

@@ -1,11 +1,14 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
 
 @objc
-public class AvatarImageView: UIImageView {
+open class AvatarImageView: UIImageView, CVView {
+
+    @objc
+    public var shouldDeactivateConstraints = false
 
     public init() {
         super.init(frame: .zero)
@@ -27,6 +30,12 @@ public class AvatarImageView: UIImageView {
         self.configureView()
     }
 
+    public init(shouldDeactivateConstraints: Bool) {
+        self.shouldDeactivateConstraints = shouldDeactivateConstraints
+        super.init(frame: .zero)
+        self.configureView()
+    }
+
     func configureView() {
         self.autoPinToSquareAspectRatio()
 
@@ -41,137 +50,21 @@ public class AvatarImageView: UIImageView {
         super.layoutSubviews()
         layer.cornerRadius = frame.size.width / 2
     }
-}
 
-/// Avatar View which updates itself as necessary when the profile, contact, or group picture changes.
-@objc
-public class ConversationAvatarImageView: AvatarImageView {
+    public override func updateConstraints() {
+        super.updateConstraints()
 
-    // MARK: - Dependencies
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
+        if shouldDeactivateConstraints {
+            deactivateAllConstraints()
+        }
     }
 
-    // MARK: -
-
-    let thread: TSThread
-    let diameter: UInt
-    let contactsManager: OWSContactsManager
-
-    // nil if group avatar
-    let recipientAddress: SignalServiceAddress?
-
-    // nil if contact avatar
-    let groupThreadId: String?
-
-    required public init(thread: TSThread, diameter: UInt, contactsManager: OWSContactsManager) {
-        self.thread = thread
-        self.diameter = diameter
-        self.contactsManager = contactsManager
-
-        switch thread {
-        case let contactThread as TSContactThread:
-            self.recipientAddress = contactThread.contactAddress
-            self.groupThreadId = nil
-        case let groupThread as TSGroupThread:
-            self.recipientAddress = nil
-            self.groupThreadId = groupThread.uniqueId
-        default:
-            owsFailDebug("unexpected thread type: \(thread)")
-            self.recipientAddress = nil
-            self.groupThreadId = nil
-        }
-
-        super.init(frame: .zero)
-
-        if recipientAddress != nil {
-            NotificationCenter.default.addObserver(self, selector: #selector(handleOtherUsersProfileChanged(notification:)), name: .otherUsersProfileDidChange, object: nil)
-
-            NotificationCenter.default.addObserver(self, selector: #selector(handleSignalAccountsChanged(notification:)), name: .OWSContactsManagerSignalAccountsDidChange, object: nil)
-        }
-
-        if groupThreadId != nil {
-            NotificationCenter.default.addObserver(self, selector: #selector(handleGroupAvatarChanged(notification:)), name: .TSGroupThreadAvatarChanged, object: nil)
-        }
-
-        NotificationCenter.default.addObserver(self, selector: #selector(themeDidChange), name: .ThemeDidChange, object: nil)
-
-        // TODO group avatar changed
-        self.updateImage()
-    }
-
-    required public init?(coder aDecoder: NSCoder) {
-        notImplemented()
-    }
-
-    @objc func themeDidChange() {
-        updateImage()
-    }
-
-    @objc func handleSignalAccountsChanged(notification: Notification) {
-        Logger.debug("")
-
-        // PERF: It would be nice if we could do this only if *this* user's SignalAccount changed,
-        // but currently this is only a course grained notification.
-
-        self.updateImage()
-    }
-
-    @objc func handleOtherUsersProfileChanged(notification: Notification) {
-        Logger.debug("")
-
-        guard let changedAddress = notification.userInfo?[kNSNotificationKey_ProfileAddress] as? SignalServiceAddress else {
-            owsFailDebug("changedAddress was unexpectedly nil")
-            return
-        }
-
-        guard let recipientAddress = self.recipientAddress else {
-            // shouldn't call this for group threads
-            owsFailDebug("recipientAddress was unexpectedly nil")
-            return
-        }
-
-        guard recipientAddress == changedAddress else {
-            // not this avatar
-            return
-        }
-
-        self.updateImage()
-    }
-
-    @objc func handleGroupAvatarChanged(notification: Notification) {
-        Logger.debug("")
-
-        guard let changedGroupThreadId = notification.userInfo?[TSGroupThread_NotificationKey_UniqueId] as? String else {
-            owsFailDebug("groupThreadId was unexpectedly nil")
-            return
-        }
-
-        guard let groupThreadId = self.groupThreadId else {
-            // shouldn't call this for contact threads
-            owsFailDebug("groupThreadId was unexpectedly nil")
-            return
-        }
-
-        guard groupThreadId == changedGroupThreadId else {
-            // not this avatar
-            return
-        }
-
-        databaseStorage.read { transaction in
-            self.thread.anyReload(transaction: transaction)
-        }
-
-        self.updateImage()
-    }
-
-    public func updateImage() {
-        Logger.debug("updateImage")
-
-        self.image = OWSAvatarBuilder.buildImage(thread: thread, diameter: diameter)
+    public func reset() {
+        self.image = nil
     }
 }
+
+// MARK: -
 
 @objc
 public class AvatarImageButton: UIButton {

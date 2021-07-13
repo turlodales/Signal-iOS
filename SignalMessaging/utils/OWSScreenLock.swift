@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -7,18 +7,6 @@ import LocalAuthentication
 
 @objc
 public class OWSScreenLock: NSObject {
-
-    // MARK: - Dependencies
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    private var storageCoordinator: StorageCoordinator {
-        return SSKEnvironment.shared.storageCoordinator
-    }
-
-    // MARK: -
 
     public enum OWSScreenLockOutcome {
         case success
@@ -47,7 +35,7 @@ public class OWSScreenLock: NSObject {
 
     // MARK: - Singleton class
 
-    @objc(sharedManager)
+    @objc(shared)
     public static let shared = OWSScreenLock()
 
     private override init() {
@@ -67,7 +55,7 @@ public class OWSScreenLock: NSObject {
     public func isScreenLockEnabled() -> Bool {
         AssertIsOnMainThread()
 
-        if !storageCoordinator.isStorageReady {
+        if !AppReadiness.isAppReady {
             owsFailDebug("accessed screen lock state before storage is ready.")
             return false
         }
@@ -82,7 +70,7 @@ public class OWSScreenLock: NSObject {
     @objc
     public func setIsScreenLockEnabled(_ value: Bool) {
         AssertIsOnMainThread()
-        assert(storageCoordinator.isStorageReady)
+        assert(AppReadiness.isAppReady)
 
         databaseStorage.write { transaction in
             self.keyValueStore.setBool(value,
@@ -97,7 +85,7 @@ public class OWSScreenLock: NSObject {
     public func screenLockTimeout() -> TimeInterval {
         AssertIsOnMainThread()
 
-        if !storageCoordinator.isStorageReady {
+        if !AppReadiness.isAppReady {
             owsFailDebug("accessed screen lock state before storage is ready.")
             return 0
         }
@@ -112,7 +100,7 @@ public class OWSScreenLock: NSObject {
     @objc
     public func setScreenLockTimeout(_ value: TimeInterval) {
         AssertIsOnMainThread()
-        assert(storageCoordinator.isStorageReady)
+        assert(AppReadiness.isAppReady)
 
         databaseStorage.write { transaction in
             self.keyValueStore.setDouble(value,
@@ -121,6 +109,29 @@ public class OWSScreenLock: NSObject {
         }
 
         NotificationCenter.default.postNotificationNameAsync(OWSScreenLock.ScreenLockDidChange, object: nil)
+    }
+
+    public enum BiometryType {
+        case unknown, passcode, faceId, touchId
+    }
+    public var biometryType: BiometryType {
+        let context = screenLockContext()
+
+        var authError: NSError?
+        let canEvaluatePolicy = context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &authError)
+
+        guard canEvaluatePolicy, authError == nil else { return .unknown }
+
+        switch context.biometryType {
+        case .none:
+            return .passcode
+        case .faceID:
+            return .faceId
+        case .touchID:
+            return .touchId
+        @unknown default:
+            return .unknown
+        }
     }
 
     // MARK: - Methods

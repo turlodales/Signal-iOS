@@ -1,12 +1,12 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import PromiseKit
 
 @objc
-protocol GroupViewHelperDelegate: class {
+protocol GroupViewHelperDelegate: AnyObject {
     func groupViewHelperDidUpdateGroup()
 
     var currentGroupModel: TSGroupModel? { get }
@@ -18,18 +18,6 @@ protocol GroupViewHelperDelegate: class {
 
 @objc
 class GroupViewHelper: NSObject {
-
-    // MARK: - Dependencies
-
-    var tsAccountManager: TSAccountManager {
-        return .sharedInstance()
-    }
-
-    var contactsManager: OWSContactsManager {
-        return Environment.shared.contactsManager
-    }
-
-    // MARK: -
 
     @objc
     weak var delegate: GroupViewHelperDelegate?
@@ -57,12 +45,18 @@ class GroupViewHelper: NSObject {
         if threadViewModel.hasPendingMessageRequest {
             return false
         }
-        guard isLocalUserInConversation else {
+        guard isLocalUserFullMember else {
             return false
         }
         guard let groupThread = thread as? TSGroupThread else {
             // Both users can edit contact threads.
             return true
+        }
+        guard !isBlockedByMigration else {
+            return false
+        }
+        guard !blockingManager.isThreadBlocked(groupThread) else {
+            return false
         }
         guard let groupModelV2 = groupThread.groupModel as? TSGroupModelV2 else {
             // All users can edit v1 groups.
@@ -78,13 +72,20 @@ class GroupViewHelper: NSObject {
         case .unknown:
             owsFailDebug("Unknown access.")
             return false
+        case .unsatisfiable:
+            owsFailDebug("Invalid access.")
+            return false
         case .any:
             return true
         case .member:
-            return groupModelV2.groupMembership.isNonPendingMember(localAddress)
+            return groupModelV2.groupMembership.isFullMember(localAddress)
         case .administrator:
-            return (groupModelV2.groupMembership.isNonPendingMember(localAddress) &&        groupModelV2.groupMembership.isAdministrator(localAddress))
+            return (groupModelV2.groupMembership.isFullMemberAndAdministrator(localAddress))
         }
+    }
+
+    var isBlockedByMigration: Bool {
+        thread.isBlockedByMigration
     }
 
     // Can local user edit conversation attributes:
@@ -107,51 +108,55 @@ class GroupViewHelper: NSObject {
 
     // Can local user edit group access.
     var canEditConversationAccess: Bool {
-        if threadViewModel.hasPendingMessageRequest {
-            return false
-        }
-        guard isLocalUserInConversation else {
-            return false
-        }
         guard let groupThread = thread as? TSGroupThread else {
-            // Contact threads don't use access.
             return false
         }
-        guard let groupModelV2 = groupThread.groupModel as? TSGroupModelV2 else {
-            // v1 groups don't use access.
-            return false
-        }
-        guard let localAddress = tsAccountManager.localAddress else {
-            owsFailDebug("Missing localAddress.")
-            return false
-        }
-        return groupModelV2.groupMembership.isAdministrator(localAddress)
+        return (!threadViewModel.hasPendingMessageRequest &&
+            groupThread.isGroupV2Thread &&
+            groupThread.isLocalUserFullMemberAndAdministrator)
     }
 
     var canRevokePendingInvites: Bool {
         guard let groupThread = thread as? TSGroupThread else {
             return false
         }
-        guard let localAddress = tsAccountManager.localAddress else {
-            owsFailDebug("Missing localAddress.")
-            return false
-        }
-        let groupMembership = groupThread.groupModel.groupMembership
         return (!threadViewModel.hasPendingMessageRequest &&
-            groupMembership.isPendingOrNonPendingMember(localAddress) &&
-            groupMembership.isAdministrator(localAddress))
+            groupThread.isGroupV2Thread &&
+            groupThread.isLocalUserFullMemberAndAdministrator)
     }
 
     var canResendInvites: Bool {
-        return (!threadViewModel.hasPendingMessageRequest &&
-            isLocalUserInConversation)
+        return (!threadViewModel.hasPendingMessageRequest && isLocalUserFullMember)
     }
 
-    var isLocalUserInConversation: Bool {
+    var canApproveMemberRequests: Bool {
+        guard let groupThread = thread as? TSGroupThread else {
+            return false
+        }
+        return (!threadViewModel.hasPendingMessageRequest &&
+            groupThread.isGroupV2Thread &&
+            groupThread.isLocalUserFullMemberAndAdministrator)
+    }
+
+    var isLocalUserFullMember: Bool {
         guard let groupThread = thread as? TSGroupThread else {
             return true
         }
+        return groupThread.isLocalUserFullMember
+    }
 
-        return groupThread.isLocalUserInGroup
+    var isLocalUserFullOrInvitedMember: Bool {
+        guard let groupThread = thread as? TSGroupThread else {
+            return true
+        }
+        return groupThread.isLocalUserFullOrInvitedMember
+    }
+
+    func isFullOrInvitedMember(_ address: SignalServiceAddress) -> Bool {
+        guard let groupThread = thread as? TSGroupThread else {
+            return false
+        }
+        let groupMembership = groupThread.groupModel.groupMembership
+        return groupMembership.isFullMember(address) || groupMembership.isInvitedMember(address)
     }
 }

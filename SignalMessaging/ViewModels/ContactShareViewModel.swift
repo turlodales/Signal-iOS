@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -49,30 +49,26 @@ public class ContactShareViewModel: NSObject {
     }
 
     @objc
-    public func getAvatarImage(diameter: CGFloat, contactsManager: OWSContactsManager) -> UIImage? {
+    public func getAvatarImageWithSneakyTransaction(diameter: CGFloat) -> UIImage? {
+        databaseStorage.read { transaction in
+            self.getAvatarImage(diameter: diameter, transaction: transaction)
+        }
+    }
+
+    @objc
+    public func getAvatarImage(diameter: CGFloat, transaction: SDSAnyReadTransaction) -> UIImage? {
         if let avatarImage = avatarImage {
             return avatarImage
         }
 
-        var colorSeed = name.displayName
-        let recipientIds = systemContactsWithSignalAccountPhoneNumbers(contactsManager)
-        if let firstRecipientId = recipientIds.first {
-            // Try to use the first signal id as the default
-            // avatar's color seed, so that it is as consistent
-            // as possible with the user's avatar in other views.
-            colorSeed = firstRecipientId
-        }
-
-        let avatarBuilder = OWSContactAvatarBuilder(nonSignalNameComponents: name.components,
-                                                    colorSeed: colorSeed,
-                                                    diameter: UInt(diameter))
-        // Note: we use buildDefaultImage() and not build() so that contact
-        // share views always reflect the contents of the contact share.
-        // build() might return an avatar from a corresponding system
-        // contact or profile.  This could mislead the user into thinking
+        // Note: We build an avatar that _never_ reflects the name,
+        // not any corresponding system contact or profile.
+        // This could mislead the user into thinking
         // that an avatar they did not share was in fact included in the
         // contact share.
-        return avatarBuilder.buildDefaultImage()
+        return Self.avatarBuilder.avatarImage(personNameComponents: name.components,
+                                              diameterPoints: UInt(diameter),
+                                              transaction: transaction)
     }
 
     // MARK: Delegated -> dbRecord
@@ -118,13 +114,18 @@ public class ContactShareViewModel: NSObject {
     }
 
     @objc
-    public func systemContactsWithSignalAccountPhoneNumbers(_ contactsManager: ContactsManagerProtocol) -> [String] {
-        return dbRecord.systemContactsWithSignalAccountPhoneNumbers(contactsManager)
+    public func systemContactsWithSignalAccountPhoneNumbers() -> [String] {
+        return dbRecord.systemContactsWithSignalAccountPhoneNumbers()
     }
 
     @objc
-    public func systemContactPhoneNumbers(_ contactsManager: ContactsManagerProtocol) -> [String] {
-        return dbRecord.systemContactPhoneNumbers(contactsManager)
+    public func systemContactsWithSignalAccountPhoneNumbers(transaction: SDSAnyReadTransaction) -> [String] {
+        return dbRecord.systemContactsWithSignalAccountPhoneNumbers(with: transaction)
+    }
+
+    @objc
+    public func systemContactPhoneNumbers() -> [String] {
+        return dbRecord.systemContactPhoneNumbers()
     }
 
     @objc

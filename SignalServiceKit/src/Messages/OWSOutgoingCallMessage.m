@@ -1,26 +1,17 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSOutgoingCallMessage.h"
-#import "ProtoUtils.h"
-#import "SignalRecipient.h"
-#import "TSContactThread.h"
 #import <SignalCoreKit/NSDate+OWS.h>
+#import <SignalServiceKit/OWSOutgoingCallMessage.h>
+#import <SignalServiceKit/ProtoUtils.h>
+#import <SignalServiceKit/SignalRecipient.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSContactThread.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @implementation OWSOutgoingCallMessage
-
-#pragma mark - Dependencies
-
-- (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
-
-#pragma mark -
 
 - (instancetype)initWithThread:(TSThread *)thread
 {
@@ -123,6 +114,18 @@ NS_ASSUME_NONNULL_BEGIN
     return self;
 }
 
+- (instancetype)initWithThread:(TSThread *)thread opaqueMessage:(SSKProtoCallMessageOpaque *)opaqueMessage
+{
+    self = [self initWithThread:thread];
+    if (!self) {
+        return self;
+    }
+
+    _opaqueMessage = opaqueMessage;
+
+    return self;
+}
+
 #pragma mark - TSOutgoingMessage overrides
 
 - (BOOL)shouldSyncTranscript
@@ -130,21 +133,14 @@ NS_ASSUME_NONNULL_BEGIN
     return NO;
 }
 
-- (BOOL)isSilent
-{
-    // Avoid "phantom messages" for "outgoing call messages".
-
-    return YES;
-}
-
-- (nullable NSData *)buildPlainTextData:(SignalRecipient *)recipient
+- (nullable NSData *)buildPlainTextData:(SignalServiceAddress *)address
                                  thread:(TSThread *)thread
                             transaction:(SDSAnyReadTransaction *)transaction
 {
-    OWSAssertDebug(recipient);
+    OWSAssertDebug(address.isValid);
 
     SSKProtoContentBuilder *builder = [SSKProtoContent builder];
-    builder.callMessage = [self buildCallMessage:recipient.address thread:thread transaction:transaction];
+    builder.callMessage = [self buildCallMessage:address thread:thread transaction:transaction];
 
     NSError *error;
     NSData *_Nullable data = [builder buildSerializedDataAndReturnError:&error];
@@ -183,6 +179,10 @@ NS_ASSUME_NONNULL_BEGIN
 
     if (self.busyMessage) {
         [builder setBusy:self.busyMessage];
+    }
+
+    if (self.opaqueMessage) {
+        [builder setOpaque:self.opaqueMessage];
     }
 
     if (self.destinationDeviceId) {

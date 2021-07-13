@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import UIKit
@@ -8,35 +8,17 @@ import SignalMessaging
 import PureLayout
 import SignalServiceKit
 import PromiseKit
+import Intents
 
 @objc
 public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailedViewDelegate {
 
-    // MARK: - Dependencies
-
-    private var tsAccountManager: TSAccountManager {
-        return TSAccountManager.sharedInstance()
-    }
-
-    private var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    private var profileManager: OWSProfileManager {
-        return OWSProfileManager.shared()
-    }
-
-    private var storageCoordinator: StorageCoordinator {
-        return SSKEnvironment.shared.storageCoordinator
-    }
-
-    // MARK: -
-
-    enum ShareViewControllerError: Error {
+    enum ShareViewControllerError: Error, Equatable {
         case assertionError(description: String)
         case unsupportedMedia
         case notRegistered
         case obsoleteShare
+        case tooManyAttachments
     }
 
     private var hasInitialRootViewController = false
@@ -44,9 +26,9 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
     private var areVersionMigrationsComplete = false
 
     private var progressPoller: ProgressPoller?
-    var loadViewController: SAELoadViewController?
+    lazy var loadViewController = SAELoadViewController(delegate: self)
 
-    private var shareViewNavigationController: OWSNavigationController?
+    public var shareViewNavigationController: OWSNavigationController?
 
     override open func loadView() {
         super.loadView()
@@ -64,7 +46,7 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
 
         Logger.info("")
 
-        _ = AppVersion.sharedInstance()
+        _ = AppVersion.shared()
 
         Cryptography.seedRandom()
 
@@ -77,47 +59,33 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
             return
         }
 
-        // If we need to migrate YDB-to-GRDB, show an error view and abort.
-        guard StorageCoordinator.isReadyForShareExtension else {
-            showNotReadyView()
-            return
-        }
-
-        // If we haven't migrated the database file to the shared data
-        // directory we can't load it, and therefore can't init TSSPrimaryStorage,
-        // and therefore don't want to setup most of our machinery (Environment,
-        // most of the singletons, etc.).  We just want to show an error view and
-        // abort.
-        isReadyForAppExtensions = OWSPreferences.isReadyForAppExtensions()
-        guard isReadyForAppExtensions else {
-            showNotReadyView()
-            return
-        }
-
         // We shouldn't set up our environment until after we've consulted isReadyForAppExtensions.
         AppSetup.setupEnvironment(appSpecificSingletonBlock: {
-            SSKEnvironment.shared.callMessageHandler = NoopCallMessageHandler()
-            SSKEnvironment.shared.notificationsManager = NoopNotificationsManager()
-            },
-            migrationCompletion: { [weak self] in
-                                    AssertIsOnMainThread()
+            SSKEnvironment.shared.callMessageHandlerRef = NoopCallMessageHandler()
+            SSKEnvironment.shared.notificationsManagerRef = NoopNotificationsManager()
+        },
+        migrationCompletion: { [weak self] error in
+            AssertIsOnMainThread()
 
-                                    guard let strongSelf = self else { return }
+            guard let strongSelf = self else { return }
 
-                                    // performUpdateCheck must be invoked after Environment has been initialized because
-                                    // upgrade process may depend on Environment.
-                                    strongSelf.versionMigrationsDidComplete()
+            if let error = error {
+                owsFailDebug("Error \(error)")
+                strongSelf.showNotReadyView()
+                return
+            }
+
+            // performUpdateCheck must be invoked after Environment has been initialized because
+            // upgrade process may depend on Environment.
+            strongSelf.versionMigrationsDidComplete()
         })
 
         let shareViewNavigationController = OWSNavigationController()
         shareViewNavigationController.presentationController?.delegate = self
         self.shareViewNavigationController = shareViewNavigationController
 
-        let loadViewController = SAELoadViewController(delegate: self)
-        self.loadViewController = loadViewController
-
         // Don't display load screen immediately, in hopes that we can avoid it altogether.
-        after(seconds: 0.5).done { [weak self] in
+        after(seconds: 0.8).done { [weak self] in
             AssertIsOnMainThread()
 
             guard let strongSelf = self else { return }
@@ -127,8 +95,8 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
             }
 
             Logger.debug("setup is slow - showing loading screen")
-            strongSelf.showPrimaryViewController(loadViewController)
-            }
+            strongSelf.showPrimaryViewController(strongSelf.loadViewController)
+        }
 
         // We don't need to use "screen protection" in the SAE.
 
@@ -212,7 +180,8 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
 
                 // We don't need to use the TSSocketManager in the SAE.
 
-                Environment.shared.contactsManager.fetchSystemContactsOnceIfAlreadyAuthorized()
+                // TODO: Re-enable when system contact fetching uses less memory.
+                // Environment.shared.contactsManager.fetchSystemContactsOnceIfAlreadyAuthorized()
 
                 // We don't need to fetch messages in the SAE.
 
@@ -252,7 +221,7 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
         guard storageCoordinator.isStorageReady else {
             return
         }
-        guard !AppReadiness.isAppReady() else {
+        guard !AppReadiness.isAppReady else {
             // Only mark the app as ready once.
             return
         }
@@ -275,12 +244,9 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
 
         // We don't need to use DeviceSleepManager in the SAE.
 
-        AppVersion.sharedInstance().saeLaunchDidComplete()
+        AppVersion.shared().saeLaunchDidComplete()
 
         ensureRootViewController()
-
-        // We don't need to use OWSMessageReceiver in the SAE.
-        // We don't need to use OWSBatchMessageProcessor in the SAE.
 
         // We don't need to use OWSOrphanDataCleaner in the SAE.
 
@@ -307,7 +273,7 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
 
         Logger.debug("")
 
-        guard AppReadiness.isAppReady() else {
+        guard AppReadiness.isAppReady else {
             return
         }
         guard !hasInitialRootViewController else {
@@ -402,10 +368,9 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
         Logger.debug("")
 
         if isReadyForAppExtensions {
-            AppReadiness.runNowOrWhenAppDidBecomeReady { [weak self] in
+            AppReadiness.runNowOrWhenAppDidBecomeReadySync { [weak self] in
                 AssertIsOnMainThread()
-                guard let strongSelf = self else { return }
-                strongSelf.activate()
+                self?.activate()
             }
         }
     }
@@ -428,19 +393,13 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
         super.viewWillDisappear(animated)
 
         Logger.flush()
-    }
-
-    override open func viewDidDisappear(_ animated: Bool) {
-        Logger.debug("")
-
-        super.viewDidDisappear(animated)
-
-        Logger.flush()
 
         // Share extensions reside in a process that may be reused between usages.
         // That isn't safe; the codebase is full of statics (e.g. singletons) which
         // we can't easily clean up.
-        ExitShareExtension()
+        //
+        // We do this here, because since iOS 13 `viewDidDisappear` is never called.
+        DispatchQueue.main.async { ExitShareExtension() }
     }
 
     @objc
@@ -484,7 +443,7 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
         self.dismiss(animated: true) { [weak self] in
             AssertIsOnMainThread()
             guard let strongSelf = self else { return }
-            strongSelf.extensionContext!.completeRequest(returningItems: [], completionHandler: nil)
+            strongSelf.extensionContext?.completeRequest(returningItems: [], completionHandler: nil)
         }
     }
 
@@ -494,17 +453,17 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
         self.dismiss(animated: true) { [weak self] in
             AssertIsOnMainThread()
             guard let strongSelf = self else { return }
-            strongSelf.extensionContext!.cancelRequest(withError: ShareViewControllerError.obsoleteShare)
+            strongSelf.extensionContext?.cancelRequest(withError: ShareViewControllerError.obsoleteShare)
         }
     }
 
     public func shareViewFailed(error: Error) {
-        Logger.info("")
+        owsFailDebug("Error: \(error)")
 
         self.dismiss(animated: true) { [weak self] in
             AssertIsOnMainThread()
             guard let strongSelf = self else { return }
-            strongSelf.extensionContext!.cancelRequest(withError: error)
+            strongSelf.extensionContext?.cancelRequest(withError: error)
         }
     }
 
@@ -524,7 +483,7 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
             owsFailDebug("Missing shareViewNavigationController")
             return
         }
-        shareViewNavigationController.setViewControllers([viewController], animated: false)
+        shareViewNavigationController.setViewControllers([viewController], animated: true)
         if self.presentedViewController == nil {
             Logger.debug("presenting modally: \(viewController)")
             self.present(shareViewNavigationController, animated: true)
@@ -534,40 +493,78 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
         }
     }
 
+    private lazy var conversationPicker = SharingThreadPickerViewController(shareViewDelegate: self)
     private func buildAttachmentsAndPresentConversationPicker() {
-        firstly { () -> Promise<[UnloadedItem]> in
+        let selectedThread: TSThread?
+        if #available(iOS 13, *),
+           let intent = extensionContext?.intent as? INSendMessageIntent,
+           let threadUniqueId = intent.conversationIdentifier {
+            selectedThread = databaseStorage.read { TSThread.anyFetch(uniqueId: threadUniqueId, transaction: $0) }
+        } else {
+            selectedThread = nil
+        }
+
+        // If we have a pre-selected thread, we wait to show the approval view
+        // until the attachments have been built. Otherwise, we'll present it
+        // immeidately and tell it what attachments we're sharing once we've
+        // finished building them.
+        if selectedThread == nil { showPrimaryViewController(conversationPicker) }
+
+        firstly(on: .sharedUserInitiated) { () -> Promise<[UnloadedItem]> in
             guard let inputItems = self.extensionContext?.inputItems as? [NSExtensionItem] else {
                 throw OWSAssertionError("no input item")
             }
-            let result = try itemsToLoad(inputItems: inputItems)
+            let result = try self.itemsToLoad(inputItems: inputItems)
             return Promise.value(result)
-        }.then { [weak self] (unloadedItems: [UnloadedItem]) -> Promise<[LoadedItem]> in
+        }.then(on: .sharedUserInitiated) { [weak self] (unloadedItems: [UnloadedItem]) -> Promise<[LoadedItem]> in
             guard let self = self else { throw PMKError.cancelled }
 
             return self.loadItems(unloadedItems: unloadedItems)
-        }.then { [weak self] (loadedItems: [LoadedItem]) -> Promise<[SignalAttachment]> in
+        }.then(on: .sharedUserInitiated) { [weak self] (loadedItems: [LoadedItem]) -> Promise<[SignalAttachment]> in
             guard let self = self else { throw PMKError.cancelled }
 
             return self.buildAttachments(loadedItems: loadedItems)
         }.done { [weak self] (attachments: [SignalAttachment]) in
             guard let self = self else { throw PMKError.cancelled }
 
-            self.progressPoller = nil
-            self.loadViewController = nil
+            // Make sure the user is not trying to share more than our attachment limit.
+            guard attachments.filter({ !$0.isConvertibleToTextMessage }).count <= SignalAttachment.maxAttachmentsAllowed else {
+                throw ShareViewControllerError.tooManyAttachments
+            }
 
-            let conversationPicker = SharingThreadPickerViewController(shareViewDelegate: self)
-            conversationPicker.attachments = attachments
-            self.showPrimaryViewController(conversationPicker)
-            Logger.info("showing picker with attachments: \(attachments)")
+            self.progressPoller = nil
+
+            Logger.info("Setting picker attachments: \(attachments)")
+            self.conversationPicker.attachments = attachments
+
+            if let selectedThread = selectedThread {
+                let approvalVC = try self.conversationPicker.buildApprovalViewController(for: selectedThread)
+                self.showPrimaryViewController(approvalVC)
+            }
         }.catch { [weak self] error in
             guard let self = self else { return }
 
-            let alertTitle = NSLocalizedString("SHARE_EXTENSION_UNABLE_TO_BUILD_ATTACHMENT_ALERT_TITLE",
+            let alertTitle: String
+            let alertMessage: String?
+
+            if let error = error as? ShareViewControllerError, error == .tooManyAttachments {
+                let format = NSLocalizedString("IMAGE_PICKER_CAN_SELECT_NO_MORE_TOAST_FORMAT",
+                                               comment: "Momentarily shown to the user when attempting to select more images than is allowed. Embeds {{max number of items}} that can be shared.")
+
+                alertTitle = String(format: format, OWSFormat.formatInt(SignalAttachment.maxAttachmentsAllowed))
+                alertMessage = nil
+            } else {
+                alertTitle = NSLocalizedString("SHARE_EXTENSION_UNABLE_TO_BUILD_ATTACHMENT_ALERT_TITLE",
                                                comment: "Shown when trying to share content to a Signal user for the share extension. Followed by failure details.")
-            OWSActionSheets.showActionSheet(title: alertTitle,
-                                message: error.localizedDescription,
-                                buttonTitle: CommonStrings.cancelButton) { _ in
-                                    self.shareViewWasCancelled()
+                alertMessage = error.localizedDescription
+            }
+
+            OWSActionSheets.showActionSheet(
+                title: alertTitle,
+                message: alertMessage,
+                buttonTitle: CommonStrings.cancelButton
+            ) { _ in
+                self.shareViewWasCancelled()
             }
             owsFailDebug("building attachment failed with error: \(error)")
         }
@@ -647,6 +644,10 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
                     return UnloadedItem(itemProvider: itemProvider, itemType: .text)
                 }
 
+                if itemProvider.hasItemConformingToTypeIdentifier(kUTTypePDF as String) {
+                    return UnloadedItem(itemProvider: itemProvider, itemType: .pdf)
+                }
+
                 owsFailDebug("unexpected share item: \(itemProvider)")
                 return UnloadedItem(itemProvider: itemProvider, itemType: .other)
             }
@@ -681,6 +682,27 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
             case webUrl(_ webUrl: URL)
             case contact(_ contactData: Data)
             case text(_ text: String)
+            case pdf(_ data: Data)
+
+            var debugDescription: String {
+                switch self {
+                case .fileUrl:
+                    return "fileUrl"
+                case .inMemoryImage:
+                    return "inMemoryImage"
+                case .webUrl:
+                    return "webUrl"
+                case .contact:
+                    return "contact"
+                case .text:
+                    return "text"
+                case .pdf:
+                    return "pdf"
+                @unknown default:
+                    owsFailDebug("Unknown value.")
+                    return "unknown"
+                }
+            }
         }
 
         let itemProvider: NSItemProvider
@@ -697,6 +719,10 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
                 return false
             }
         }
+
+        var debugDescription: String {
+            payload.debugDescription
+        }
     }
 
     private
@@ -708,6 +734,7 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
             case fileUrl
             case contact
             case text
+            case pdf
             case other
         }
 
@@ -736,10 +763,27 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
 
             }
         case .image:
-            return itemProvider.loadUrl(forTypeIdentifier: kUTTypeImage as String, options: nil).map { fileUrl in
+            // When multiple image formats are available, kUTTypeImage will
+            // defer to jpeg when possible. On iPhone 12 Pro, when 'heic'
+            // and 'jpeg' are the available options, the 'jpeg' data breaks
+            // UIImage (and underlying) in some unclear way such that trying
+            // to perform any kind of transformation on the image (such as
+            // resizing) causes memory to balloon uncontrolled. Luckily,
+            // iOS 14 provides native UIImage support for heic and iPhone
+            // 12s can only be running iOS 14+, so we can request the heic
+            // format directly, which behaves correctly for all our needs.
+            // A radar has been opened with apple reporting this issue.
+            let desiredTypeIdentifier: String
+            if #available(iOS 14, *), itemProvider.registeredTypeIdentifiers.contains("public.heic") {
+                desiredTypeIdentifier = "public.heic"
+            } else {
+                desiredTypeIdentifier = kUTTypeImage as String
+            }
+
+            return itemProvider.loadUrl(forTypeIdentifier: desiredTypeIdentifier, options: nil).map { fileUrl in
                 LoadedItem(itemProvider: unloadedItem.itemProvider,
                            payload: .fileUrl(fileUrl))
-            }.recover { error -> Promise<LoadedItem> in
+            }.recover(on: .global()) { error -> Promise<LoadedItem> in
                 let nsError = error as NSError
                 assert(nsError.domain == NSItemProvider.errorDomain)
                 assert(nsError.code == NSItemProvider.ErrorCode.unexpectedValueClassError.rawValue)
@@ -771,6 +815,11 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
                 LoadedItem(itemProvider: unloadedItem.itemProvider,
                            payload: .text(text))
             }
+        case .pdf:
+            return itemProvider.loadData(forTypeIdentifier: kUTTypePDF as String, options: nil).map { data in
+                LoadedItem(itemProvider: unloadedItem.itemProvider,
+                           payload: .pdf(data))
+            }
         case .other:
             return itemProvider.loadUrl(forTypeIdentifier: kUTTypeFileURL as String, options: nil).map { fileUrl in
                 LoadedItem(itemProvider: unloadedItem.itemProvider,
@@ -780,8 +829,11 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
     }
 
     private func buildAttachments(loadedItems: [LoadedItem]) -> Promise<[SignalAttachment]> {
-        let attachmentPromises = loadedItems.map {
-            buildAttachment(loadedItem: $0)
+        var attachmentPromises = [Promise<SignalAttachment>]()
+        for loadedItem in loadedItems {
+            attachmentPromises.append(firstly(on: .sharedUserInitiated) { () -> Promise<SignalAttachment> in
+                self.buildAttachment(loadedItem: loadedItem)
+            })
         }
         return when(fulfilled: attachmentPromises)
     }
@@ -822,7 +874,7 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
             dataSource.sourceFilename = url.lastPathComponent
             let utiType = MIMETypeUtil.utiType(forFileExtension: url.pathExtension) ?? kUTTypeData as String
 
-            guard !SignalAttachment.isInvalidVideo(dataSource: dataSource, dataUTI: utiType) else {
+            guard !SignalAttachment.isVideoThatNeedsCompression(dataSource: dataSource, dataUTI: utiType) else {
                 // This can happen, e.g. when sharing a quicktime-video from iCloud drive.
 
                 let (promise, exportSession) = SignalAttachment.compressVideoAsMp4(dataSource: dataSource, dataUTI: utiType)
@@ -831,17 +883,14 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
                 // Ideally we'd be able to start it here, and not block the UI on conversion unless there's still work to be done
                 // when the user hits "send".
                 if let exportSession = exportSession {
-                    let progressPoller = ProgressPoller(timeInterval: 0.1, ratioCompleteBlock: { return exportSession.progress })
-                    AssertIsOnMainThread()
-                    self.progressPoller = progressPoller
-                    progressPoller.startPolling()
+                    DispatchQueue.main.async {
+                        let progressPoller = ProgressPoller(timeInterval: 0.1, ratioCompleteBlock: { return exportSession.progress })
 
-                    guard let loadViewController = self.loadViewController else {
-                        owsFailDebug("load view controller was unexpectedly nil")
-                        return promise
+                        self.progressPoller = progressPoller
+                        progressPoller.startPolling()
+
+                        self.loadViewController.progress = progressPoller.progress
                     }
-
-                    loadViewController.progress = progressPoller.progress
                 }
 
                 return promise
@@ -855,6 +904,10 @@ public class ShareViewController: UIViewController, ShareViewDelegate, SAEFailed
             }
             let dataSource = DataSourceValue.dataSource(with: pngData, fileExtension: "png")
             let attachment = SignalAttachment.attachment(dataSource: dataSource, dataUTI: kUTTypePNG as String, imageQuality: .medium)
+            return Promise.value(attachment)
+        case .pdf(let pdf):
+            let dataSource = DataSourceValue.dataSource(with: pdf, fileExtension: "pdf")
+            let attachment = SignalAttachment.attachment(dataSource: dataSource, dataUTI: kUTTypePDF as String)
             return Promise.value(attachment)
         }
     }

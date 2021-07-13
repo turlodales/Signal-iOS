@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 NS_ASSUME_NONNULL_BEGIN
@@ -31,13 +31,10 @@ typedef NS_CLOSED_ENUM(NSUInteger, OWS2FAMode) {
 
 - (instancetype)init NS_DESIGNATED_INITIALIZER;
 
-+ (instancetype)sharedManager;
-
 @property (nullable, nonatomic, readonly) NSString *pinCode;
 - (void)setPinCode:(nullable NSString *)pin transaction:(SDSAnyWriteTransaction *)transaction;
 
 @property (nonatomic, readonly) OWS2FAMode mode;
-@property (nonatomic, readonly) BOOL isDueForV1Reminder;
 @property (nonatomic, readonly) NSTimeInterval repetitionInterval;
 
 - (BOOL)is2FAEnabled;
@@ -50,12 +47,13 @@ typedef NS_CLOSED_ENUM(NSUInteger, OWS2FAMode) {
 // Request with service
 - (void)requestEnable2FAWithPin:(NSString *)pin
                            mode:(OWS2FAMode)mode
+                rotateMasterKey:(BOOL)rotateMasterKey
                         success:(nullable OWS2FASuccess)success
                         failure:(nullable OWS2FAFailure)failure;
 
 - (void)disable2FAWithSuccess:(nullable OWS2FASuccess)success failure:(nullable OWS2FAFailure)failure;
 
-- (void)updateRepetitionIntervalWithWasSuccessful:(BOOL)wasSuccessful;
+- (void)reminderCompletedWithIncorrectAttempts:(BOOL)incorrectAttempts;
 
 - (void)markEnabledWithPin:(NSString *)pin
                transaction:(SDSAnyWriteTransaction *)transaction NS_SWIFT_NAME(markEnabled(pin:transaction:));

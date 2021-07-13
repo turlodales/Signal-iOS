@@ -1,0 +1,5 @@
+• Nieuwe animaties voor het verzenden, ontvangen en selecteren van berichten en voor het reageren op geciteerde berichten.
+• Batterijduur is belangrijk en om die te verlengen hebben we wat veranderinging aangebracht in de manier waarop meldingen worden afgehandeld door de app. Deze verandering verlengen de batterijduur significant. Als je problemen ziet met de betrouwbaarheid van meldingen, meld het dan alsjeblieft.
+- Heb je een ongewenst bericht ontvangen? Je kunt vanaf nu wanneer je die persoon blokkeert het bericht als een spambericht melden.
+
+Ben je geïnteresseerd in helpen om Signal te verbeteren? We huren mensen. Bezoek https://signal.org/workworkwork om hier meer over te lezen.

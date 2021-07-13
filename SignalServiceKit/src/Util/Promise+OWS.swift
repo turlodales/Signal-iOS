@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import PromiseKit
@@ -62,15 +62,21 @@ public extension Promise {
     }
 }
 
+// MARK: -
+
 struct TimeoutError: Error {
     let underlyingError: Error
 }
+
+// MARK: -
 
 public extension Promise where T == Void {
     func timeout(seconds: TimeInterval) -> Promise<Void> {
         return timeout(seconds: seconds, substituteValue: ())
     }
 }
+
+// MARK: -
 
 public extension Guarantee {
     func nilTimeout(seconds: TimeInterval) -> Guarantee<T?> {
@@ -106,8 +112,86 @@ public extension Guarantee {
     }
 }
 
+// MARK: -
+
 public extension Guarantee where T == Void {
     func timeout(seconds: TimeInterval) -> Guarantee<Void> {
         timeout(seconds: seconds, substituteValue: ())
+    }
+}
+
+// MARK: -
+
+public func firstly<U: Thenable>(on dispatchQueue: DispatchQueue,
+                                 execute body: @escaping () throws -> U) -> Promise<U.T> {
+    let (promise, resolver) = Promise<U.T>.pending()
+    dispatchQueue.async {
+        firstly {
+            return try body()
+        }.done(on: .global()) { value in
+            resolver.fulfill(value)
+        }.catch(on: .global()) { error in
+            resolver.reject(error)
+        }
+    }
+    return promise
+}
+
+public func firstly<T>(on dispatchQueue: DispatchQueue,
+                       execute body: @escaping () throws -> T) -> Promise<T> {
+    return dispatchQueue.async(.promise, execute: body)
+}
+
+public func firstly<T>(on dispatchQueue: DispatchQueue,
+                       execute body: @escaping () -> T) -> Guarantee<T> {
+    return dispatchQueue.async(.promise, execute: body)
+}
+
+// MARK: -
+
+public class Promises {
+
+    public static func performWithImmediateRetry<T>(promiseBlock: @escaping () -> Promise<T>,
+                                                    remainingRetries: UInt = 3) -> Promise<T> {
+
+        let (promise, resolver) = Promise<T>.pending()
+
+        firstly(on: .global()) { () -> Promise<T> in
+            return promiseBlock()
+        }.done(on: .global()) { (value: T) -> Void  in
+            resolver.fulfill(value)
+        }.catch(on: .global()) { (error: Error) -> Void in
+            guard remainingRetries > 0,
+                IsNetworkConnectivityFailure(error) else {
+                    resolver.reject(error)
+                    return
+            }
+
+            Logger.warn("Error: \(error)")
+
+            firstly(on: .global()) { () -> Promise<T> in
+                return Self.performWithImmediateRetry(promiseBlock: promiseBlock,
+                                                      remainingRetries: remainingRetries - 1)
+            }.done(on: .global()) { (value: T) in
+                resolver.fulfill(value)
+            }.catch(on: .global()) { (error: Error)in
+                resolver.reject(error)
+            }
+        }
+
+        return promise
+    }
+}
+
+public extension CatchMixin {
+    /// Catches a cancellation error and throws the replacement in its place
+    /// - Parameter replacementError: The error to be thrown if a cancellation is caught
+    ///
+    /// By default, PromiseKit will suppress any cancellations. They're not a success and not a failure
+    /// This function is a convenience wrapper around adding a recovery block that will rethrow any cancellations as the provided error
+    func catchCancellation(andThrow replacementError: Error) -> PromiseKit.Promise<Self.T> {
+        recover(on: conf.Q.map, policy: .allErrors) { (originalError) -> Promise<Self.T> in
+            throw originalError.isCancelled ? replacementError : originalError
+        }
     }
 }

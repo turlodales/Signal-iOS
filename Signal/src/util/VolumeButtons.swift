@@ -1,10 +1,10 @@
 //
 //  Copyright (c) 2018 Open Whisper Systems. All rights reserved.
-// 
+//
 
 import Foundation
 
-protocol VolumeButtonObserver: class {
+protocol VolumeButtonObserver: AnyObject {
     func didPressVolumeButton(with identifier: VolumeButtons.Identifier)
     func didReleaseVolumeButton(with identifier: VolumeButtons.Identifier)
 

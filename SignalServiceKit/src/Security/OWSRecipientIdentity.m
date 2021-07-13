@@ -1,10 +1,10 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSRecipientIdentity.h"
-#import "OWSIdentityManager.h"
 #import <SignalCoreKit/Cryptography.h>
+#import <SignalServiceKit/OWSIdentityManager.h>
+#import <SignalServiceKit/OWSRecipientIdentity.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -84,18 +84,6 @@ NSUInteger const RecipientIdentitySchemaVersion = 1;
  *       which makes some special accomodations to enforce consistency.
  */
 @implementation OWSRecipientIdentity
-
-#pragma mark - Dependencies
-
-+ (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
-
-- (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
 
 #pragma mark - Table Contents
 

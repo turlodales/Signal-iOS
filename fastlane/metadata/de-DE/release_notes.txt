@@ -1,0 +1,5 @@
+• Wir haben die App mit neuen Animationen beim Senden und Empfangen von Nachrichten, beim Auswählen von Nachrichten in der Unterhaltungsansicht und beim Beantworten von Nachrichten aufpoliert.
+• Die Akkulaufzeit ist kostbar, daher haben wir mehrere Änderungen an der Handhabung von Mitteilungen in der App vorgenommen, die den Akkuverbrauch erheblich reduzieren. Bitte melde alle Probleme, die du mit der Zuverlässigkeit der Mitteilungen feststellst.
+Erhältst du eine unerwünschte Nachricht? Diese kann jetzt als Spam gemeldet werden, wenn du auf Blockieren tippst.
+
+Möchtest du zur Verbesserung von Signal beitragen? Wir stellen ein. Besuche https://signal.org/workworkwork um mehr zu erfahren.

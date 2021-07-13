@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -166,6 +166,50 @@ extension StickerPack: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension StickerPack: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == StickerPack.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let author: String? = modelToCopy.author
+            // NOTE: If this generates build errors, you made need to
+            // implement DeepCopyable for this type in DeepCopy.swift.
+            let cover: StickerPackItem = try DeepCopies.deepCopy(modelToCopy.cover)
+            let dateCreated: Date = modelToCopy.dateCreated
+            // NOTE: If this generates build errors, you made need to
+            // implement DeepCopyable for this type in DeepCopy.swift.
+            let info: StickerPackInfo = try DeepCopies.deepCopy(modelToCopy.info)
+            let isInstalled: Bool = modelToCopy.isInstalled
+            // NOTE: If this generates build errors, you made need to
+            // implement DeepCopyable for this type in DeepCopy.swift.
+            let items: [StickerPackItem] = try DeepCopies.deepCopy(modelToCopy.items)
+            let title: String? = modelToCopy.title
+
+            return StickerPack(grdbId: id,
+                               uniqueId: uniqueId,
+                               author: author,
+                               cover: cover,
+                               dateCreated: dateCreated,
+                               info: info,
+                               isInstalled: isInstalled,
+                               items: items,
+                               title: title)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension StickerPackSerializer {
@@ -308,9 +352,11 @@ public extension StickerPack {
 
 @objc
 public class StickerPackCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<StickerPackRecord>?
 
-    init(cursor: RecordCursor<StickerPackRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<StickerPackRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -352,10 +398,10 @@ public extension StickerPack {
         let database = transaction.database
         do {
             let cursor = try StickerPackRecord.fetchCursor(database)
-            return StickerPackCursor(cursor: cursor)
+            return StickerPackCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return StickerPackCursor(cursor: nil)
+            return StickerPackCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -365,8 +411,6 @@ public extension StickerPack {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return StickerPack.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(StickerPackRecord.databaseTableName) WHERE \(stickerPackColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -397,28 +441,20 @@ public extension StickerPack {
                             batchSize: UInt,
                             block: @escaping (StickerPack, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            StickerPack.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? StickerPack else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = StickerPack.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = StickerPack.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -446,10 +482,6 @@ public extension StickerPack {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: StickerPack.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -481,8 +513,6 @@ public extension StickerPack {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: StickerPack.collection())
         case .grdbRead(let grdbTransaction):
             return StickerPackRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -492,8 +522,6 @@ public extension StickerPack {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: StickerPack.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try StickerPackRecord.deleteAll(grdbTransaction.database)
@@ -542,8 +570,6 @@ public extension StickerPack {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: StickerPack.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(StickerPackRecord.databaseTableName) WHERE \(stickerPackColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -561,11 +587,11 @@ public extension StickerPack {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try StickerPackRecord.fetchCursor(transaction.database, sqlRequest)
-            return StickerPackCursor(cursor: cursor)
+            return StickerPackCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return StickerPackCursor(cursor: nil)
+            return StickerPackCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -619,3 +645,20 @@ class StickerPackSerializer: SDSSerializer {
         return StickerPackRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, author: author, cover: cover, dateCreated: dateCreated, info: info, isInstalled: isInstalled, items: items, title: title)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension StickerPack {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> StickerPack {
+        guard let record = try asRecord() as? StickerPackRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try StickerPack.fromRecord(record)
+    }
+}
+#endif

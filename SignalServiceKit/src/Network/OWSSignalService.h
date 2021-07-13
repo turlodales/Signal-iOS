@@ -7,6 +7,8 @@ NS_ASSUME_NONNULL_BEGIN
 extern NSString *const kNSNotificationName_IsCensorshipCircumventionActiveDidChange;
 
 @class AFHTTPSessionManager;
+@class OWSCensorshipConfiguration;
+@class OWSURLSession;
 @class SDSKeyValueStore;
 @class TSAccountManager;
 
@@ -14,16 +16,10 @@ extern NSString *const kNSNotificationName_IsCensorshipCircumventionActiveDidCha
 
 - (SDSKeyValueStore *)keyValueStore;
 
-/// For backing up and restoring signal account information
-@property (nonatomic, readonly) AFHTTPSessionManager *storageServiceSessionManager;
-
-+ (instancetype)sharedInstance;
++ (instancetype)shared;
 
 + (instancetype)new NS_UNAVAILABLE;
 - (instancetype)init NS_UNAVAILABLE;
-
-/// For uploading and downloading blobs on the specified CDN.
-- (AFHTTPSessionManager *)cdnSessionManagerForCdnNumber:(UInt32)cdnNumber;
 
 #pragma mark - Censorship Circumvention
 
@@ -36,8 +32,7 @@ extern NSString *const kNSNotificationName_IsCensorshipCircumventionActiveDidCha
 /// should only be accessed if censorship circumvention is active.
 @property (nonatomic, readonly) NSURL *domainFrontBaseURL;
 
-/// For interacting with the Signal Service
-- (AFHTTPSessionManager *)buildSignalServiceSessionManager;
+- (OWSCensorshipConfiguration *)buildCensorshipConfiguration;
 
 @end
 

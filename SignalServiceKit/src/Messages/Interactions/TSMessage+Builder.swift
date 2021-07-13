@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -17,6 +17,8 @@ public class TSMessageBuilder: NSObject {
     public var timestamp: UInt64 = NSDate.ows_millisecondTimeStamp()
     @objc
     public var messageBody: String?
+    @objc
+    public var bodyRanges: MessageBodyRanges?
     @objc
     public var attachmentIds = [String]()
     @objc
@@ -37,6 +39,7 @@ public class TSMessageBuilder: NSObject {
     init(thread: TSThread,
          timestamp: UInt64? = nil,
          messageBody: String? = nil,
+         bodyRanges: MessageBodyRanges? = nil,
          attachmentIds: [String]? = nil,
          expiresInSeconds: UInt32 = 0,
          expireStartedAt: UInt64 = 0,
@@ -51,6 +54,7 @@ public class TSMessageBuilder: NSObject {
             self.timestamp = timestamp
         }
         self.messageBody = messageBody
+        self.bodyRanges = bodyRanges
         if let attachmentIds = attachmentIds {
             self.attachmentIds = attachmentIds
         }

@@ -1,13 +1,15 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
 import Photos
+import PhotosUI
 import PromiseKit
 
-protocol RecentPhotosDelegate: class {
+protocol RecentPhotosDelegate: AnyObject {
     var isMediaLibraryAccessGranted: Bool { get }
+    var isMediaLibraryAccessLimited: Bool { get }
     func didSelectRecentPhoto(asset: PHAsset, attachment: SignalAttachment)
 }
 
@@ -75,6 +77,7 @@ class RecentPhotosCollectionView: UICollectionView {
         backgroundColor = .clear
 
         register(RecentPhotoCell.self, forCellWithReuseIdentifier: RecentPhotoCell.reuseIdentifier)
+        register(SelectMorePhotosCell.self, forCellWithReuseIdentifier: SelectMorePhotosCell.reuseIdentifier)
 
         collectionViewFlowLayout.scrollDirection = .horizontal
         collectionViewFlowLayout.minimumLineSpacing = 6
@@ -113,6 +116,12 @@ extension RecentPhotosCollectionView: PhotoLibraryDelegate {
 extension RecentPhotosCollectionView: UICollectionViewDelegate {
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         guard fetchingAttachmentIndex == nil else { return }
+
+        guard indexPath.row < collectionContents.assetCount else {
+            owsFailDebug("Asset does not exist.")
+            return
+        }
+
         fetchingAttachmentIndex = indexPath
 
         let asset = collectionContents.asset(at: indexPath.item)
@@ -140,10 +149,21 @@ extension RecentPhotosCollectionView: UICollectionViewDataSource {
 
     public func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection sectionIdx: Int) -> Int {
         guard isReadyForPhotoLibraryAccess else { return 0 }
-        return collectionContents.assetCount
+        return collectionContents.assetCount + (recentPhotosDelegate?.isMediaLibraryAccessLimited == true ? 1 : 0)
     }
 
     public func collectionView(_ collectionView: UICollectionView, cellForItemAt indexPath: IndexPath) -> UICollectionViewCell {
+        guard indexPath.row < collectionContents.assetCount else {
+            // If the index is beyond the asset count, we should be rendering the "select more photos" prompt.
+            owsAssertDebug(recentPhotosDelegate?.isMediaLibraryAccessLimited == true)
+
+            guard let cell = collectionView.dequeueReusableCell(withReuseIdentifier: SelectMorePhotosCell.reuseIdentifier, for: indexPath) as? SelectMorePhotosCell else {
+                owsFail("cell was unexpectedly nil")
+            }
+
+            return cell
+        }
+
         guard let cell = collectionView.dequeueReusableCell(withReuseIdentifier: RecentPhotoCell.reuseIdentifier, for: indexPath) as? RecentPhotoCell else {
             owsFail("cell was unexpectedly nil")
         }
@@ -156,6 +176,90 @@ extension RecentPhotosCollectionView: UICollectionViewDataSource {
         cell.accessibilityIdentifier = UIView.accessibilityIdentifier(in: self, name: "recent-photo-\(indexPath.row)")
         #endif
         return cell
+    }
+}
+
+class SelectMorePhotosCell: UICollectionViewCell {
+
+    static let reuseIdentifier = "SelectMorePhotosCell"
+
+    override init(frame: CGRect) {
+
+        super.init(frame: frame)
+
+        clipsToBounds = true
+        layer.cornerRadius = 4
+        backgroundColor = Theme.washColor
+
+        // There's very little space for text here, so we stick with
+        // a fixed font size.
+        let fixedFont = UIFont.systemFont(ofSize: 13)
+
+        let titleLabel = UILabel()
+        titleLabel.numberOfLines = 0
+        titleLabel.lineBreakMode = .byWordWrapping
+        titleLabel.textAlignment = .center
+        titleLabel.font = fixedFont.ows_semibold
+        titleLabel.textColor = Theme.primaryTextColor
+        titleLabel.text = NSLocalizedString(
+            "IMAGE_PICKER_CHANGE_PHOTOS_TITLE",
+            comment: "Title show that the user has granted limited access to their photos and can change that in the Settings app."
+        )
+
+        let explanationLabel = UILabel()
+        explanationLabel.numberOfLines = 0
+        explanationLabel.lineBreakMode = .byWordWrapping
+        explanationLabel.textAlignment = .center
+        explanationLabel.font = fixedFont
+        explanationLabel.textColor = Theme.secondaryTextAndIconColor
+        explanationLabel.text = NSLocalizedString(
+            "IMAGE_PICKER_CHANGE_PHOTOS_EXPLANATION",
+            comment: "Explanation showing that the user has granted limited access to their photos and can change that in the Settings app."
+        )
+
+        let button = OWSFlatButton()
+        button.useDefaultCornerRadius()
+        button.setTitle(
+            title: NSLocalizedString(
+                "IMAGE_PICKER_CHANGE_PHOTOS",
+                comment: "Button that will present a view for the user to change the photos Signal has access to."
+            ),
+            font: fixedFont,
+            titleColor: .ows_white
+        )
+        button.contentEdgeInsets = UIEdgeInsets(top: 5, leading: 12, bottom: 5, trailing: 12)
+        button.setBackgroundColors(upColor: .ows_accentBlue)
+
+        let buttonContainer = UIView()
+        buttonContainer.addSubview(button)
+        button.autoPinEdge(toSuperviewEdge: .top, withInset: 4)
+        button.autoPinEdge(toSuperviewEdge: .bottom, withInset: 4)
+        button.autoHCenterInSuperview()
+        button.autoMatch(.width, to: .width, of: buttonContainer, withOffset: 0, relation: .lessThanOrEqual)
+        button.setPressedBlock {
+            guard #available(iOS 14, *),
+                let frontmostVC = CurrentAppContext().frontmostViewController() else { return }
+            PHPhotoLibrary.ows_presentLimitedLibraryPicker(from: frontmostVC)
+        }
+
+        let topSpacer = UIView.vStretchingSpacer()
+        let bottomSpacer = UIView.vStretchingSpacer()
+
+        let stackView = UIStackView(arrangedSubviews: [topSpacer, titleLabel, explanationLabel, buttonContainer, bottomSpacer])
+        stackView.axis = .vertical
+        stackView.spacing = 4
+        stackView.isLayoutMarginsRelativeArrangement = true
+        stackView.layoutMargins = UIEdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12)
+
+        topSpacer.autoMatch(.height, to: .height, of: bottomSpacer)
+
+        contentView.addSubview(stackView)
+        stackView.autoPinEdgesToSuperviewEdges()
+    }
+
+    @available(*, unavailable, message: "Unimplemented")
+    required public init?(coder aDecoder: NSCoder) {
+        notImplemented()
     }
 }
 

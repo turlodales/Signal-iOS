@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import <SignalServiceKit/Contact.h>
@@ -7,10 +7,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-extern NSString *const OWSContactsManagerSignalAccountsDidChangeNotification;
+extern NSNotificationName const OWSContactsManagerSignalAccountsDidChangeNotification;
+extern NSNotificationName const OWSContactsManagerContactsDidChangeNotification;
 
 @class AnyPromise;
-@class ImageCache;
 @class SDSAnyReadTransaction;
 @class SDSKeyValueStore;
 @class SignalAccount;
@@ -26,9 +26,6 @@ extern NSString *const OWSContactsManagerSignalAccountsDidChangeNotification;
 
 @property (nonatomic, readonly) SDSKeyValueStore *keyValueStore;
 
-@property (nonnull, readonly) ImageCache *avatarCache;
-
-
 @property (atomic, readonly) NSArray<Contact *> *allContacts;
 
 @property (atomic, readonly) NSDictionary<NSString *, Contact *> *allContactsMap;
@@ -42,9 +39,12 @@ extern NSString *const OWSContactsManagerSignalAccountsDidChangeNotification;
 - (nullable SignalAccount *)fetchSignalAccountForAddress:(SignalServiceAddress *)address
                                              transaction:(SDSAnyReadTransaction *)transaction;
 
+- (nullable NSString *)nameFromSystemContactsForAddress:(SignalServiceAddress *)address;
+- (nullable NSString *)nameFromSystemContactsForAddress:(SignalServiceAddress *)address
+                                            transaction:(SDSAnyReadTransaction *)transaction;
+
 // This will always return an instance of SignalAccount.
 - (SignalAccount *)fetchOrBuildSignalAccountForAddress:(SignalServiceAddress *)address;
-- (BOOL)hasSignalAccountForAddress:(SignalServiceAddress *)address;
 
 #pragma mark - System Contact Fetching
 
@@ -79,7 +79,6 @@ extern NSString *const OWSContactsManagerSignalAccountsDidChangeNotification;
 
 - (BOOL)isSystemContactWithPhoneNumber:(NSString *)phoneNumber;
 - (BOOL)isSystemContactWithAddress:(SignalServiceAddress *)address;
-- (BOOL)isSystemContactWithSignalAccount:(NSString *)phoneNumber;
 - (BOOL)hasNameInSystemContactsForAddress:(SignalServiceAddress *)address;
 
 /**
@@ -90,28 +89,14 @@ extern NSString *const OWSContactsManagerSignalAccountsDidChangeNotification;
                                  transaction:(SDSAnyReadTransaction *)transaction;
 - (NSString *)comparableNameForAddress:(SignalServiceAddress *)address transaction:(SDSAnyReadTransaction *)transaction;
 
-- (nullable UIImage *)systemContactOrSyncedImageForAddress:(nullable SignalServiceAddress *)address;
-- (nullable UIImage *)profileImageForAddressWithSneakyTransaction:(nullable SignalServiceAddress *)address;
 - (nullable NSData *)profileImageDataForAddressWithSneakyTransaction:(nullable SignalServiceAddress *)address;
-- (nullable UIImage *)imageForAddress:(nullable SignalServiceAddress *)address
-                          transaction:(SDSAnyReadTransaction *)transaction;
-- (nullable UIImage *)imageForAddressWithSneakyTransaction:(nullable SignalServiceAddress *)address;
 
-- (void)clearColorNameCache;
+- (nullable NSString *)phoneNumberForAddress:(SignalServiceAddress *)address
+                                 transaction:(SDSAnyReadTransaction *)transaction;
 
-// Legacy display name helpers, once the `messageRequests` feature is enabled these can go away.
-- (NSString *)legacyDisplayNameForAddress:(SignalServiceAddress *)address;
-- (NSAttributedString *)attributedLegacyDisplayNameForAddress:(SignalServiceAddress *)address
-                                                  primaryFont:(UIFont *)primaryFont
-                                                secondaryFont:(UIFont *)secondaryFont;
-- (NSAttributedString *)attributedLegacyDisplayNameForAddress:(SignalServiceAddress *)address
-                                            primaryAttributes:(NSDictionary *)primaryAttributes
-                                          secondaryAttributes:(NSDictionary *)secondaryAttributes;
-- (nullable NSString *)formattedProfileNameForAddress:(SignalServiceAddress *)address;
-- (nullable NSString *)formattedProfileNameForAddress:(SignalServiceAddress *)address
-                                          transaction:(SDSAnyReadTransaction *)transaction;
-
-- (nullable NSString *)contactOrProfileNameForAddress:(SignalServiceAddress *)address;
+- (BOOL)isKnownRegisteredUserWithSneakyTransaction:(SignalServiceAddress *)address
+    NS_SWIFT_NAME(isKnownRegisteredUserWithSneakyTransaction(address:));
+- (BOOL)isKnownRegisteredUser:(SignalServiceAddress *)address transaction:(SDSAnyReadTransaction *)transaction;
 
 @end
 

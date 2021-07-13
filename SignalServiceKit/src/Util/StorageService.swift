@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -32,7 +32,7 @@ public protocol StorageServiceManagerProtocol {
 
 // MARK: -
 
-public struct StorageService {
+public struct StorageService: Dependencies {
     public enum StorageError: OperationError {
         case assertion
         case retryableAssertion
@@ -149,25 +149,25 @@ public struct StorageService {
         }
 
         public init(identifier: StorageIdentifier, contact: StorageServiceProtoContactRecord) throws {
-            let storageRecord = StorageServiceProtoStorageRecord.builder()
+            var storageRecord = StorageServiceProtoStorageRecord.builder()
             storageRecord.setRecord(.contact(contact))
             self.init(identifier: identifier, record: try storageRecord.build())
         }
 
         public init(identifier: StorageIdentifier, groupV1: StorageServiceProtoGroupV1Record) throws {
-            let storageRecord = StorageServiceProtoStorageRecord.builder()
+            var storageRecord = StorageServiceProtoStorageRecord.builder()
             storageRecord.setRecord(.groupV1(groupV1))
             self.init(identifier: identifier, record: try storageRecord.build())
         }
 
         public init(identifier: StorageIdentifier, groupV2: StorageServiceProtoGroupV2Record) throws {
-            let storageRecord = StorageServiceProtoStorageRecord.builder()
+            var storageRecord = StorageServiceProtoStorageRecord.builder()
             storageRecord.setRecord(.groupV2(groupV2))
             self.init(identifier: identifier, record: try storageRecord.build())
         }
 
         public init(identifier: StorageIdentifier, account: StorageServiceProtoAccountRecord) throws {
-            let storageRecord = StorageServiceProtoStorageRecord.builder()
+            var storageRecord = StorageServiceProtoStorageRecord.builder()
             storageRecord.setRecord(.account(account))
             self.init(identifier: identifier, record: try storageRecord.build())
         }
@@ -198,10 +198,10 @@ public struct StorageService {
             endpoint += "/version/\(greaterThanVersion)"
         }
 
-        return storageRequest(withMethod: "GET", endpoint: endpoint).map(on: .global()) { response in
+        return storageRequest(withMethod: .get, endpoint: endpoint).map(on: .global()) { response in
             switch response.status {
             case .success:
-                let encryptedManifestContainer = try StorageServiceProtoStorageManifest.parseData(response.data)
+                let encryptedManifestContainer = try StorageServiceProtoStorageManifest(serializedData: response.data)
                 let manifestData: Data
                 do {
                     manifestData = try KeyBackupService.decrypt(
@@ -211,7 +211,7 @@ public struct StorageService {
                 } catch {
                     throw StorageError.manifestDecryptionFailed(version: encryptedManifestContainer.version)
                 }
-                return .latestManifest(try StorageServiceProtoManifestRecord.parseData(manifestData))
+                return .latestManifest(try StorageServiceProtoManifestRecord(serializedData: manifestData))
             case .notFound:
                 return .noExistingManifest
             case .noContent:
@@ -237,7 +237,7 @@ public struct StorageService {
         Logger.info("newItems: \(newItems.count), deletedIdentifiers: \(deletedIdentifiers.count), deleteAllExistingRecords: \(deleteAllExistingRecords)")
 
         return DispatchQueue.global().async(.promise) {
-            let builder = StorageServiceProtoWriteOperation.builder()
+            var builder = StorageServiceProtoWriteOperation.builder()
 
             // Encrypt the manifest
             let manifestData = try manifest.serializedData()
@@ -270,7 +270,7 @@ public struct StorageService {
 
             return try builder.buildSerializedData()
         }.then(on: .global()) { data in
-            storageRequest(withMethod: "PUT", endpoint: "v1/storage", body: data)
+            storageRequest(withMethod: .put, endpoint: "v1/storage", body: data)
         }.map(on: .global()) { response in
             switch response.status {
             case .success:
@@ -279,7 +279,7 @@ public struct StorageService {
                 return nil
             case .conflict:
                 // Our version was out of date, we should've received a copy of the latest version
-                let encryptedManifestContainer = try StorageServiceProtoStorageManifest.parseData(response.data)
+                let encryptedManifestContainer = try StorageServiceProtoStorageManifest(serializedData: response.data)
                 let manifestData: Data
                 do {
                     manifestData = try KeyBackupService.decrypt(
@@ -289,7 +289,7 @@ public struct StorageService {
                 } catch {
                     throw StorageError.manifestDecryptionFailed(version: encryptedManifestContainer.version)
                 }
-                return try StorageServiceProtoManifestRecord.parseData(manifestData)
+                return try StorageServiceProtoManifestRecord(serializedData: manifestData)
             default:
                 owsFailDebug("unexpected response \(response.status)")
                 throw StorageError.retryableAssertion
@@ -315,18 +315,18 @@ public struct StorageService {
         guard !keys.isEmpty else { return Promise.value([]) }
 
         return DispatchQueue.global().async(.promise) {
-            let builder = StorageServiceProtoReadOperation.builder()
+            var builder = StorageServiceProtoReadOperation.builder()
             builder.setReadKey(keys.map { $0.data })
             return try builder.buildSerializedData()
         }.then(on: .global()) { data in
-            storageRequest(withMethod: "PUT", endpoint: "v1/storage/read", body: data)
+            storageRequest(withMethod: .put, endpoint: "v1/storage/read", body: data)
         }.map(on: .global()) { response in
             guard case .success = response.status else {
                 owsFailDebug("unexpected response \(response.status)")
                 throw StorageError.retryableAssertion
             }
 
-            let itemsProto = try StorageServiceProtoStorageItems.parseData(response.data)
+            let itemsProto = try StorageServiceProtoStorageItems(serializedData: response.data)
 
             let keyToIdentifier = Dictionary(uniqueKeysWithValues: keys.map { ($0.data, $0) })
 
@@ -345,7 +345,7 @@ public struct StorageService {
                 } catch {
                     throw StorageError.itemDecryptionFailed(identifier: itemIdentifier)
                 }
-                let record = try StorageServiceProtoStorageRecord.parseData(itemData)
+                let record = try StorageServiceProtoStorageRecord(serializedData: itemData)
                 return StorageItem(identifier: itemIdentifier, record: record)
             }
         }
@@ -353,12 +353,8 @@ public struct StorageService {
 
     // MARK: - Dependencies
 
-    private static var sessionManager: AFHTTPSessionManager {
-        return OWSSignalService.sharedInstance().storageServiceSessionManager
-    }
-
-    private static var signalServiceClient: SignalServiceClient {
-        return SignalServiceRestClient()
+    private static var urlSession: OWSURLSession {
+        return OWSSignalService.shared().urlSessionForStorageService()
     }
 
     // MARK: - Storage Requests
@@ -392,88 +388,65 @@ public struct StorageService {
         }
     }
 
-    private static func storageRequest(withMethod method: String, endpoint: String, body: Data? = nil) -> Promise<StorageResponse> {
-        return signalServiceClient.requestStorageAuth().map { username, password in
+    private static func storageRequest(withMethod method: HTTPMethod, endpoint: String, body: Data? = nil) -> Promise<StorageResponse> {
+        return serviceClient.requestStorageAuth().map { username, password in
             Auth(username: username, password: password)
-        }.then(on: .global()) { auth in
-            Promise { resolver in
-                guard let url = URL(string: endpoint, relativeTo: sessionManager.baseURL) else {
-                    owsFailDebug("failed to initialize URL")
-                    throw StorageError.assertion
-                }
+        }.then(on: .global()) { (auth: Auth) -> Promise<OWSHTTPResponse> in
+            if method == .get { assert(body == nil) }
 
-                var error: NSError?
-                let request = sessionManager.requestSerializer.request(
-                    withMethod: method,
-                    urlString: url.absoluteString,
-                    parameters: nil,
-                    error: &error
-                )
+            let headers = [
+                "Content-Type": OWSMimeTypeProtobuf,
+                "Authorization": try auth.authHeader()
+            ]
 
-                if let error = error {
-                    owsFailDebug("failed to generate request: \(error)")
-                    throw StorageError.assertion
-                }
+            Logger.info("Storage request started: \(method) \(endpoint)")
 
-                if method == "GET" { assert(body == nil) }
+            let urlSession = self.urlSession
+            // Some 4xx responses are expected;
+            // we'll discriminate the status code ourselves.
+            urlSession.require2xxOr3xx = false
+            return urlSession.dataTaskPromise(endpoint,
+                                              method: method,
+                                              headers: headers,
+                                              body: body)
+        }.map(on: .global()) { (response: OWSHTTPResponse) -> StorageResponse in
+            let status: StorageResponse.Status
 
-                request.httpBody = body
-
-                request.setValue(OWSMimeTypeProtobuf, forHTTPHeaderField: "Content-Type")
-                request.setValue(try auth.authHeader(), forHTTPHeaderField: "Authorization")
-
-                Logger.info("Storage request started: \(method) \(endpoint)")
-
-                let task = sessionManager.dataTask(
-                    with: request as URLRequest,
-                    uploadProgress: nil,
-                    downloadProgress: nil
-                ) { response, responseObject, error in
-                    guard let response = response as? HTTPURLResponse else {
-                        Logger.info("Storage request failed: \(method) \(endpoint)")
-
-                        guard let error = error else {
-                            owsFailDebug("unexpected response type")
-                            return resolver.reject(StorageError.assertion)
-                        }
-
-                        Logger.error("response error \(error)")
-                        return resolver.reject(error)
-                    }
-
-                    let status: StorageResponse.Status
-
-                    switch response.statusCode {
-                    case 200:
-                        status = .success
-                    case 204:
-                        status = .noContent
-                    case 409:
-                        status = .conflict
-                    case 404:
-                        status = .notFound
-                    default:
-                        guard let error = error else {
-                            return resolver.reject(OWSAssertionError("error was nil for statusCode: \(response.statusCode)"))
-                        }
-                        return resolver.reject(StorageError.networkError(statusCode: response.statusCode, underlyingError: error))
-                    }
-
-                    // We should always receive response data, for some responses it will be empty.
-                    guard let responseData = responseObject as? Data else {
-                        owsFailDebug("missing response data")
-                        return resolver.reject(StorageError.retryableAssertion)
-                    }
-
-                    // The layers that use this only want to process 200 and 409 responses,
-                    // anything else we should raise as an error.
-
-                    Logger.info("Storage request succeeded: \(method) \(endpoint)")
-
-                    resolver.fulfill(StorageResponse(status: status, data: responseData))
-                }
-                task.resume()
+            switch response.statusCode {
+            case 200:
+                status = .success
+            case 204:
+                status = .noContent
+            case 409:
+                status = .conflict
+            case 404:
+                status = .notFound
+            default:
+                let error = OWSAssertionError("Unexpected statusCode: \(response.statusCode)")
+                throw StorageError.networkError(statusCode: response.statusCode, underlyingError: error)
             }
+
+            // We should always receive response data, for some responses it will be empty.
+            guard let responseData = response.responseData else {
+                owsFailDebug("missing response data")
+                throw StorageError.retryableAssertion
+            }
+
+            // The layers that use this only want to process 200 and 409 responses,
+            // anything else we should raise as an error.
+
+            Logger.info("Storage request succeeded: \(method) \(endpoint)")
+
+            return StorageResponse(status: status, data: responseData)
+        }.recover(on: .global()) { (error: Error) -> Promise<StorageResponse> in
+            if let httpStatusCode = error.httpStatusCode,
+               httpStatusCode == 401 {
+                // Not registered.
+                Logger.warn("Error: \(error)")
+            } else {
+                owsFailDebugUnlessNetworkFailure(error)
+            }
+            throw StorageError.networkError(statusCode: 0, underlyingError: error)
         }
     }
 }
@@ -489,7 +462,7 @@ public extension StorageService {
         for i in 0...4 {
             let identifier = StorageService.StorageIdentifier.generate(type: .contact)
 
-            let contactRecordBuilder = StorageServiceProtoContactRecord.builder()
+            var contactRecordBuilder = StorageServiceProtoContactRecord.builder()
             contactRecordBuilder.setServiceUuid(testNames[i])
 
             recordsInManifest.append(try! StorageItem(identifier: identifier, contact: try! contactRecordBuilder.build()))
@@ -510,7 +483,7 @@ public extension StorageService {
             }
 
             // set keys
-            let newManifestBuilder = StorageServiceProtoManifestRecord.builder(version: ourManifestVersion)
+            var newManifestBuilder = StorageServiceProtoManifestRecord.builder(version: ourManifestVersion)
             newManifestBuilder.setKeys(recordsInManifest.map { try! $0.identifier.buildRecord() })
 
             return (try! newManifestBuilder.build(), existingKeys ?? [])
@@ -625,11 +598,11 @@ public extension StorageService {
 
         // Try and update a manifest version that already exists
         }.map {
-            let oldManifestBuilder = StorageServiceProtoManifestRecord.builder(version: 0)
+            var oldManifestBuilder = StorageServiceProtoManifestRecord.builder(version: 0)
 
             let identifier = StorageIdentifier.generate(type: .contact)
 
-            let recordBuilder = StorageServiceProtoContactRecord.builder()
+            var recordBuilder = StorageServiceProtoContactRecord.builder()
             recordBuilder.setServiceUuid(testNames[0])
 
             oldManifestBuilder.setKeys([try! identifier.buildRecord()])

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -7,33 +7,29 @@ import Foundation
 @objc(OWSDateHeaderInteraction)
 public class DateHeaderInteraction: TSInteraction {
 
-    @objc
     public override func isDynamicInteraction() -> Bool {
         return true
     }
 
-    @objc
     public override func interactionType() -> OWSInteractionType {
         return .dateHeader
     }
 
-    @available(*, unavailable, message:"use other constructor instead.")
-    @objc
+    @available(*, unavailable, message: "use other constructor instead.")
     public required init(coder aDecoder: NSCoder) {
         notImplemented()
     }
 
-    @available(*, unavailable, message:"use other constructor instead.")
-    @objc
+    @available(*, unavailable, message: "use other constructor instead.")
     public required init(dictionary dictionaryValue: [String: Any]!) throws {
         notImplemented()
     }
 
-    @objc
-    public init(thread: TSThread, timestamp: UInt64, receivedAtTimestamp: UInt64) {
+    public init(thread: TSThread, timestamp: UInt64) {
+        // Include timestamp in uniqueId to ensure invariant that
+        // interactions don't move in the chat history ordering.
         super.init(uniqueId: "DateHeader_\(timestamp)",
                    timestamp: timestamp,
-                   receivedAtTimestamp: receivedAtTimestamp,
                    thread: thread)
     }
 
@@ -41,7 +37,6 @@ public class DateHeaderInteraction: TSInteraction {
         return false
     }
 
-    @objc
     public override func anyWillInsert(with transaction: SDSAnyWriteTransaction) {
         owsFailDebug("The transient interaction should not be saved in the database.")
     }

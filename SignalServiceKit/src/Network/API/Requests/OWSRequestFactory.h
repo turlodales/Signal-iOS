@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import <SignalServiceKit/RemoteAttestation.h>
@@ -9,6 +9,7 @@ NS_ASSUME_NONNULL_BEGIN
 @class ECKeyPair;
 @class OWSDevice;
 @class PreKeyRecord;
+@class ProfileValue;
 @class SMKUDAccessKey;
 @class SignalServiceAddress;
 @class SignedPreKeyRecord;
@@ -55,13 +56,16 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 
 + (TSRequest *)turnServerInfoRequest;
 
-+ (TSRequest *)allocAttachmentRequest;
++ (TSRequest *)allocAttachmentRequestV2;
+
++ (TSRequest *)allocAttachmentRequestV3;
 
 + (TSRequest *)contactsIntersectionRequestWithHashesArray:(NSArray<NSString *> *)hashes;
 
 + (TSRequest *)profileAvatarUploadFormRequest;
 
-+ (TSRequest *)registerForPushRequestWithPushIdentifier:(NSString *)identifier voipIdentifier:(NSString *)voipId;
++ (TSRequest *)registerForPushRequestWithPushIdentifier:(NSString *)identifier
+                                         voipIdentifier:(nullable NSString *)voipId;
 
 + (TSRequest *)accountWhoAmIRequest;
 
@@ -69,7 +73,8 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 
 + (TSRequest *)requestPreauthChallengeRequestWithRecipientId:(NSString *)recipientId
                                                    pushToken:(NSString *)pushToken
-    NS_SWIFT_NAME(requestPreauthChallengeRequest(recipientId:pushToken:));
+                                                 isVoipToken:(BOOL)isVoipToken
+    NS_SWIFT_NAME(requestPreauthChallengeRequest(recipientId:pushToken:isVoipToken:));
 
 + (TSRequest *)requestVerificationCodeRequestWithPhoneNumber:(NSString *)phoneNumber
                                             preauthChallenge:(nullable NSString *)preauthChallenge
@@ -79,7 +84,8 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 + (TSRequest *)submitMessageRequestWithAddress:(SignalServiceAddress *)recipientAddress
                                       messages:(NSArray *)messages
                                      timeStamp:(uint64_t)timeStamp
-                                   udAccessKey:(nullable SMKUDAccessKey *)udAccessKey;
+                                   udAccessKey:(nullable SMKUDAccessKey *)udAccessKey
+                                      isOnline:(BOOL)isOnline;
 
 + (TSRequest *)verifyPrimaryDeviceRequestWithVerificationCode:(NSString *)verificationCode
                                                   phoneNumber:(NSString *)phoneNumber
@@ -94,13 +100,15 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
                                             encryptedDeviceName:(NSData *)encryptedDeviceName
     NS_SWIFT_NAME(verifySecondaryDeviceRequest(verificationCode:phoneNumber:authKey:encryptedDeviceName:));
 
++ (TSRequest *)currencyConversionRequest NS_SWIFT_NAME(currencyConversionRequest());
+
 #pragma mark - Attributes and Capabilities
 
 + (TSRequest *)updatePrimaryDeviceAttributesRequest;
 
 + (TSRequest *)updateSecondaryDeviceCapabilitiesRequest;
 
-+ (NSDictionary<NSString *, NSNumber *> *)deviceCapabilities;
++ (NSDictionary<NSString *, NSNumber *> *)deviceCapabilitiesForLocalDevice;
 
 #pragma mark - Prekeys
 
@@ -150,7 +158,8 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 
 #pragma mark - UD
 
-+ (TSRequest *)udSenderCertificateRequest;
++ (TSRequest *)udSenderCertificateRequestWithUuidOnly:(BOOL)uuidOnly
+    NS_SWIFT_NAME(udSenderCertificateRequest(uuidOnly:));
 
 #pragma mark - Usernames
 
@@ -162,8 +171,11 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 
 + (TSRequest *)profileNameSetRequestWithEncryptedPaddedName:(NSData *)encryptedPaddedName;
 
-+ (TSRequest *)versionedProfileSetRequestWithName:(nullable NSData *)name
++ (TSRequest *)versionedProfileSetRequestWithName:(nullable ProfileValue *)name
+                                              bio:(nullable ProfileValue *)bio
+                                         bioEmoji:(nullable ProfileValue *)bioEmoji
                                         hasAvatar:(BOOL)hasAvatar
+                                   paymentAddress:(nullable ProfileValue *)paymentAddress
                                           version:(NSString *)version
                                        commitment:(NSData *)commitment;
 
@@ -176,6 +188,23 @@ typedef NS_ENUM(NSUInteger, TSVerificationTransport) { TSVerificationTransportVo
 + (TSRequest *)groupAuthenticationCredentialRequestWithFromRedemptionDays:(uint32_t)fromRedemptionDays
                                                          toRedemptionDays:(uint32_t)toRedemptionDays
     NS_SWIFT_NAME(groupAuthenticationCredentialRequest(fromRedemptionDays:toRedemptionDays:));
+
+#pragma mark - Payments
+
++ (TSRequest *)paymentsAuthenticationCredentialRequest;
+
+#pragma mark - Spam
+
++ (TSRequest *)pushChallengeRequest;
++ (TSRequest *)pushChallengeResponseWithToken:(NSString *)challengeToken;
++ (TSRequest *)recaptchChallengeResponseWithToken:(NSString *)serverToken captchaToken:(NSString *)captchaToken;
++ (TSRequest *)reportSpamFromPhoneNumber:(NSString *)phoneNumber withServerGuid:(NSString *)serverGuid;
+
+#pragma mark - Donations
+
++ (TSRequest *)createPaymentIntentWithAmount:(NSUInteger)amount
+                              inCurrencyCode:(NSString *)currencyCode
+                             withDescription:(nullable NSString *)description;
 
 @end
 

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import XCTest
@@ -26,30 +26,24 @@ class MessageSendingPerformanceTest: PerformanceBaseTest {
     let localClient = LocalSignalClient()
     let runner = TestProtocolRunner()
 
-    // MARK: - Dependencies
-
-    var tsAccountManager: TSAccountManager {
-        return SSKEnvironment.shared.tsAccountManager
-    }
-
-    var identityManager: OWSIdentityManager {
-        return SSKEnvironment.shared.identityManager
-    }
-
     // MARK: - Hooks
 
     override func setUp() {
         super.setUp()
-        MockSSKEnvironment.shared.networkManager = self.stubbableNetworkManager
+
+        let sskEnvironment = SSKEnvironment.shared as! MockSSKEnvironment
+        sskEnvironment.networkManagerRef = self.stubbableNetworkManager
 
         // use the *real* message sender to measure it's perf
-        MockSSKEnvironment.shared.messageSender = MessageSender()
-        MockSSKEnvironment.shared.messageSenderJobQueue.setup()
+        sskEnvironment.messageSenderRef = MessageSender()
+        Self.messageSenderJobQueue.setup()
+
+        try! databaseStorage.grdbStorage.setup()
 
         // Observe DB changes so we can know when all the async processing is done
         let dbObserver = BlockObserver(block: { self.dbObserverBlock?() })
         self.dbObserver = dbObserver
-        databaseStorage.add(databaseStorageObserver: dbObserver)
+        databaseStorage.appendDatabaseChangeDelegate(dbObserver)
     }
 
     override func tearDown() {
@@ -59,38 +53,22 @@ class MessageSendingPerformanceTest: PerformanceBaseTest {
 
     // MARK: -
 
-    func testYapDBPerf_messageSending_contactThread() {
-        storageCoordinator.useYDBForTests()
+    func testPerf_messageSending_contactThread() {
+        // This is an example of a performance test case.
+        try! databaseStorage.grdbStorage.setupDatabaseChangeObserver()
         measureMetrics(XCTestCase.defaultPerformanceMetrics, automaticallyStartMeasuring: false) {
             sendMessages_contactThread()
         }
+        databaseStorage.grdbStorage.testing_tearDownDatabaseChangeObserver()
     }
 
-    func testGRDBPerf_messageSending_contactThread() {
+    func testPerf_messageSending_groupThread() {
         // This is an example of a performance test case.
-        storageCoordinator.useGRDBForTests()
-        try! databaseStorage.grdbStorage.setupUIDatabase()
-        measureMetrics(XCTestCase.defaultPerformanceMetrics, automaticallyStartMeasuring: false) {
-            sendMessages_contactThread()
-        }
-        databaseStorage.grdbStorage.testing_tearDownUIDatabase()
-    }
-
-    func testYapDBPerf_messageSending_groupThread() {
-        storageCoordinator.useYDBForTests()
+        try! databaseStorage.grdbStorage.setupDatabaseChangeObserver()
         measureMetrics(XCTestCase.defaultPerformanceMetrics, automaticallyStartMeasuring: false) {
             sendMessages_groupThread()
         }
-    }
-
-    func testGRDBPerf_messageSending_groupThread() {
-        // This is an example of a performance test case.
-        storageCoordinator.useGRDBForTests()
-        try! databaseStorage.grdbStorage.setupUIDatabase()
-        measureMetrics(XCTestCase.defaultPerformanceMetrics, automaticallyStartMeasuring: false) {
-            sendMessages_groupThread()
-        }
-        databaseStorage.grdbStorage.testing_tearDownUIDatabase()
+        databaseStorage.grdbStorage.testing_tearDownDatabaseChangeObserver()
     }
 
     func sendMessages_groupThread() {
@@ -150,12 +128,11 @@ class MessageSendingPerformanceTest: PerformanceBaseTest {
     }
 
     func sendMessages(thread: TSThread) {
-        let totalNumberToSend = 50
+        let totalNumberToSend = DebugFlags.fastPerfTests ? 5 : 50
         let expectMessagesSent = expectation(description: "messages sent")
-        var hasFulfilled = false
+        let hasFulfilled = AtomicBool(false)
         let fulfillOnce = {
-            if !hasFulfilled {
-                hasFulfilled = true
+            if hasFulfilled.tryToSetFlag() {
                 expectMessagesSent.fulfill()
             }
         }
@@ -178,7 +155,9 @@ class MessageSendingPerformanceTest: PerformanceBaseTest {
             // Each is intentionally in a separate transaction, to be closer to the app experience
             // of sending each message
             self.read { transaction in
-                ThreadUtil.enqueueMessage(withText: CommonGenerator.paragraph,
+                let messageBody = MessageBody(text: CommonGenerator.paragraph,
+                                              ranges: MessageBodyRanges.empty)
+                ThreadUtil.enqueueMessage(with: messageBody,
                                           thread: thread,
                                           quotedReplyModel: nil,
                                           linkPreviewDraft: nil,
@@ -204,27 +183,31 @@ class MessageSendingPerformanceTest: PerformanceBaseTest {
     }
 }
 
-private class BlockObserver: SDSDatabaseStorageObserver {
+private class BlockObserver: DatabaseChangeDelegate {
     let block: () -> Void
     init(block: @escaping () -> Void) {
         self.block = block
     }
 
-    func databaseStorageDidUpdate(change: SDSDatabaseStorageChange) {
+    func databaseChangesWillUpdate() {
+        AssertIsOnMainThread()
+    }
+
+    func databaseChangesDidUpdate(databaseChanges: DatabaseChanges) {
         block()
     }
 
-    func databaseStorageDidUpdateExternally() {
+    func databaseChangesDidUpdateExternally() {
         block()
     }
 
-    func databaseStorageDidReset() {
+    func databaseChangesDidReset() {
         block()
     }
 }
 
 class StubbableNetworkManager: TSNetworkManager {
-    var block: (TSRequest, TSNetworkManagerSuccess, TSNetworkManagerFailure) -> Void = { request, success, failure in
+    var block: (TSRequest, TSNetworkManagerSuccess, TSNetworkManagerFailure) -> Void = { request, success, _ in
         let fakeTask = URLSessionDataTask()
         Logger.info("faking success for request: \(request)")
         success(fakeTask, nil)

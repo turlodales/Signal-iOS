@@ -1,23 +1,17 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "ProtoUtils.h"
-#import "ProfileManagerProtocol.h"
-#import "SSKEnvironment.h"
-#import "TSThread.h"
 #import <SignalCoreKit/Cryptography.h>
+#import <SignalServiceKit/ProfileManagerProtocol.h>
+#import <SignalServiceKit/ProtoUtils.h>
+#import <SignalServiceKit/SSKEnvironment.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSThread.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
 @implementation ProtoUtils
-
-#pragma mark - Dependencies
-
-+ (id<ProfileManagerProtocol>)profileManager {
-    return SSKEnvironment.shared.profileManager;
-}
 
 + (OWSAES256Key *)localProfileKey
 {

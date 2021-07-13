@@ -1,11 +1,9 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "OWSQuotedMessageView.h"
-#import "ConversationViewItem.h"
 #import "Environment.h"
-#import "OWSBubbleView.h"
 #import "Signal-Swift.h"
 #import <SignalMessaging/OWSContactsManager.h>
 #import <SignalMessaging/SignalMessaging-Swift.h>
@@ -62,7 +60,16 @@ const CGFloat kRemotelySourcedContentRowSpacing = 3;
 
     DisplayableText *_Nullable displayableQuotedText = nil;
     if (quotedMessage.body.length > 0) {
-        displayableQuotedText = [DisplayableText displayableText:quotedMessage.body];
+        __block DisplayableText *displayableText;
+        [SDSDatabaseStorage.shared readWithBlock:^(SDSAnyReadTransaction *transaction) {
+            displayableText = [DisplayableText
+                displayableTextWithMessageBody:[[MessageBody alloc]
+                                                   initWithText:quotedMessage.body
+                                                         ranges:quotedMessage.bodyRanges ?: MessageBodyRanges.empty]
+                                  mentionStyle:MentionStyleQuotedReply
+                                   transaction:transaction];
+        }];
+        displayableQuotedText = displayableText;
     }
 
     OWSQuotedMessageView *instance = [[OWSQuotedMessageView alloc]
@@ -120,9 +127,7 @@ const CGFloat kRemotelySourcedContentRowSpacing = 3;
 
 - (UIColor *)highlightColor
 {
-    BOOL isQuotingSelf = self.quotedMessage.authorAddress.isLocalAddress;
-    return (isQuotingSelf ? [self.conversationStyle bubbleColorWithIsIncoming:NO]
-                          : [self.conversationStyle quotingSelfHighlightColor]);
+    return [self.conversationStyle quotedReplyHighlightColor];
 }
 
 #pragma mark -
@@ -157,33 +162,33 @@ const CGFloat kRemotelySourcedContentRowSpacing = 3;
     self.clipsToBounds = YES;
 
     CAShapeLayer *maskLayer = [CAShapeLayer new];
-    OWSDirectionalRectCorner sharpCorners = self.sharpCorners;
+    UIRectCorner sharpCorners = [UIView uiRectCornerForOWSDirectionalRectCorner:self.sharpCorners];
 
     OWSLayerView *innerBubbleView = [[OWSLayerView alloc]
          initWithFrame:CGRectZero
         layoutCallback:^(UIView *layerView) {
-            CGRect layerFrame = layerView.bounds;
-
-            const CGFloat bubbleLeft = 0.f;
-            const CGFloat bubbleRight = layerFrame.size.width;
-            const CGFloat bubbleTop = 0.f;
-            const CGFloat bubbleBottom = layerFrame.size.height;
-
             const CGFloat sharpCornerRadius = 4;
             const CGFloat wideCornerRadius = 12;
-
-            UIBezierPath *bezierPath = [OWSBubbleView roundedBezierRectWithBubbleTop:bubbleTop
-                                                                          bubbleLeft:bubbleLeft
-                                                                        bubbleBottom:bubbleBottom
-                                                                         bubbleRight:bubbleRight
-                                                                   sharpCornerRadius:sharpCornerRadius
-                                                                    wideCornerRadius:wideCornerRadius
-                                                                        sharpCorners:sharpCorners];
-
+            UIBezierPath *bezierPath = [UIBezierPath roundedRect:layerView.bounds
+                                                    sharpCorners:sharpCorners
+                                               sharpCornerRadius:sharpCornerRadius
+                                                wideCornerRadius:wideCornerRadius];
             maskLayer.path = bezierPath.CGPath;
         }];
     innerBubbleView.layer.mask = maskLayer;
-    innerBubbleView.backgroundColor = self.conversationStyle.quotedReplyBubbleColor;
+
+    // Background
+    CVColorOrGradientView *chatColorView = [CVColorOrGradientView buildWithConversationStyle:self.conversationStyle
+                                                                               referenceView:self];
+    chatColorView.shouldDeactivateConstraints = NO;
+    [innerBubbleView addSubview:chatColorView];
+    [chatColorView autoPinEdgesToSuperviewEdges];
+    UIView *tintView = [UIView new];
+    tintView.backgroundColor = (self.conversationStyle.isDarkThemeEnabled ? [UIColor colorWithWhite:0 alpha:0.4]
+                                                                          : [UIColor colorWithWhite:1 alpha:0.6]);
+    [innerBubbleView addSubview:tintView];
+    [tintView autoPinEdgesToSuperviewEdges];
+
     [self addSubview:innerBubbleView];
     [innerBubbleView autoPinLeadingToSuperviewMarginWithInset:self.bubbleHMargin];
     [innerBubbleView autoPinTrailingToSuperviewMarginWithInset:self.bubbleHMargin];
@@ -197,10 +202,11 @@ const CGFloat kRemotelySourcedContentRowSpacing = 3;
     hStackView.spacing = self.hSpacing;
 
     UIView *stripeView = [UIView new];
-    if (self.isForPreview) {
-        stripeView.backgroundColor = [self.conversationStyle quotedReplyStripeColorWithIsIncoming:YES];
+    if (self.isForPreview || self.isOutgoing) {
+        stripeView.backgroundColor = UIColor.ows_whiteColor;
     } else {
-        stripeView.backgroundColor = [self.conversationStyle quotedReplyStripeColorWithIsIncoming:!self.isOutgoing];
+        // We render the stripe by manipulating the chat color overlay.
+        stripeView.backgroundColor = UIColor.clearColor;
     }
     [stripeView autoSetDimension:ALDimensionWidth toSize:self.stripeThickness];
     [stripeView setContentHuggingHigh];
@@ -268,7 +274,7 @@ const CGFloat kRemotelySourcedContentRowSpacing = 3;
             UIImageView *contentImageView = [self imageViewForImage:contentIcon];
             contentImageView.contentMode = UIViewContentModeScaleAspectFit;
 
-            UIView *wrapper = [UIView containerView];
+            UIView *wrapper = [UIView transparentContainer];
             [wrapper addSubview:contentImageView];
             [contentImageView autoCenterInSuperview];
             [contentImageView autoSetDimension:ALDimensionWidth toSize:self.quotedAttachmentSize * 0.5f];
@@ -283,7 +289,7 @@ const CGFloat kRemotelySourcedContentRowSpacing = 3;
         // If there's no attachment, add an empty view so that
         // the stack view's spacing serves as a margin between
         // the text views and the trailing edge.
-        UIView *emptyView = [UIView containerView];
+        UIView *emptyView = [UIView transparentContainer];
         [hStackView addArrangedSubview:emptyView];
         [emptyView setContentHuggingHigh];
         [emptyView autoSetDimension:ALDimensionWidth toSize:0.f];
@@ -424,40 +430,45 @@ const CGFloat kRemotelySourcedContentRowSpacing = 3;
 {
     OWSAssertDebug(self.quotedTextLabel);
 
-    UIColor *textColor = self.quotedTextColor;
-    SUPPRESS_DEADSTORE_WARNING(textColor);
-    UIFont *font = self.quotedTextFont;
-    SUPPRESS_DEADSTORE_WARNING(font);
-    NSString *text = @"";
+    NSAttributedString *attributedText;
 
     NSString *_Nullable fileTypeForSnippet = [self fileTypeForSnippet];
     NSString *_Nullable sourceFilename = [self.quotedMessage.sourceFilename filterStringForDisplay];
 
-    if (self.displayableQuotedText.displayText.length > 0) {
-        text = self.displayableQuotedText.displayText;
-        textColor = self.quotedTextColor;
-        font = self.quotedTextFont;
+    if (self.displayableQuotedText.displayAttributedText.length > 0) {
+        NSMutableAttributedString *mutableText = [self.displayableQuotedText.displayAttributedText mutableCopy];
+        [mutableText addAttributes:@{
+            NSFontAttributeName : self.quotedTextFont,
+            NSForegroundColorAttributeName : self.quotedTextColor
+        }
+                             range:NSMakeRange(0, mutableText.length)];
+        attributedText = mutableText;
     } else if (fileTypeForSnippet) {
-        text = fileTypeForSnippet;
-        textColor = self.fileTypeTextColor;
-        font = self.fileTypeFont;
+        attributedText = [[NSAttributedString alloc] initWithString:fileTypeForSnippet
+                                                         attributes:@{
+                                                             NSFontAttributeName : self.fileTypeFont,
+                                                             NSForegroundColorAttributeName : self.fileTypeTextColor,
+                                                         }];
     } else if (sourceFilename) {
-        text = sourceFilename;
-        textColor = self.filenameTextColor;
-        font = self.filenameFont;
+        attributedText = [[NSAttributedString alloc] initWithString:sourceFilename
+                                                         attributes:@{
+                                                             NSFontAttributeName : self.filenameFont,
+                                                             NSForegroundColorAttributeName : self.filenameTextColor,
+                                                         }];
     } else {
-        text = NSLocalizedString(
-                                 @"QUOTED_REPLY_TYPE_ATTACHMENT", @"Indicates this message is a quoted reply to an attachment of unknown type.");
-        textColor = self.fileTypeTextColor;
-        font = self.fileTypeFont;
+        attributedText = [[NSAttributedString alloc]
+            initWithString:NSLocalizedString(@"QUOTED_REPLY_TYPE_ATTACHMENT",
+                               @"Indicates this message is a quoted reply to an attachment of unknown type.")
+                attributes:@{
+                    NSFontAttributeName : self.fileTypeFont,
+                    NSForegroundColorAttributeName : self.fileTypeTextColor,
+                }];
     }
 
     self.quotedTextLabel.numberOfLines = self.isForPreview ? 1 : 2;
     self.quotedTextLabel.lineBreakMode = NSLineBreakByTruncatingTail;
-    self.quotedTextLabel.text = text;
     self.quotedTextLabel.textAlignment = self.displayableQuotedText.displayTextNaturalAlignment;
-    self.quotedTextLabel.textColor = textColor;
-    self.quotedTextLabel.font = font;
+    self.quotedTextLabel.attributedText = attributedText;
 
     return self.quotedTextLabel;
 }
@@ -494,8 +505,13 @@ const CGFloat kRemotelySourcedContentRowSpacing = 3;
         return NSLocalizedString(
             @"QUOTED_REPLY_TYPE_IMAGE", @"Indicates this message is a quoted reply to an image file.");
     } else if ([MIMETypeUtil isAnimated:contentType]) {
-        return NSLocalizedString(
-            @"QUOTED_REPLY_TYPE_GIF", @"Indicates this message is a quoted reply to animated GIF file.");
+        if ([contentType caseInsensitiveCompare:OWSMimeTypeImageGif] == NSOrderedSame) {
+            return NSLocalizedString(
+                @"QUOTED_REPLY_TYPE_GIF", @"Indicates this message is a quoted reply to animated GIF file.");
+        } else {
+            return NSLocalizedString(
+                @"QUOTED_REPLY_TYPE_IMAGE", @"Indicates this message is a quoted reply to an image file.");
+        }
     }
     return nil;
 }
@@ -532,12 +548,7 @@ const CGFloat kRemotelySourcedContentRowSpacing = 3;
             @"QUOTED_REPLY_AUTHOR_INDICATOR_YOU", @"message header label when someone else is quoting you");
     } else {
         OWSContactsManager *contactsManager = Environment.shared.contactsManager;
-        NSString *quotedAuthor;
-        if (RemoteConfig.messageRequests) {
-            quotedAuthor = [contactsManager displayNameForAddress:self.quotedMessage.authorAddress];
-        } else {
-            quotedAuthor = [contactsManager legacyDisplayNameForAddress:self.quotedMessage.authorAddress];
-        }
+        NSString *quotedAuthor = [contactsManager displayNameForAddress:self.quotedMessage.authorAddress];
         quotedAuthorText = [NSString
             stringWithFormat:
                 NSLocalizedString(@"QUOTED_REPLY_AUTHOR_INDICATOR_FORMAT",

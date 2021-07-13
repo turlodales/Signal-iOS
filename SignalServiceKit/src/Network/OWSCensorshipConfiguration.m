@@ -1,13 +1,13 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSCensorshipConfiguration.h"
-#import "OWSCountryMetadata.h"
-#import "OWSError.h"
-#import "TSConstants.h"
 #import <AFNetworking/AFHTTPSessionManager.h>
+#import <SignalServiceKit/OWSCensorshipConfiguration.h>
+#import <SignalServiceKit/OWSCountryMetadata.h>
+#import <SignalServiceKit/OWSError.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
+#import <SignalServiceKit/TSConstants.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -136,7 +136,12 @@ NSString *const OWSFrontingHost_Default = @"www.google.com";
     } else if ([domain isEqualToString:OWSFrontingHost_GoogleUAE]) {
         return self.googlePinningPolicy;
     } else {
-        OWSFailDebug(@"unknown pinning domain.");
+        OWSLogVerbose(@"domain: %@", domain);
+        if ([domain containsString:@".google."]) {
+            OWSLogWarn(@"Unknown pinning domain.");
+        } else {
+            OWSFailDebug(@"Unknown pinning domain.");
+        }
         return self.googlePinningPolicy;
     }
 }

@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -8,20 +8,12 @@ import PromiseKit
 @objc
 public extension GroupManager {
 
-    // MARK: - Dependencies
-
-    private class var databaseStorage: SDSDatabaseStorage {
-        return SDSDatabaseStorage.shared
-    }
-
-    // MARK: -
-
     static func leaveGroupOrDeclineInviteAsyncWithUI(groupThread: TSGroupThread,
                                                      fromViewController: UIViewController,
                                                      replacementAdminUuid: UUID? = nil,
                                                      success: (() -> Void)?) {
 
-        guard groupThread.isLocalUserPendingOrNonPendingMember else {
+        guard groupThread.isLocalUserMemberOfAnyKind else {
             owsFailDebug("unexpectedly trying to leave group for which we're not a member.")
             return
         }

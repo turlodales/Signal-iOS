@@ -1,9 +1,9 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
-#import "OWSVerificationStateChangeMessage.h"
-#import "OWSDisappearingMessagesConfiguration.h"
+#import <SignalServiceKit/OWSDisappearingMessagesConfiguration.h>
+#import <SignalServiceKit/OWSVerificationStateChangeMessage.h>
 #import <SignalServiceKit/SignalServiceKit-Swift.h>
 
 NS_ASSUME_NONNULL_BEGIN
@@ -56,6 +56,7 @@ NS_ASSUME_NONNULL_BEGIN
                   uniqueThreadId:(NSString *)uniqueThreadId
                    attachmentIds:(NSArray<NSString *> *)attachmentIds
                             body:(nullable NSString *)body
+                      bodyRanges:(nullable MessageBodyRanges *)bodyRanges
                     contactShare:(nullable OWSContact *)contactShare
                  expireStartedAt:(uint64_t)expireStartedAt
                        expiresAt:(uint64_t)expiresAt
@@ -84,6 +85,7 @@ NS_ASSUME_NONNULL_BEGIN
                     uniqueThreadId:uniqueThreadId
                      attachmentIds:attachmentIds
                               body:body
+                        bodyRanges:bodyRanges
                       contactShare:contactShare
                    expireStartedAt:expireStartedAt
                          expiresAt:expiresAt

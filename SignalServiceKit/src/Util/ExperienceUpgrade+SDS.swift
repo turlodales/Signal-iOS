@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -142,6 +142,36 @@ extension ExperienceUpgrade: SDSModel {
     }
 }
 
+// MARK: - DeepCopyable
+
+extension ExperienceUpgrade: DeepCopyable {
+
+    public func deepCopy() throws -> AnyObject {
+        // Any subclass can be cast to it's superclass,
+        // so the order of this switch statement matters.
+        // We need to do a "depth first" search by type.
+        guard let id = self.grdbId?.int64Value else {
+            throw OWSAssertionError("Model missing grdbId.")
+        }
+
+        do {
+            let modelToCopy = self
+            assert(type(of: modelToCopy) == ExperienceUpgrade.self)
+            let uniqueId: String = modelToCopy.uniqueId
+            let firstViewedTimestamp: Double = modelToCopy.firstViewedTimestamp
+            let isComplete: Bool = modelToCopy.isComplete
+            let lastSnoozedTimestamp: Double = modelToCopy.lastSnoozedTimestamp
+
+            return ExperienceUpgrade(grdbId: id,
+                                     uniqueId: uniqueId,
+                                     firstViewedTimestamp: firstViewedTimestamp,
+                                     isComplete: isComplete,
+                                     lastSnoozedTimestamp: lastSnoozedTimestamp)
+        }
+
+    }
+}
+
 // MARK: - Table Metadata
 
 extension ExperienceUpgradeSerializer {
@@ -276,9 +306,11 @@ public extension ExperienceUpgrade {
 
 @objc
 public class ExperienceUpgradeCursor: NSObject {
+    private let transaction: GRDBReadTransaction
     private let cursor: RecordCursor<ExperienceUpgradeRecord>?
 
-    init(cursor: RecordCursor<ExperienceUpgradeRecord>?) {
+    init(transaction: GRDBReadTransaction, cursor: RecordCursor<ExperienceUpgradeRecord>?) {
+        self.transaction = transaction
         self.cursor = cursor
     }
 
@@ -320,10 +352,10 @@ public extension ExperienceUpgrade {
         let database = transaction.database
         do {
             let cursor = try ExperienceUpgradeRecord.fetchCursor(database)
-            return ExperienceUpgradeCursor(cursor: cursor)
+            return ExperienceUpgradeCursor(transaction: transaction, cursor: cursor)
         } catch {
             owsFailDebug("Read failed: \(error)")
-            return ExperienceUpgradeCursor(cursor: nil)
+            return ExperienceUpgradeCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -333,8 +365,6 @@ public extension ExperienceUpgrade {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ExperienceUpgrade.ydb_fetch(uniqueId: uniqueId, transaction: ydbTransaction)
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT * FROM \(ExperienceUpgradeRecord.databaseTableName) WHERE \(experienceUpgradeColumn: .uniqueId) = ?"
             return grdbFetchOne(sql: sql, arguments: [uniqueId], transaction: grdbTransaction)
@@ -365,28 +395,20 @@ public extension ExperienceUpgrade {
                             batchSize: UInt,
                             block: @escaping (ExperienceUpgrade, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ExperienceUpgrade.ydb_enumerateCollectionObjects(with: ydbTransaction) { (object, stop) in
-                guard let value = object as? ExperienceUpgrade else {
-                    owsFailDebug("unexpected object: \(type(of: object))")
-                    return
-                }
-                block(value, stop)
-            }
         case .grdbRead(let grdbTransaction):
-            do {
-                let cursor = ExperienceUpgrade.grdbFetchCursor(transaction: grdbTransaction)
-                try Batching.loop(batchSize: batchSize,
-                                  loopBlock: { stop in
-                                      guard let value = try cursor.next() else {
+            let cursor = ExperienceUpgrade.grdbFetchCursor(transaction: grdbTransaction)
+            Batching.loop(batchSize: batchSize,
+                          loopBlock: { stop in
+                                do {
+                                    guard let value = try cursor.next() else {
                                         stop.pointee = true
                                         return
-                                      }
-                                      block(value, stop)
-                })
-            } catch let error {
-                owsFailDebug("Couldn't fetch models: \(error)")
-            }
+                                    }
+                                    block(value, stop)
+                                } catch let error {
+                                    owsFailDebug("Couldn't fetch model: \(error)")
+                                }
+                              })
         }
     }
 
@@ -414,10 +436,6 @@ public extension ExperienceUpgrade {
                                      batchSize: UInt,
                                      block: @escaping (String, UnsafeMutablePointer<ObjCBool>) -> Void) {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            ydbTransaction.enumerateKeys(inCollection: ExperienceUpgrade.collection()) { (uniqueId, stop) in
-                block(uniqueId, stop)
-            }
         case .grdbRead(let grdbTransaction):
             grdbEnumerateUniqueIds(transaction: grdbTransaction,
                                    sql: """
@@ -449,8 +467,6 @@ public extension ExperienceUpgrade {
 
     class func anyCount(transaction: SDSAnyReadTransaction) -> UInt {
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.numberOfKeys(inCollection: ExperienceUpgrade.collection())
         case .grdbRead(let grdbTransaction):
             return ExperienceUpgradeRecord.ows_fetchCount(grdbTransaction.database)
         }
@@ -460,8 +476,6 @@ public extension ExperienceUpgrade {
     //          in their anyWillRemove(), anyDidRemove() methods.
     class func anyRemoveAllWithoutInstantation(transaction: SDSAnyWriteTransaction) {
         switch transaction.writeTransaction {
-        case .yapWrite(let ydbTransaction):
-            ydbTransaction.removeAllObjects(inCollection: ExperienceUpgrade.collection())
         case .grdbWrite(let grdbTransaction):
             do {
                 try ExperienceUpgradeRecord.deleteAll(grdbTransaction.database)
@@ -510,8 +524,6 @@ public extension ExperienceUpgrade {
         assert(uniqueId.count > 0)
 
         switch transaction.readTransaction {
-        case .yapRead(let ydbTransaction):
-            return ydbTransaction.hasObject(forKey: uniqueId, inCollection: ExperienceUpgrade.collection())
         case .grdbRead(let grdbTransaction):
             let sql = "SELECT EXISTS ( SELECT 1 FROM \(ExperienceUpgradeRecord.databaseTableName) WHERE \(experienceUpgradeColumn: .uniqueId) = ? )"
             let arguments: StatementArguments = [uniqueId]
@@ -529,11 +541,11 @@ public extension ExperienceUpgrade {
         do {
             let sqlRequest = SQLRequest<Void>(sql: sql, arguments: arguments, cached: true)
             let cursor = try ExperienceUpgradeRecord.fetchCursor(transaction.database, sqlRequest)
-            return ExperienceUpgradeCursor(cursor: cursor)
+            return ExperienceUpgradeCursor(transaction: transaction, cursor: cursor)
         } catch {
-            Logger.error("sql: \(sql)")
+            Logger.verbose("sql: \(sql)")
             owsFailDebug("Read failed: \(error)")
-            return ExperienceUpgradeCursor(cursor: nil)
+            return ExperienceUpgradeCursor(transaction: transaction, cursor: nil)
         }
     }
 
@@ -583,3 +595,20 @@ class ExperienceUpgradeSerializer: SDSSerializer {
         return ExperienceUpgradeRecord(delegate: model, id: id, recordType: recordType, uniqueId: uniqueId, firstViewedTimestamp: firstViewedTimestamp, lastSnoozedTimestamp: lastSnoozedTimestamp, isComplete: isComplete)
     }
 }
+
+// MARK: - Deep Copy
+
+#if TESTABLE_BUILD
+@objc
+public extension ExperienceUpgrade {
+    // We're not using this method at the moment,
+    // but we might use it for validation of
+    // other deep copy methods.
+    func deepCopyUsingRecord() throws -> ExperienceUpgrade {
+        guard let record = try asRecord() as? ExperienceUpgradeRecord else {
+            throw OWSAssertionError("Could not convert to record.")
+        }
+        return try ExperienceUpgrade.fromRecord(record)
+    }
+}
+#endif

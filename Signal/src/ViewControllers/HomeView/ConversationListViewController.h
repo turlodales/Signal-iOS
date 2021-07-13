@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2019 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "ConversationViewController.h"
@@ -10,7 +10,8 @@ NS_ASSUME_NONNULL_BEGIN
 
 typedef NS_ENUM(NSInteger, ConversationListViewControllerSection) {
     ConversationListViewControllerSectionReminders,
-    ConversationListViewControllerSectionConversations,
+    ConversationListViewControllerSectionPinned,
+    ConversationListViewControllerSectionUnpinned,
     ConversationListViewControllerSectionArchiveButton,
 };
 
@@ -28,7 +29,6 @@ typedef NS_ENUM(NSInteger, ConversationListViewControllerSection) {
 // Used by force-touch Springboard icon shortcut and key commands
 - (void)showNewConversationView;
 - (void)showNewGroupView;
-- (void)showAppSettings;
 - (void)focusSearch;
 - (void)selectPreviousConversation;
 - (void)selectNextConversation;
@@ -36,6 +36,22 @@ typedef NS_ENUM(NSInteger, ConversationListViewControllerSection) {
 - (void)unarchiveSelectedConversation;
 
 @property (nonatomic) TSThread *lastViewedThread;
+
+// For use by Swift extension.
+- (void)updateBarButtonItems;
+- (void)updateReminderViews;
+- (void)updateViewState;
+- (void)updateShouldObserveDBModifications;
+- (void)reloadTableViewData;
+- (void)updateFirstConversationLabel;
+- (void)presentGetStartedBannerIfNecessary;
+- (void)updateAvatars;
+- (void)resetMappings;
+- (void)updateUnreadPaymentNotificationsCountWithSneakyTransaction;
+- (void)anyUIDBDidUpdateWithUpdatedThreadIds:(NSSet<NSString *> *)updatedItemIds;
+
+@property (nonatomic) BOOL shouldObserveDBModifications;
+@property (nonatomic) UIView *firstConversationCueView;
 
 @end
 

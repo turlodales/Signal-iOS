@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 import Foundation
@@ -7,13 +7,6 @@ import MultipeerConnectivity
 
 @objc
 class ConversationSplitViewController: UISplitViewController, ConversationSplit {
-
-    // MARK: - Dependencies
-
-    var databaseStorage: SDSDatabaseStorage { .shared }
-    var deviceTransferService: DeviceTransferService { .shared }
-
-    // MARK: -
 
     fileprivate var deviceTransferNavController: DeviceTransferNavigationController?
 
@@ -25,6 +18,8 @@ class ConversationSplitViewController: UISplitViewController, ConversationSplit 
     private lazy var lastActiveInterfaceOrientation = CurrentAppContext().interfaceOrientation
 
     @objc private(set) weak var selectedConversationViewController: ConversationViewController?
+
+    weak var navigationTransitionDelegate: UINavigationControllerDelegate?
 
     /// The thread, if any, that is currently presented in the view hieararchy. It may be currently
     /// covered by a modal presentation or a pushed view controller.
@@ -137,8 +132,8 @@ class ConversationSplitViewController: UISplitViewController, ConversationSplit 
             // and everything it pushed to the navigation stack from the nav controller. We don't want
             // to just pop to root as we might have opened this conversation from the archive.
             if let selectedConversationIndex = primaryNavController.viewControllers.firstIndex(of: selectedConversationViewController) {
-                let trimmedViewControllers = Array(primaryNavController.viewControllers[0..<selectedConversationIndex])
-                primaryNavController.setViewControllers(trimmedViewControllers, animated: animated)
+                let targetViewController = primaryNavController.viewControllers[max(0, selectedConversationIndex-1)]
+                primaryNavController.popToViewController(targetViewController, animated: animated)
             }
         } else {
             viewControllers[1] = detailPlaceholderVC
@@ -178,8 +173,10 @@ class ConversationSplitViewController: UISplitViewController, ConversationSplit 
         // can maintain its scroll position when navigating back.
         conversationListVC.lastViewedThread = thread
 
-        let threadViewModel = databaseStorage.uiRead {
-            return ThreadViewModel(thread: thread, transaction: $0)
+        let threadViewModel = databaseStorage.read {
+            return ThreadViewModel(thread: thread,
+                                   forConversationList: false,
+                                   transaction: $0)
         }
         let vc = ConversationViewController(threadViewModel: threadViewModel, action: action, focusMessageId: focusMessageId)
 
@@ -196,6 +193,16 @@ class ConversationSplitViewController: UISplitViewController, ConversationSplit 
             showDetailViewController(detailVC, sender: self)
         } else {
             UIView.performWithoutAnimation { showDetailViewController(detailVC, sender: self) }
+        }
+    }
+
+    override var shouldAutorotate: Bool {
+        if let presentedViewController = presentedViewController {
+            return presentedViewController.shouldAutorotate
+        } else if let selectedConversationViewController = selectedConversationViewController {
+            return selectedConversationViewController.shouldAutorotate
+        } else {
+            return super.shouldAutorotate
         }
     }
 
@@ -227,7 +234,16 @@ class ConversationSplitViewController: UISplitViewController, ConversationSplit 
             viewControllersToDisplay.append(vc)
             primaryNavController.setViewControllers(viewControllersToDisplay, animated: true)
         } else {
-            viewControllers[1] = vc
+            // There is a race condition at app launch where `isCollapsed` cannot be
+            // relied upon. This leads to a crash where viewControllers is empty, so
+            // setting index 1 is not possible. We know what the primary view controller
+            // should always be, so we attempt to fill it in when that happens. The only
+            // ways this could really be happening is if, somehow, before `viewControllers`
+            // is set in init this method is getting called OR this `viewControllers` is
+            // returning stale information. The latter seems most plausible, but is near
+            // impossible to reproduce.
+            owsAssertDebug(viewControllers.first == primaryNavController)
+            viewControllers = [primaryNavController, vc]
         }
 
         // If the detail VC is a nav controller, we want to keep track of
@@ -408,6 +424,10 @@ class ConversationSplitViewController: UISplitViewController, ConversationSplit 
         conversationListVC.showAppSettings()
     }
 
+    func showAppSettingsWithMode(_ mode: ShowAppSettingsMode) {
+        conversationListVC.showAppSettings(mode: mode)
+    }
+
     @objc func focusSearch() {
         conversationListVC.focusSearch()
     }
@@ -516,7 +536,7 @@ extension ConversationSplitViewController: UISplitViewControllerDelegate {
             // Don't ever allow a conversation view controller to be transfered on the master
             // stack when expanding from collapsed mode. This should never happen.
             guard let vc = vc as? ConversationViewController else { return true }
-            owsFailDebug("Unexpected conversation in view hierarchy: \(vc.thread)")
+            owsFailDebug("Unexpected conversation in view hierarchy: \(vc.thread.uniqueId)")
             return false
         }
 
@@ -536,6 +556,22 @@ extension ConversationSplitViewController: UINavigationControllerDelegate {
         // the current conversation is no longer selected.
         guard isCollapsed, viewController is ConversationListViewController else { return }
         selectedConversationViewController = nil
+    }
+
+    func navigationController(_ navigationController: UINavigationController, interactionControllerFor animationController: UIViewControllerAnimatedTransitioning) -> UIViewControllerInteractiveTransitioning? {
+        return navigationTransitionDelegate?.navigationController?(
+            navigationController,
+            interactionControllerFor: animationController
+        )
+    }
+
+    func navigationController(_ navigationController: UINavigationController, animationControllerFor operation: UINavigationController.Operation, from fromVC: UIViewController, to toVC: UIViewController) -> UIViewControllerAnimatedTransitioning? {
+        return navigationTransitionDelegate?.navigationController?(
+            navigationController,
+            animationControllerFor: operation,
+            from: fromVC,
+            to: toVC
+        )
     }
 }
 
@@ -568,7 +604,7 @@ private class NoSelectedConversationViewController: OWSViewController {
         logoImageView.autoHCenterInSuperview()
         logoImageView.autoSetDimension(.height, toSize: 72)
 
-        titleLabel.font = UIFont.ows_dynamicTypeBody.ows_semibold()
+        titleLabel.font = UIFont.ows_dynamicTypeBody.ows_semibold
         titleLabel.textAlignment = .center
         titleLabel.numberOfLines = 0
         titleLabel.lineBreakMode = .byWordWrapping
@@ -597,7 +633,8 @@ private class NoSelectedConversationViewController: OWSViewController {
         applyTheme()
     }
 
-    @objc func applyTheme() {
+    @objc
+    override func applyTheme() {
         view.backgroundColor = Theme.backgroundColor
         titleLabel.textColor = Theme.primaryTextColor
         bodyLabel.textColor = Theme.secondaryTextAndIconColor

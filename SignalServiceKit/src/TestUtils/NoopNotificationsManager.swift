@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 @objc
@@ -17,8 +17,8 @@ public class NoopNotificationsManager: NSObject, NotificationsProtocol {
         Logger.warn("skipping notification for: \(errorMessage.description)")
     }
 
-    public func notifyUser(for infoMessage: TSInfoMessage, thread: TSThread, wantsSound: Bool, transaction: SDSAnyWriteTransaction) {
-        Logger.warn("skipping notification for: \(infoMessage.description)")
+    public func notifyUser(for previewableInteraction: TSInteraction & OWSPreviewText, thread: TSThread, wantsSound: Bool, transaction: SDSAnyWriteTransaction) {
+        Logger.warn("skipping notification for: \(previewableInteraction.description)")
     }
 
     public func notifyUser(for errorMessage: ThreadlessErrorMessage, transaction: SDSAnyWriteTransaction) {
@@ -35,9 +35,5 @@ public class NoopNotificationsManager: NSObject, NotificationsProtocol {
 
     public func cancelNotifications(reactionId: String) {
         Logger.warn("cancelNotifications for reactionId: \(reactionId)")
-    }
-
-    public func notifyUserForGRDBMigration() {
-        Logger.warn("notifyUserForGRDBMigration")
     }
 }

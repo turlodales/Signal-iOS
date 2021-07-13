@@ -1,5 +1,5 @@
 //
-//  Copyright (c) 2020 Open Whisper Systems. All rights reserved.
+//  Copyright (c) 2021 Open Whisper Systems. All rights reserved.
 //
 
 #import "BlockListUIUtils.h"
@@ -18,28 +18,6 @@ NS_ASSUME_NONNULL_BEGIN
 typedef void (^BlockAlertCompletionBlock)(ActionSheetAction *action);
 
 @implementation BlockListUIUtils
-
-#pragma mark - Dependencies
-
-+ (SDSDatabaseStorage *)databaseStorage
-{
-    return SDSDatabaseStorage.shared;
-}
-
-+ (OWSBlockingManager *)blockingManager
-{
-    return OWSBlockingManager.sharedManager;
-}
-
-+ (OWSMessageSender *)messageSender
-{
-    return SSKEnvironment.shared.messageSender;
-}
-
-+ (OWSContactsManager *)contactsManager
-{
-    return Environment.shared.contactsManager;
-}
 
 #pragma mark - Block
 
@@ -206,7 +184,7 @@ typedef void (^BlockAlertCompletionBlock)(ActionSheetAction *action);
 
     for (SignalServiceAddress *address in addresses) {
         OWSAssertDebug(address.isValid);
-        [self.blockingManager addBlockedAddress:address wasLocallyInitiated:YES];
+        [self.blockingManager addBlockedAddress:address blockMode:BlockMode_LocalShouldLeaveGroups];
     }
 
     [self showOkAlertWithTitle:NSLocalizedString(
@@ -234,8 +212,9 @@ typedef void (^BlockAlertCompletionBlock)(ActionSheetAction *action);
                                                     success:^{
                                                         // block the group regardless of the ability to deliver the
                                                         // "leave group" message.
-                                                        [self.blockingManager addBlockedGroup:groupThread.groupModel
-                                                                          wasLocallyInitiated:YES];
+                                                        [self.blockingManager
+                                                            addBlockedGroup:groupThread.groupModel
+                                                                  blockMode:BlockMode_LocalShouldLeaveGroups];
 
                                                         NSString *alertTitle = NSLocalizedString(
                                                             @"BLOCK_LIST_VIEW_BLOCKED_GROUP_ALERT_TITLE",
@@ -446,7 +425,7 @@ typedef void (^BlockAlertCompletionBlock)(ActionSheetAction *action);
     ActionSheetController *alert = [[ActionSheetController alloc] initWithTitle:title message:message];
 
     ActionSheetAction *okAction =
-        [[ActionSheetAction alloc] initWithTitle:NSLocalizedString(@"OK", nil)
+        [[ActionSheetAction alloc] initWithTitle:CommonStrings.okButton
                          accessibilityIdentifier:ACCESSIBILITY_IDENTIFIER_WITH_NAME(self, @"ok")
                                            style:ActionSheetActionStyleDefault
                                          handler:completionBlock];
